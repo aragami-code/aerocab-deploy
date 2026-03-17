@@ -16,6 +16,9 @@ COPY backend/ ./backend/
 # Install all dependencies from root (resolves workspace: protocol)
 RUN pnpm install --no-frozen-lockfile
 
+# Build shared package first (so @aerocab/shared resolves to compiled JS)
+RUN pnpm --filter @aerocab/shared build
+
 # Generate Prisma client
 RUN pnpm --filter @aerocab/api exec prisma generate
 
@@ -43,4 +46,4 @@ WORKDIR /app/backend
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "prisma migrate deploy && node dist/backend/src/main"]
