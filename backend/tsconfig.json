@@ -1,12 +1,21 @@
 {
-  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2017",
+    "lib": ["ES2017"],
+    "strict": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "sourceMap": true,
+    "declaration": true,
     "outDir": "./dist",
     "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@aerocab/shared": ["../../packages/shared/src/index.ts"]
+      "@aerocab/shared": ["../packages/shared/src/index.ts"]
     },
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true
