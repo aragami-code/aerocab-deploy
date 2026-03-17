@@ -1,0 +1,268 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===== Enums =====
+
+enum UserRole {
+  passenger
+  driver
+  admin
+}
+
+enum UserStatus {
+  active
+  suspended
+  deleted
+}
+
+enum DriverVerificationStatus {
+  pending
+  approved
+  rejected
+  suspended
+}
+
+enum DocumentType {
+  cni_front
+  cni_back
+  license
+  registration
+  vehicle_photo
+}
+
+enum DocumentStatus {
+  pending
+  approved
+  rejected
+}
+
+enum FlightSource {
+  api
+  manual
+}
+
+enum AccessPassStatus {
+  pending
+  active
+  expired
+  failed
+}
+
+enum ConversationStatus {
+  active
+  closed
+}
+
+enum ReportStatus {
+  open
+  investigating
+  resolved
+  dismissed
+}
+
+// ===== Models =====
+
+model User {
+  id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone     String     @unique
+  name      String?
+  email     String?
+  role      UserRole   @default(passenger)
+  status    UserStatus @default(active)
+  avatarUrl String?    @map("avatar_url")
+  language  String     @default("fr")
+  fcmToken  String?    @map("fcm_token")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  driverProfile         DriverProfile?
+  flights               Flight[]
+  accessPasses          AccessPass[]
+  passengerConversations Conversation[] @relation("PassengerConversations")
+  driverConversations   Conversation[] @relation("DriverConversations")
+  sentMessages          Message[]
+  ratingsGiven          Rating[]       @relation("RatingsGiven")
+  ratingsReceived       Rating[]       @relation("RatingsReceived")
+  reportsSubmitted      Report[]       @relation("ReportsSubmitted")
+  reportsReceived       Report[]       @relation("ReportsReceived")
+
+  @@map("users")
+}
+
+model DriverProfile {
+  id             String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String                   @unique @map("user_id") @db.Uuid
+  vehicleBrand   String                   @map("vehicle_brand")
+  vehicleModel   String                   @map("vehicle_model")
+  vehicleColor   String                   @map("vehicle_color")
+  vehiclePlate   String                   @map("vehicle_plate")
+  vehicleYear    Int?                     @map("vehicle_year")
+  languages      String[]                 @default(["fr"])
+  status         DriverVerificationStatus @default(pending)
+  ratingAvg      Float                    @default(0) @map("rating_avg")
+  ratingCount    Int                      @default(0) @map("rating_count")
+  totalRides     Int                      @default(0) @map("total_rides")
+  isAvailable    Boolean                  @default(false) @map("is_available")
+  latitude       Float?
+  longitude      Float?
+  locationUpdatedAt DateTime?             @map("location_updated_at")
+  verifiedAt     DateTime?                @map("verified_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents DriverDocument[]
+
+  @@index([isAvailable, latitude, longitude])
+  @@index([status])
+  @@map("driver_profiles")
+}
+
+model DriverDocument {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  driverProfileId String        @map("driver_profile_id") @db.Uuid
+  type           DocumentType
+  fileUrl        String         @map("file_url")
+  status         DocumentStatus @default(pending)
+  rejectionReason String?       @map("rejection_reason")
+  verifiedAt     DateTime?      @map("verified_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  driverProfile DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([driverProfileId, type])
+  @@map("driver_documents")
+}
+
+model Flight {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String       @map("user_id") @db.Uuid
+  flightNumber     String?      @map("flight_number")
+  airline          String?
+  origin           String?
+  destination      String?
+  arrivalAirport   String       @map("arrival_airport")
+  scheduledArrival DateTime     @map("scheduled_arrival")
+  actualArrival    DateTime?    @map("actual_arrival")
+  source           FlightSource @default(manual)
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@index([userId])
+  @@index([flightNumber])
+  @@map("flights")
+}
+
+model AccessPass {
+  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String           @map("user_id") @db.Uuid
+  amount       Int              @default(2500)
+  currency     String           @default("XAF")
+  status       AccessPassStatus @default(pending)
+  paymentRef   String?          @map("payment_ref")
+  paymentMethod String?         @map("payment_method")
+  activatedAt  DateTime?        @map("activated_at")
+  expiresAt    DateTime?        @map("expires_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([expiresAt])
+  @@map("access_passes")
+}
+
+model Conversation {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  passengerId String             @map("passenger_id") @db.Uuid
+  driverId    String             @map("driver_id") @db.Uuid
+  flightId    String?            @map("flight_id") @db.Uuid
+  status      ConversationStatus @default(active)
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  passenger User     @relation("PassengerConversations", fields: [passengerId], references: [id])
+  driver    User     @relation("DriverConversations", fields: [driverId], references: [id])
+  flight    Flight?  @relation(fields: [flightId], references: [id])
+  messages  Message[]
+  ratings   Rating[]
+
+  @@unique([passengerId, driverId, flightId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  senderId       String   @map("sender_id") @db.Uuid
+  content        String
+  readAt         DateTime? @map("read_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model Rating {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fromUserId     String   @map("from_user_id") @db.Uuid
+  toUserId       String   @map("to_user_id") @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  score          Int
+  comment        String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  fromUser     User         @relation("RatingsGiven", fields: [fromUserId], references: [id])
+  toUser       User         @relation("RatingsReceived", fields: [toUserId], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@unique([fromUserId, conversationId])
+  @@map("ratings")
+}
+
+model Report {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reporterId     String       @map("reporter_id") @db.Uuid
+  reportedId     String       @map("reported_id") @db.Uuid
+  conversationId String?      @map("conversation_id") @db.Uuid
+  reason         String
+  status         ReportStatus @default(open)
+  resolution     String?
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  reporter User @relation("ReportsSubmitted", fields: [reporterId], references: [id])
+  reported User @relation("ReportsReceived", fields: [reportedId], references: [id])
+
+  @@map("reports")
+}
+
+model Country {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code           String   @unique @db.VarChar(3)
+  name           String
+  currency       String   @default("XAF")
+  accessPrice    Int      @default(2500) @map("access_price")
+  accessDuration Int      @default(48) @map("access_duration")
+  airports       Json     @default("[]")
+  paymentMethods Json     @default("[]") @map("payment_methods")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("countries")
+}
