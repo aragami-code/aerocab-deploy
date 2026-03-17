@@ -33,6 +33,7 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/pnpm-workspace.yaml ./
 COPY --from=builder /app/pnpm-lock.yaml ./
 COPY --from=builder /app/packages ./packages
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/backend/package.json ./backend/
 COPY --from=builder /app/backend/prisma ./backend/prisma/
 COPY --from=builder /app/backend/dist ./backend/dist/
@@ -42,4 +43,4 @@ WORKDIR /app/backend
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "/app/node_modules/.bin/prisma migrate deploy && node dist/main"]
