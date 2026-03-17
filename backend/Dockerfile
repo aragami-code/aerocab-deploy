@@ -43,4 +43,4 @@ WORKDIR /app/backend
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "prisma migrate deploy && node dist/backend/src/main"]
+CMD ["sh", "-c", "prisma migrate deploy && node dist/main"]
