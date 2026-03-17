@@ -14,7 +14,7 @@ COPY packages/ ./packages/
 COPY backend/ ./backend/
 
 # Install all dependencies from root (resolves workspace: protocol)
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # Generate Prisma client
 RUN pnpm --filter @aerocab/api exec prisma generate

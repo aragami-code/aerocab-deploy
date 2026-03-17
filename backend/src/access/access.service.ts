@@ -54,7 +54,7 @@ export class AccessService {
       id: accessPass.id,
       status: accessPass.status,
       paymentRef,
-      amount: ACCESS_AMOUNT,
+      amount: ACCESS_PRICE,
       currency: ACCESS_CURRENCY,
       activatedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
