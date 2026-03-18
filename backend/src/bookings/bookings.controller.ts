@@ -10,22 +10,22 @@ export class BookingsController {
 
   @Post()
   create(@Request() req: any, @Body() dto: CreateBookingDto) {
-    return this.bookingsService.createBooking(req.user.sub, dto);
+    return this.bookingsService.createBooking(req.user.id, dto);
   }
 
   @Get('active')
   getActive(@Request() req: any) {
-    return this.bookingsService.getActiveBooking(req.user.sub);
+    return this.bookingsService.getActiveBooking(req.user.id);
   }
 
   @Get('history')
   getHistory(@Request() req: any) {
-    return this.bookingsService.getBookingHistory(req.user.sub);
+    return this.bookingsService.getBookingHistory(req.user.id);
   }
 
   @Delete(':id')
   cancel(@Request() req: any, @Param('id') id: string) {
-    return this.bookingsService.cancelBooking(req.user.sub, id);
+    return this.bookingsService.cancelBooking(req.user.id, id);
   }
 
   // Admin
