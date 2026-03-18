@@ -54,6 +54,14 @@ enum AccessPassStatus {
   failed
 }
 
+enum BookingStatus {
+  pending
+  confirmed
+  in_progress
+  completed
+  cancelled
+}
+
 enum ConversationStatus {
   active
   closed
@@ -84,6 +92,7 @@ model User {
   driverProfile         DriverProfile?
   flights               Flight[]
   accessPasses          AccessPass[]
+  bookings              Booking[]
   passengerConversations Conversation[] @relation("PassengerConversations")
   driverConversations   Conversation[] @relation("DriverConversations")
   sentMessages          Message[]
@@ -118,6 +127,7 @@ model DriverProfile {
 
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   documents DriverDocument[]
+  bookings  Booking[]
 
   @@index([isAvailable, latitude, longitude])
   @@index([status])
@@ -181,6 +191,32 @@ model AccessPass {
   @@index([userId, status])
   @@index([expiresAt])
   @@map("access_passes")
+}
+
+model Booking {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  passengerId      String        @map("passenger_id") @db.Uuid
+  driverProfileId  String?       @map("driver_profile_id") @db.Uuid
+  flightNumber     String?       @map("flight_number")
+  departureAirport String        @map("departure_airport")
+  destination      String
+  vehicleType      String        @map("vehicle_type")
+  paymentMethod    String        @map("payment_method")
+  estimatedPrice   Float         @map("estimated_price")
+  status           BookingStatus @default(pending)
+  driverEtaMinutes Int?          @default(10) @map("driver_eta_minutes")
+  shareTripEnabled Boolean       @default(false) @map("share_trip_enabled")
+  completedAt      DateTime?     @map("completed_at")
+  cancelledAt      DateTime?     @map("cancelled_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  passenger     User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  driverProfile DriverProfile? @relation(fields: [driverProfileId], references: [id])
+
+  @@index([passengerId, status])
+  @@index([status])
+  @@map("bookings")
 }
 
 model Conversation {
