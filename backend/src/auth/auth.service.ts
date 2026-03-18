@@ -184,15 +184,44 @@ export class AuthService {
     }
   }
 
-  async googleLogin(accessToken: string): Promise<{
+  async googleLogin(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+  ): Promise<{
     accessToken: string;
     refreshToken: string;
     user: { id: string; phone: string | null; name: string | null; role: string };
     isNewUser: boolean;
   }> {
+    // Exchange authorization code for tokens
+    const clientId = this.config.get('GOOGLE_CLIENT_ID');
+    const clientSecret = this.config.get('GOOGLE_CLIENT_SECRET');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+        code_verifier: codeVerifier,
+      }).toString(),
+    });
+
+    if (!tokenRes.ok) {
+      const err = await tokenRes.json();
+      this.logger.error('Google token exchange failed', err);
+      throw new UnauthorizedException('Echec echange code Google');
+    }
+
+    const { access_token } = await tokenRes.json() as { access_token: string };
+
     // Fetch user info from Google
     const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${access_token}` },
     });
 
     if (!response.ok) {

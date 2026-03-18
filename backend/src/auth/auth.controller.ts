@@ -28,8 +28,8 @@ export class AuthController {
 
   @Post('google')
   @HttpCode(200)
-  googleLogin(@Body() body: { accessToken: string }) {
-    return this.authService.googleLogin(body.accessToken);
+  googleLogin(@Body() body: { code: string; codeVerifier: string; redirectUri: string }) {
+    return this.authService.googleLogin(body.code, body.codeVerifier, body.redirectUri);
   }
 
   @Get('me')
