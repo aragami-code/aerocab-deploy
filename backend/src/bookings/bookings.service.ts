@@ -1,10 +1,14 @@
 import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class BookingsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
@@ -38,6 +42,22 @@ export class BookingsService {
         },
       },
     });
+
+    // Notify passenger
+    this.notifications.sendToUser(
+      passengerId,
+      'Réservation confirmée ✅',
+      `Votre course vers ${booking.destination} est enregistrée. Un chauffeur arrive dans ${booking.driverEtaMinutes} min.`,
+    ).catch(() => {});
+
+    // Notify driver if assigned
+    if (booking.driverProfile) {
+      this.notifications.sendToUser(
+        booking.driverProfile.user.id,
+        'Nouvelle course 🚗',
+        `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
+      ).catch(() => {});
+    }
 
     return {
       id: booking.id,

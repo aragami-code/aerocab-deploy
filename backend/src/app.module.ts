@@ -13,6 +13,7 @@ import { ChatModule } from './chat/chat.module';
 import { RatingsModule } from './ratings/ratings.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { PointsModule } from './points/points.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { PointsModule } from './points/points.module';
     RatingsModule,
     BookingsModule,
     PointsModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
 })
