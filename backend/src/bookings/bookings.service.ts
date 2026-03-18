@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 
@@ -7,6 +7,7 @@ export class BookingsService {
   constructor(private prisma: PrismaService) {}
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
+    try {
     // Find nearest available approved driver
     const driver = await this.prisma.driverProfile.findFirst({
       where: { status: 'approved', isAvailable: true },
@@ -53,6 +54,10 @@ export class BookingsService {
         : null,
       createdAt: booking.createdAt,
     };
+    } catch (e: any) {
+      console.error('[BookingsService] createBooking error:', e?.message, e?.code, e?.meta);
+      throw new InternalServerErrorException(e?.message || 'Booking creation failed');
+    }
   }
 
   async getActiveBooking(passengerId: string) {
