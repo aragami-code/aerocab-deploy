@@ -1,4 +1,5 @@
-import { Controller, Post, Get, Body, UseGuards, HttpCode } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Res, UseGuards, HttpCode } from '@nestjs/common';
+import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { SendOtpDto, VerifyOtpDto, RefreshTokenDto } from './dto';
 import { JwtAuthGuard } from './guards';
@@ -30,6 +31,16 @@ export class AuthController {
   @HttpCode(200)
   googleLogin(@Body() body: { code: string; codeVerifier: string; redirectUri: string }) {
     return this.authService.googleLogin(body.code, body.codeVerifier, body.redirectUri);
+  }
+
+  @Get('google/start')
+  googleStart(@Query('deepLink') deepLink: string, @Res() res: Response) {
+    return this.authService.googleStart(deepLink, res);
+  }
+
+  @Get('google/callback')
+  googleCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
+    return this.authService.googleCallback(code, state, res);
   }
 
   @Get('me')

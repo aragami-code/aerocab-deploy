@@ -286,6 +286,62 @@ export class AuthService {
     };
   }
 
+  googleStart(deepLink: string, res: any) {
+    const clientId = this.config.get('GOOGLE_CLIENT_ID');
+    const redirectUri = this.config.get('BACKEND_URL', 'https://aerocab-api.onrender.com') + '/api/auth/google/callback';
+    const state = Buffer.from(deepLink || '').toString('base64');
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?` +
+      `client_id=${encodeURIComponent(clientId)}&` +
+      `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+      `response_type=code&` +
+      `scope=openid%20profile%20email&` +
+      `state=${encodeURIComponent(state)}`;
+    res.redirect(url);
+  }
+
+  async googleCallback(code: string, state: string, res: any) {
+    const clientId = this.config.get('GOOGLE_CLIENT_ID');
+    const clientSecret = this.config.get('GOOGLE_CLIENT_SECRET');
+    const redirectUri = this.config.get('BACKEND_URL', 'https://aerocab-api.onrender.com') + '/api/auth/google/callback';
+    const deepLink = state ? Buffer.from(state, 'base64').toString('utf8') : '';
+
+    try {
+      // Exchange code for tokens
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }).toString(),
+      });
+      const { access_token } = await tokenRes.json() as { access_token: string };
+
+      // Get user info
+      const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${access_token}` },
+      });
+      const googleUser = await userRes.json() as { sub: string; email?: string; name?: string };
+      const { sub: googleId, email, name } = googleUser;
+
+      // Find or create user
+      let user = await this.prisma.user.findUnique({ where: { googleId } });
+      if (!user && email) user = await this.prisma.user.findFirst({ where: { email } });
+      if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
+      if (!user) user = await this.prisma.user.create({ data: { googleId, email, name, role: 'passenger' } });
+
+      // Generate tokens
+      const payload = { sub: user.id, role: user.role };
+      const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
+      const refreshToken = this.jwt.sign(payload, { expiresIn: '90d' });
+      await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
+
+      // Redirect back to app
+      const returnUrl = `${deepLink}?accessToken=${encodeURIComponent(accessToken)}&refreshToken=${encodeURIComponent(refreshToken)}&userId=${user.id}&userName=${encodeURIComponent(user.name || '')}&userRole=${user.role}`;
+      res.redirect(returnUrl);
+    } catch (e) {
+      this.logger.error('Google callback error', e);
+      res.redirect(`${deepLink}?error=google_auth_failed`);
+    }
+  }
+
   async getMe(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
