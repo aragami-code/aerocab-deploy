@@ -1,5 +1,4 @@
 import { Controller, Post, Get, Body, Query, Res, UseGuards, HttpCode } from '@nestjs/common';
-import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { SendOtpDto, VerifyOtpDto, RefreshTokenDto } from './dto';
 import { JwtAuthGuard } from './guards';
@@ -34,12 +33,12 @@ export class AuthController {
   }
 
   @Get('google/start')
-  googleStart(@Query('deepLink') deepLink: string, @Res() res: Response) {
+  googleStart(@Query('deepLink') deepLink: string, @Res() res: any) {
     return this.authService.googleStart(deepLink, res);
   }
 
   @Get('google/callback')
-  googleCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
+  googleCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: any) {
     return this.authService.googleCallback(code, state, res);
   }
 
