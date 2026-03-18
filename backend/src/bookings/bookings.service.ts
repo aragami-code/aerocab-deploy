@@ -142,6 +142,20 @@ export class BookingsService {
     };
   }
 
+  async updateShareTrip(passengerId: string, bookingId: string, enabled: boolean) {
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, passengerId },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+
+    return this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { shareTripEnabled: enabled },
+      select: { id: true, shareTripEnabled: true },
+    });
+  }
+
   async cancelBooking(passengerId: string, bookingId: string) {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, passengerId },

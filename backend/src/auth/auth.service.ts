@@ -334,7 +334,7 @@ export class AuthService {
       await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
       // Redirect back to app
-      const returnUrl = `${deepLink}?accessToken=${encodeURIComponent(accessToken)}&refreshToken=${encodeURIComponent(refreshToken)}&userId=${user.id}&userName=${encodeURIComponent(user.name || '')}&userRole=${user.role}`;
+      const returnUrl = `${deepLink}?accessToken=${encodeURIComponent(accessToken)}&refreshToken=${encodeURIComponent(refreshToken)}&userId=${user.id}&userName=${encodeURIComponent(user.name || '')}&userRole=${user.role}&isNewUser=${isNewUser ? '1' : '0'}`;
       res.redirect(returnUrl);
     } catch (e) {
       this.logger.error('Google callback error', e);

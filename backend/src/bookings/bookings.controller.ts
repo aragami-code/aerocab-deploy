@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { JwtAuthGuard } from '../auth/guards';
@@ -26,6 +26,15 @@ export class BookingsController {
   @Get('stats')
   getStats(@Request() req: any) {
     return this.bookingsService.getPassengerStats(req.user.id);
+  }
+
+  @Patch(':id/share-trip')
+  updateShareTrip(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Body('enabled') enabled: boolean,
+  ) {
+    return this.bookingsService.updateShareTrip(req.user.id, id, enabled);
   }
 
   @Delete(':id')
