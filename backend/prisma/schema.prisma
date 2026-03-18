@@ -74,6 +74,11 @@ enum ReportStatus {
   dismissed
 }
 
+enum PointsTransactionType {
+  credit
+  debit
+}
+
 // ===== Models =====
 
 model User {
@@ -101,6 +106,7 @@ model User {
   ratingsReceived       Rating[]       @relation("RatingsReceived")
   reportsSubmitted      Report[]       @relation("ReportsSubmitted")
   reportsReceived       Report[]       @relation("ReportsReceived")
+  pointsTransactions    PointsTransaction[]
 
   @@map("users")
 }
@@ -286,6 +292,20 @@ model Report {
   reported User @relation("ReportsReceived", fields: [reportedId], references: [id])
 
   @@map("reports")
+}
+
+model PointsTransaction {
+  id          String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String                @map("user_id") @db.Uuid
+  type        PointsTransactionType
+  points      Int
+  label       String
+  createdAt   DateTime              @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("points_transactions")
 }
 
 model Country {

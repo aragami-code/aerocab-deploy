@@ -12,6 +12,7 @@ import { AccessModule } from './access/access.module';
 import { ChatModule } from './chat/chat.module';
 import { RatingsModule } from './ratings/ratings.module';
 import { BookingsModule } from './bookings/bookings.module';
+import { PointsModule } from './points/points.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { BookingsModule } from './bookings/bookings.module';
     ChatModule,
     RatingsModule,
     BookingsModule,
+    PointsModule,
   ],
   controllers: [AppController],
 })
