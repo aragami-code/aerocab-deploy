@@ -184,6 +184,79 @@ export class AuthService {
     }
   }
 
+  async googleLogin(accessToken: string): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    user: { id: string; phone: string | null; name: string | null; role: string };
+    isNewUser: boolean;
+  }> {
+    // Fetch user info from Google
+    const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new UnauthorizedException('Token Google invalide');
+    }
+
+    const googleUser = await response.json() as {
+      sub: string;
+      email?: string;
+      name?: string;
+      picture?: string;
+    };
+
+    const { sub: googleId, email, name } = googleUser;
+
+    // Look up user by googleId first, then by email
+    let user = await this.prisma.user.findUnique({ where: { googleId } });
+    let isNewUser = false;
+
+    if (!user && email) {
+      user = await this.prisma.user.findUnique({ where: { email } });
+      if (user) {
+        // Link existing email user to Google account
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: { googleId },
+        });
+      }
+    }
+
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: { googleId, email, name, role: 'passenger' },
+      });
+      isNewUser = true;
+      this.logger.log(`New user created via Google: ${user.id} (${email})`);
+    } else {
+      this.logger.log(`User logged in via Google: ${user.id} (${email})`);
+    }
+
+    if (user.status === 'suspended') {
+      throw new UnauthorizedException('Compte suspendu. Contactez le support.');
+    }
+
+    // Generate tokens
+    const payload = { sub: user.id, role: user.role };
+    const newAccessToken = this.jwt.sign(payload, { expiresIn: '30d' });
+    const refreshToken = this.jwt.sign(payload, { expiresIn: '90d' });
+
+    // Store refresh token in Redis
+    await this.redis.set(
+      `refresh:${user.id}`,
+      refreshToken,
+      REFRESH_TOKEN_TTL,
+    );
+
+    return {
+      accessToken: newAccessToken,
+      refreshToken,
+      user: { id: user.id, phone: user.phone, name: user.name, role: user.role },
+      isNewUser,
+    };
+  }
+
   async getMe(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },

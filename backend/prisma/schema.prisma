@@ -78,7 +78,8 @@ enum ReportStatus {
 
 model User {
   id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  phone     String     @unique
+  phone     String?    @unique
+  googleId  String?    @unique @map("google_id")
   name      String?
   email     String?
   role      UserRole   @default(passenger)

@@ -26,6 +26,12 @@ export class AuthController {
     return this.authService.refreshToken(dto.refreshToken);
   }
 
+  @Post('google')
+  @HttpCode(200)
+  googleLogin(@Body() body: { accessToken: string }) {
+    return this.authService.googleLogin(body.accessToken);
+  }
+
   @Get('me')
   @UseGuards(JwtAuthGuard)
   async getMe(@CurrentUser('id') userId: string) {
