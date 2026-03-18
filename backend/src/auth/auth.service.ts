@@ -242,7 +242,7 @@ export class AuthService {
     let isNewUser = false;
 
     if (!user && email) {
-      user = await this.prisma.user.findUnique({ where: { email } });
+      user = await this.prisma.user.findFirst({ where: { email } });
       if (user) {
         // Link existing email user to Google account
         user = await this.prisma.user.update({
