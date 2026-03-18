@@ -2,12 +2,14 @@ import { Injectable, NotFoundException, InternalServerErrorException } from '@ne
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PointsService } from '../points/points.service';
 
 @Injectable()
 export class BookingsService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private points: PointsService,
   ) {}
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
@@ -42,6 +44,22 @@ export class BookingsService {
         },
       },
     });
+
+    // Credit loyalty points (1 pt per 100 FCFA)
+    const earnedPoints = Math.floor(booking.estimatedPrice / 100);
+    if (earnedPoints > 0) {
+      this.points.addPoints(
+        passengerId,
+        earnedPoints,
+        `Course — ${booking.departureAirport} → ${booking.destination}`,
+      ).catch(() => {});
+    }
+
+    // Bonus for first booking
+    const totalBookings = await this.prisma.booking.count({ where: { passengerId } });
+    if (totalBookings === 1) {
+      this.points.addPoints(passengerId, 500, 'Bonus première course').catch(() => {});
+    }
 
     // Notify passenger
     this.notifications.sendToUser(
@@ -150,6 +168,30 @@ export class BookingsService {
       orderBy: { createdAt: 'desc' },
       take: 20,
     });
+  }
+
+  async getPassengerStats(passengerId: string) {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [total, thisMonth, ratings] = await Promise.all([
+      this.prisma.booking.count({ where: { passengerId } }),
+      this.prisma.booking.count({
+        where: { passengerId, createdAt: { gte: startOfMonth } },
+      }),
+      this.prisma.rating.aggregate({
+        where: { toUserId: passengerId },
+        _avg: { score: true },
+        _count: true,
+      }),
+    ]);
+
+    return {
+      totalTrips: total,
+      thisMonthTrips: thisMonth,
+      avgRating: ratings._avg.score ? parseFloat(ratings._avg.score.toFixed(1)) : null,
+      ratingCount: ratings._count,
+    };
   }
 
   // Admin

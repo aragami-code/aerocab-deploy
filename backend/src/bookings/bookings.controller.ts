@@ -23,6 +23,11 @@ export class BookingsController {
     return this.bookingsService.getBookingHistory(req.user.id);
   }
 
+  @Get('stats')
+  getStats(@Request() req: any) {
+    return this.bookingsService.getPassengerStats(req.user.id);
+  }
+
   @Delete(':id')
   cancel(@Request() req: any, @Param('id') id: string) {
     return this.bookingsService.cancelBooking(req.user.id, id);
