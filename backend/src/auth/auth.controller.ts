@@ -38,7 +38,17 @@ export class AuthController {
   }
 
   @Get('google/callback')
-  googleCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: any) {
+  googleCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Query('error') error: string,
+    @Res() res: any,
+  ) {
+    // Google renvoie error=access_denied si l'utilisateur refuse, ou redirect_uri_mismatch etc.
+    if (error || !code) {
+      const deepLink = state ? Buffer.from(state, 'base64').toString('utf8') : '';
+      return res.redirect(`${deepLink || 'landingride-passenger://'}?error=${error || 'no_code'}`);
+    }
     return this.authService.googleCallback(code, state, res);
   }
 

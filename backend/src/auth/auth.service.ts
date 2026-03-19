@@ -312,6 +312,14 @@ export class AuthService {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }).toString(),
       });
+
+      if (!tokenRes.ok) {
+        const tokenErr = await tokenRes.json();
+        this.logger.error('Google token exchange failed', JSON.stringify(tokenErr));
+        res.redirect(`${deepLink}?error=google_token_failed`);
+        return;
+      }
+
       const { access_token } = await tokenRes.json() as { access_token: string };
 
       // Get user info
