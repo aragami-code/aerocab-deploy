@@ -1,8 +1,26 @@
-import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PointsService } from '../points/points.service';
+
+// Table de prix authoritative (ne pas faire confiance au client)
+const VEHICLE_PRICES: Record<string, number> = {
+  eco:         5000,
+  eco_plus:    6000,
+  standard:    7000,
+  confort:     10000,
+  confort_plus: 12000,
+};
+
+// Capacité par type de véhicule
+const VEHICLE_SEATS: Record<string, number> = {
+  eco:         4,
+  eco_plus:    4,
+  standard:    5,
+  confort:     5,
+  confort_plus: 7,
+};
 
 @Injectable()
 export class BookingsService {
@@ -14,6 +32,12 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
+    // Prix autoritatif depuis la table backend (ignore la valeur du client)
+    const authorizedPrice = VEHICLE_PRICES[dto.vehicleType];
+    if (!authorizedPrice) {
+      throw new BadRequestException(`Type de véhicule invalide: ${dto.vehicleType}`);
+    }
+
     // Find nearest available approved driver
     const driver = await this.prisma.driverProfile.findFirst({
       where: { status: 'approved', isAvailable: true },
@@ -30,9 +54,11 @@ export class BookingsService {
         flightNumber: dto.flightNumber || null,
         departureAirport: dto.departureAirport,
         destination: dto.destination,
+        destLat: dto.destLat ?? null,
+        destLng: dto.destLng ?? null,
         vehicleType: dto.vehicleType,
         paymentMethod: dto.paymentMethod,
-        estimatedPrice: dto.estimatedPrice,
+        estimatedPrice: authorizedPrice,  // prix backend, pas frontend
         status: 'pending',
         driverEtaMinutes: 10,
       },
@@ -94,7 +120,8 @@ export class BookingsService {
     };
     } catch (e: any) {
       console.error('[BookingsService] createBooking error:', e?.message, e?.code, e?.meta);
-      throw new InternalServerErrorException(e?.message || 'Booking creation failed');
+      if (e instanceof BadRequestException) throw e;
+      throw new InternalServerErrorException('Booking creation failed');
     }
   }
 
@@ -131,7 +158,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         vehicleBrand: booking.driverProfile?.vehicleBrand || '',
         vehicleModel: booking.driverProfile?.vehicleModel || '',
-        seats: 4,
+        seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
         estimatedPrice: booking.estimatedPrice,
         driverEtaMinutes: booking.driverEtaMinutes || 10,
         countdownSeconds: countdown,
@@ -162,6 +189,9 @@ export class BookingsService {
     });
 
     if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (!['pending', 'confirmed'].includes(booking.status)) {
+      throw new BadRequestException('Cette réservation ne peut plus être annulée');
+    }
 
     return this.prisma.booking.update({
       where: { id: bookingId },
@@ -169,19 +199,25 @@ export class BookingsService {
     });
   }
 
-  async getBookingHistory(passengerId: string) {
-    return this.prisma.booking.findMany({
-      where: { passengerId },
-      include: {
-        driverProfile: {
-          include: {
-            user: { select: { id: true, name: true } },
+  async getBookingHistory(passengerId: string, page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+    const [bookings, total] = await Promise.all([
+      this.prisma.booking.findMany({
+        where: { passengerId },
+        include: {
+          driverProfile: {
+            include: {
+              user: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 20,
-    });
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.booking.count({ where: { passengerId } }),
+    ]);
+    return { data: bookings, total, page, limit };
   }
 
   async getPassengerStats(passengerId: string) {

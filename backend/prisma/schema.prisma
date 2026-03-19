@@ -207,6 +207,8 @@ model Booking {
   flightNumber     String?       @map("flight_number")
   departureAirport String        @map("departure_airport")
   destination      String
+  destLat          Float?        @map("dest_lat")
+  destLng          Float?        @map("dest_lng")
   vehicleType      String        @map("vehicle_type")
   paymentMethod    String        @map("payment_method")
   estimatedPrice   Float         @map("estimated_price")

@@ -1,7 +1,8 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
-import { JwtAuthGuard } from '../auth/guards';
+import { JwtAuthGuard, RolesGuard } from '../auth/guards';
+import { Roles } from '../auth/decorators';
 
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
@@ -19,8 +20,16 @@ export class BookingsController {
   }
 
   @Get('history')
-  getHistory(@Request() req: any) {
-    return this.bookingsService.getBookingHistory(req.user.id);
+  getHistory(
+    @Request() req: any,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.bookingsService.getBookingHistory(
+      req.user.id,
+      page ? parseInt(page) : 1,
+      limit ? parseInt(limit) : 20,
+    );
   }
 
   @Get('stats')
@@ -44,6 +53,8 @@ export class BookingsController {
 
   // Admin
   @Get('admin/all')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
   getAllBookings(
     @Query('status') status?: string,
     @Query('page') page?: string,
