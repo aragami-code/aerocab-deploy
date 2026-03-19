@@ -1,7 +1,7 @@
 import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, Min, Max } from 'class-validator';
 
 const VALID_VEHICLE_TYPES = ['eco', 'eco_plus', 'standard', 'confort', 'confort_plus'];
-const VALID_PAYMENT_METHODS = ['cash', 'points', 'orange_money', 'mtn_momo'];
+const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money', 'mtn_momo'];
 const VALID_AIRPORTS = ['DLA', 'NSI'];
 
 export class CreateBookingDto {
