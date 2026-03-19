@@ -322,10 +322,11 @@ export class AuthService {
       const { sub: googleId, email, name } = googleUser;
 
       // Find or create user
+      let isNewUser = false;
       let user = await this.prisma.user.findUnique({ where: { googleId } });
       if (!user && email) user = await this.prisma.user.findFirst({ where: { email } });
       if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
-      if (!user) user = await this.prisma.user.create({ data: { googleId, email, name, role: 'passenger' } });
+      if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: 'passenger' } }); isNewUser = true; }
 
       // Generate tokens
       const payload = { sub: user.id, role: user.role };
