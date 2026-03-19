@@ -14,6 +14,8 @@ import { RatingsModule } from './ratings/ratings.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { PointsModule } from './points/points.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { SettingsModule } from './settings/settings.module';
+import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
@@ -34,6 +36,8 @@ import { NotificationsModule } from './notifications/notifications.module';
     BookingsModule,
     PointsModule,
     NotificationsModule,
+    SettingsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
 })

@@ -1,8 +1,20 @@
-import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PointsService } from '../points/points.service';
+import { SettingsService } from '../settings/settings.service';
+import { RidesGateway } from './rides.gateway';
+import { Prisma } from '@prisma/client';
+
+// Coordonnées des aéroports desservis
+const AIRPORT_COORDS: Record<string, { lat: number; lng: number }> = {
+  DLA: { lat: 4.0061, lng: 9.7197 },  // Douala International
+  NSI: { lat: 3.7226, lng: 11.5532 }, // Nsimalen — Yaoundé
+};
+
+// Rayon de recherche par défaut (km)
+const PROXIMITY_RADIUS_KM = 20;
 
 // Table de prix authoritative (ne pas faire confiance au client)
 const VEHICLE_PRICES: Record<string, number> = {
@@ -28,7 +40,62 @@ export class BookingsService {
     private prisma: PrismaService,
     private notifications: NotificationsService,
     private points: PointsService,
+    private settingsService: SettingsService,
+    private ridesGateway: RidesGateway,
   ) {}
+
+  // Sélectionne le meilleur driver selon le mode actif (proximité ou rating)
+  private async findBestDriver(departureAirport: string) {
+    const proximityEnabled = await this.settingsService.isProximityAssignmentEnabled();
+
+    if (proximityEnabled) {
+      const coords = AIRPORT_COORDS[departureAirport];
+      if (coords) {
+        // Haversine en SQL — retourne le driver le plus proche dans le rayon
+        const nearby = await this.prisma.$queryRaw<{ id: string; distance_km: number }[]>(
+          Prisma.sql`
+            SELECT id,
+              6371 * acos(
+                LEAST(1.0,
+                  cos(radians(${coords.lat})) * cos(radians(latitude))
+                  * cos(radians(longitude) - radians(${coords.lng}))
+                  + sin(radians(${coords.lat})) * sin(radians(latitude))
+                )
+              ) AS distance_km
+            FROM driver_profiles
+            WHERE status = 'approved'
+              AND is_available = true
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+            HAVING 6371 * acos(
+                LEAST(1.0,
+                  cos(radians(${coords.lat})) * cos(radians(latitude))
+                  * cos(radians(longitude) - radians(${coords.lng}))
+                  + sin(radians(${coords.lat})) * sin(radians(latitude))
+                )
+              ) <= ${PROXIMITY_RADIUS_KM}
+            ORDER BY distance_km ASC
+            LIMIT 1
+          `,
+        );
+
+        if (nearby.length > 0) {
+          return this.prisma.driverProfile.findUnique({
+            where: { id: nearby[0].id },
+            include: { user: { select: { id: true, name: true } } },
+          });
+        }
+        // Aucun driver dans le rayon → fallback par rating
+      }
+    }
+
+    // Mode par défaut : meilleur rating
+    return this.prisma.driverProfile.findFirst({
+      where: { status: 'approved', isAvailable: true },
+      include: { user: { select: { id: true, name: true } } },
+      orderBy: { ratingAvg: 'desc' },
+    });
+  }
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
@@ -38,14 +105,18 @@ export class BookingsService {
       throw new BadRequestException(`Type de véhicule invalide: ${dto.vehicleType}`);
     }
 
-    // Find nearest available approved driver
-    const driver = await this.prisma.driverProfile.findFirst({
-      where: { status: 'approved', isAvailable: true },
-      include: {
-        user: { select: { id: true, name: true } },
-      },
-      orderBy: { ratingAvg: 'desc' },
-    });
+    // Vérification et déduction des points AVANT création (évite booking sans paiement)
+    if (dto.paymentMethod === 'points') {
+      const pointsNeeded = Math.ceil(authorizedPrice / 100); // 1 pt = 100 FCFA
+      await this.points.deductPoints(
+        passengerId,
+        pointsNeeded,
+        `Course ${dto.departureAirport} → ${dto.destination}`,
+      );
+    }
+
+    // Sélection du driver selon le paramètre activé
+    const driver = await this.findBestDriver(dto.departureAirport);
 
     const booking = await this.prisma.booking.create({
       data: {
@@ -101,6 +172,21 @@ export class BookingsService {
         'Nouvelle course 🚗',
         `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
       ).catch(() => {});
+
+      // Emit socket to driver's personal room
+      this.ridesGateway.server
+        .to(`driver:${booking.driverProfileId}`)
+        .emit('booking:new_request', {
+          id: booking.id,
+          passengerId: booking.passengerId,
+          passengerName: null,
+          flightNumber: booking.flightNumber,
+          destination: booking.destination,
+          vehicleType: booking.vehicleType,
+          estimatedPrice: booking.estimatedPrice,
+          departureAirport: booking.departureAirport,
+          seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
+        });
     }
 
     return {
@@ -129,7 +215,7 @@ export class BookingsService {
     const booking = await this.prisma.booking.findFirst({
       where: {
         passengerId,
-        status: { in: ['pending', 'confirmed', 'in_progress'] },
+        status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] },
       },
       include: {
         driverProfile: {
@@ -282,6 +368,180 @@ export class BookingsService {
       avgRating: ratings._avg.score ? parseFloat(ratings._avg.score.toFixed(1)) : null,
       ratingCount: ratings._count,
     };
+  }
+
+  // ── Driver endpoints ───────────────────────────────────────────────────────
+
+  async getDriverPendingRequest(driverUserId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findFirst({
+      where: { driverProfileId: driverProfile.id, status: 'pending' },
+      include: { passenger: { select: { id: true, name: true, phone: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (!booking) return { booking: null };
+
+    return {
+      booking: {
+        id: booking.id,
+        passengerId: booking.passengerId,
+        passengerName: (booking.passenger as any)?.name || null,
+        flightNumber: booking.flightNumber,
+        destination: booking.destination,
+        vehicleType: booking.vehicleType,
+        estimatedPrice: booking.estimatedPrice,
+        departureAirport: booking.departureAirport,
+        seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
+      },
+    };
+  }
+
+  async acceptBooking(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (booking.status !== 'pending') throw new BadRequestException('Cette course n\'est plus disponible');
+
+    const updated = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'confirmed' },
+    });
+
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:accepted', { id: updated.id });
+    this.notifications.sendToUser(booking.passengerId, 'Chauffeur en route 🚗', 'Votre chauffeur a accepté la course et arrive.').catch(() => {});
+
+    return { id: updated.id, status: updated.status };
+  }
+
+  async declineBooking(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (booking.status !== 'pending') throw new BadRequestException('Statut incorrect');
+
+    // Libère le driver et remet la course en attente pour ré-assignation
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { driverProfileId: null },
+    });
+
+    return { id: bookingId, status: 'pending' };
+  }
+
+  async getDriverActiveRide(driverUserId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) return { booking: null };
+
+    const booking = await this.prisma.booking.findFirst({
+      where: {
+        driverProfileId: driverProfile.id,
+        status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] },
+      },
+      include: { passenger: { select: { id: true, name: true, phone: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!booking) return { booking: null };
+
+    return {
+      booking: {
+        id: booking.id,
+        status: booking.status,
+        passengerId: booking.passengerId,
+        passengerName: (booking.passenger as any)?.name || null,
+        passengerPhone: (booking.passenger as any)?.phone || null,
+        flightNumber: booking.flightNumber,
+        destination: booking.destination,
+        vehicleType: booking.vehicleType,
+        estimatedPrice: booking.estimatedPrice,
+        departureAirport: booking.departureAirport,
+        shareTripEnabled: booking.shareTripEnabled,
+      },
+    };
+  }
+
+  async notifyArrival(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (booking.status !== 'confirmed') throw new BadRequestException('Statut incorrect');
+
+    const updated = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'arrived_at_airport' },
+    });
+
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:driver_arrived', { id: updated.id });
+    this.notifications.sendToUser(booking.passengerId, 'Chauffeur arrivé 📍', 'Votre chauffeur est à l\'aéroport.').catch(() => {});
+
+    return { id: updated.id, status: updated.status };
+  }
+
+  async startRide(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (booking.status !== 'arrived_at_airport') throw new BadRequestException('Statut incorrect');
+
+    const updated = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'in_progress' },
+    });
+
+    return { id: updated.id, status: updated.status };
+  }
+
+  async completeRide(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (booking.status !== 'in_progress') throw new BadRequestException('Statut incorrect');
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.booking.update({
+        where: { id: bookingId },
+        data: { status: 'completed', completedAt: new Date() },
+      }),
+      this.prisma.driverProfile.update({
+        where: { id: driverProfile.id },
+        data: { totalRides: { increment: 1 }, isAvailable: true },
+      }),
+    ]);
+
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:completed', { id: updated.id });
+    this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroCab !').catch(() => {});
+
+    // Points fidélité pour le chauffeur
+    const driverUser = await this.prisma.driverProfile.findUnique({
+      where: { id: driverProfile.id },
+      select: { userId: true },
+    });
+    if (driverUser) {
+      const earnedPoints = Math.floor((booking.estimatedPrice as number) / 200);
+      if (earnedPoints > 0) {
+        this.points.addPoints(driverUser.userId, earnedPoints, `Course complétée`).catch(() => {});
+      }
+    }
+
+    return { id: updated.id, status: updated.status };
   }
 
   // Admin

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
@@ -31,6 +31,19 @@ export class PointsService {
         points,
         label,
       },
+    });
+  }
+
+  // Déduit des points avec vérification du solde — lève BadRequestException si insuffisant
+  async deductPoints(userId: string, points: number, label: string): Promise<void> {
+    const { balance } = await this.getBalance(userId);
+    if (balance < points) {
+      throw new BadRequestException(
+        `Solde de points insuffisant : ${balance} pts disponibles, ${points} pts requis`,
+      );
+    }
+    await this.prisma.pointsTransaction.create({
+      data: { userId, type: 'debit', points: -points, label },
     });
   }
 }

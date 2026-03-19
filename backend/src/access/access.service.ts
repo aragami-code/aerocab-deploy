@@ -4,7 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { ConfigService } from '@nestjs/config';
 import { PurchaseAccessDto } from './dto';
+import { PaymentsService } from '../payments/payments.service';
 import {
   ACCESS_PRICE,
   ACCESS_CURRENCY,
@@ -15,13 +17,18 @@ const ACCESS_DURATION_MS = ACCESS_DURATION_HOURS * 60 * 60 * 1000;
 
 @Injectable()
 export class AccessService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private config: ConfigService,
+    private paymentsService: PaymentsService,
+  ) {}
 
   /**
    * Purchase a new 48h access pass
+   * - Si CINETPAY_API_KEY est configuré : crée un pass en attente + retourne un paymentUrl
+   * - Sinon (mode dev) : active immédiatement sans paiement
    */
   async purchaseAccess(userId: string, dto: PurchaseAccessDto) {
-    // Check if user already has an active access
     const existing = await this.getActiveAccess(userId);
     if (existing) {
       throw new BadRequestException(
@@ -30,35 +37,82 @@ export class AccessService {
       );
     }
 
-    // In production, this would initiate a CinetPay/NotchPay payment
-    // For MVP, we simulate instant payment success
-    const paymentRef = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const apiKey = this.config.get<string>('CINETPAY_API_KEY', '');
+    const isDev = !apiKey;
 
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + ACCESS_DURATION_MS);
+    if (isDev) {
+      // Mode dev : activation immédiate sans paiement
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + ACCESS_DURATION_MS);
+      const paymentRef = `PAY-DEV-${Date.now()}`;
+      const pass = await this.prisma.accessPass.create({
+        data: {
+          userId,
+          amount: ACCESS_PRICE,
+          currency: ACCESS_CURRENCY,
+          status: 'active',
+          paymentRef,
+          paymentMethod: dto.paymentMethod,
+          activatedAt: now,
+          expiresAt,
+        },
+      });
+      return {
+        id: pass.id,
+        status: 'active',
+        paymentRef,
+        amount: ACCESS_PRICE,
+        currency: ACCESS_CURRENCY,
+        activatedAt: now.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        paymentUrl: null as string | null,
+        message: 'Acces 48h active (mode dev)',
+      };
+    }
 
-    const accessPass = await this.prisma.accessPass.create({
+    // Production : créer un pass en attente puis initier CinetPay
+    const pass = await this.prisma.accessPass.create({
       data: {
         userId,
         amount: ACCESS_PRICE,
         currency: ACCESS_CURRENCY,
-        status: 'active',
-        paymentRef,
+        status: 'pending',
         paymentMethod: dto.paymentMethod,
-        activatedAt: now,
-        expiresAt,
       },
     });
 
+    // paymentRef = transactionId unique envoyé à CinetPay
+    const paymentRef = `ACCESS-${pass.id}`;
+    await this.prisma.accessPass.update({
+      where: { id: pass.id },
+      data: { paymentRef },
+    });
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, phone: true },
+    });
+
+    const { paymentUrl } = await this.paymentsService.initiate({
+      transactionId: paymentRef,
+      amount: ACCESS_PRICE,
+      description: 'Pass AeroCab 48h',
+      customerName: user?.name || 'Client AeroCab',
+      customerPhone: user?.phone || '',
+      channels: 'MOBILE_MONEY',
+      returnPath: 'access',
+    });
+
     return {
-      id: accessPass.id,
-      status: accessPass.status,
+      id: pass.id,
+      status: 'pending',
       paymentRef,
       amount: ACCESS_PRICE,
       currency: ACCESS_CURRENCY,
-      activatedAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      message: 'Acces 48h active avec succes !',
+      activatedAt: null as string | null,
+      expiresAt: null as string | null,
+      paymentUrl,
+      message: 'Procédez au paiement pour activer votre pass',
     };
   }
 

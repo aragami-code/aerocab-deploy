@@ -326,4 +326,80 @@ export class DriversService {
 
     return profile;
   }
+
+  async setAvailability(userId: string, isAvailable: boolean) {
+    const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+    if (profile.status !== 'approved') {
+      throw new ForbiddenException('Seuls les chauffeurs approuves peuvent changer leur disponibilite');
+    }
+
+    const updated = await this.prisma.driverProfile.update({
+      where: { userId },
+      data: { isAvailable },
+    });
+
+    return {
+      isAvailable: updated.isAvailable,
+      message: updated.isAvailable ? 'Vous etes maintenant disponible' : 'Vous etes maintenant indisponible',
+    };
+  }
+
+  async getEarnings(userId: string) {
+    const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfDay);
+    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [todayBookings, weekBookings, monthBookings] = await Promise.all([
+      this.prisma.booking.findMany({
+        where: { driverProfileId: profile.id, status: 'completed', updatedAt: { gte: startOfDay } },
+        select: { estimatedPrice: true },
+      }),
+      this.prisma.booking.findMany({
+        where: { driverProfileId: profile.id, status: 'completed', updatedAt: { gte: startOfWeek } },
+        select: { estimatedPrice: true },
+      }),
+      this.prisma.booking.findMany({
+        where: { driverProfileId: profile.id, status: 'completed', updatedAt: { gte: startOfMonth } },
+        select: { estimatedPrice: true },
+      }),
+    ]);
+
+    const sum = (list: { estimatedPrice: any }[]) =>
+      list.reduce((acc, b) => acc + Number(b.estimatedPrice), 0);
+
+    return {
+      today: sum(todayBookings),
+      thisWeek: sum(weekBookings),
+      thisMonth: sum(monthBookings),
+      totalRides: profile.totalRides,
+      currency: 'XAF',
+    };
+  }
+
+  async uploadDocumentFile(userId: string, type: string, file: any) {
+    const validTypes = ['cni_front', 'cni_back', 'license', 'registration', 'vehicle_photo'];
+    if (!validTypes.includes(type)) throw new BadRequestException('Type de document invalide');
+
+    const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+    if (!file) throw new BadRequestException('Fichier manquant');
+
+    const apiUrl = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const fileUrl = `${apiUrl}/uploads/${file.filename}`;
+
+    const document = await this.prisma.driverDocument.upsert({
+      where: { driverProfileId_type: { driverProfileId: profile.id, type: type as any } },
+      update: { fileUrl, status: 'pending', rejectionReason: null, verifiedAt: null },
+      create: { driverProfileId: profile.id, type: type as any, fileUrl },
+    });
+
+    this.logger.log(`Document uploaded (multipart): ${type} for driver ${profile.id}`);
+    return document;
+  }
 }

@@ -8,16 +8,26 @@ import {
   Query,
   UseGuards,
   HttpCode,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import * as fs from 'fs';
 import { DriversService } from './drivers.service';
 import {
   RegisterDriverDto,
   UpdateDriverDto,
   UpdateLocationDto,
-  UploadDocumentDto,
 } from './dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser, Roles } from '../auth/decorators';
+
+const UPLOAD_DIR = '/tmp/aerocab-uploads';
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
 @Controller('drivers')
 export class DriversController {
@@ -58,11 +68,24 @@ export class DriversController {
   @Post('documents')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('driver')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: UPLOAD_DIR,
+        filename: (_req, file, cb) => {
+          const ext = path.extname(file.originalname) || '.jpg';
+          cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+        },
+      }),
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
   async uploadDocument(
     @CurrentUser('id') userId: string,
-    @Body() dto: UploadDocumentDto,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('type') type: string,
   ) {
-    return this.driversService.uploadDocument(userId, dto);
+    return this.driversService.uploadDocumentFile(userId, type, file);
   }
 
   @Get('documents')
@@ -92,12 +115,33 @@ export class DriversController {
     return this.driversService.updateLocation(userId, dto);
   }
 
+  /** PATCH /drivers/availability — appelé par l'app mobile avec { isAvailable } */
+  @Patch('availability')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  async setAvailability(
+    @CurrentUser('id') userId: string,
+    @Body('isAvailable') isAvailable: boolean,
+  ) {
+    return this.driversService.setAvailability(userId, isAvailable);
+  }
+
+  /** POST /drivers/toggle-availability — toggle (conservé pour compatibilité) */
   @Post('toggle-availability')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('driver')
   @HttpCode(200)
   async toggleAvailability(@CurrentUser('id') userId: string) {
     return this.driversService.toggleAvailability(userId);
+  }
+
+  // ── Earnings ─────────────────────────────────────────
+
+  @Get('earnings')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  async getEarnings(@CurrentUser('id') userId: string) {
+    return this.driversService.getEarnings(userId);
   }
 
   // ── Public (for passengers) ──────────────────────────

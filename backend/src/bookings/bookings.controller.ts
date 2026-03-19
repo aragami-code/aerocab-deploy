@@ -2,7 +2,7 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Re
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
-import { Roles } from '../auth/decorators';
+import { Roles, CurrentUser } from '../auth/decorators';
 
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
@@ -49,6 +49,57 @@ export class BookingsController {
   @Delete(':id')
   cancel(@Request() req: any, @Param('id') id: string) {
     return this.bookingsService.cancelBooking(req.user.id, id);
+  }
+
+  // ── Driver ──────────────────────────────────────────────────────────────────
+
+  @Get('driver/pending')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getDriverPending(@CurrentUser('id') userId: string) {
+    return this.bookingsService.getDriverPendingRequest(userId);
+  }
+
+  @Get('driver/active')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getDriverActive(@CurrentUser('id') userId: string) {
+    return this.bookingsService.getDriverActiveRide(userId);
+  }
+
+  @Patch(':id/accept')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  acceptBooking(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.acceptBooking(userId, id);
+  }
+
+  @Patch(':id/decline')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  declineBooking(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.declineBooking(userId, id);
+  }
+
+  @Patch(':id/arrived')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  notifyArrival(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.notifyArrival(userId, id);
+  }
+
+  @Patch(':id/start')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  startRide(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.startRide(userId, id);
+  }
+
+  @Patch(':id/complete')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  completeRide(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.completeRide(userId, id);
   }
 
   // Admin
