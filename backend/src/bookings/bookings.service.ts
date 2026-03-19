@@ -149,22 +149,62 @@ export class BookingsService {
     const elapsed = Math.floor((now - createdAt) / 1000);
     const countdown = Math.max(0, etaSeconds - elapsed);
 
+    // Récupère le statut du vol lié à cette réservation
+    let flightStatus: {
+      scheduledArrival: string;
+      actualArrival: string | null;
+      status: 'on_time' | 'delayed' | 'landed';
+    } | null = null;
+
+    if (booking.flightNumber) {
+      const flight = await this.prisma.flight.findFirst({
+        where: { userId: passengerId, flightNumber: booking.flightNumber },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (flight) {
+        const scheduled = new Date(flight.scheduledArrival);
+        const actual = flight.actualArrival ? new Date(flight.actualArrival) : null;
+        const nowDate = new Date();
+
+        let status: 'on_time' | 'delayed' | 'landed';
+        if (actual) {
+          status = 'landed';
+        } else if (scheduled < nowDate) {
+          status = 'delayed';
+        } else {
+          status = 'on_time';
+        }
+
+        flightStatus = {
+          scheduledArrival: flight.scheduledArrival.toISOString(),
+          actualArrival: flight.actualArrival?.toISOString() || null,
+          status,
+        };
+      }
+    }
+
     return {
       booking: {
         id: booking.id,
+        status: booking.status,
         flightNumber: booking.flightNumber,
-        expectedArrival: null,
+        flightStatus,
         destination: booking.destination,
         vehicleType: booking.vehicleType,
         vehicleBrand: booking.driverProfile?.vehicleBrand || '',
         vehicleModel: booking.driverProfile?.vehicleModel || '',
         seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
         estimatedPrice: booking.estimatedPrice,
+        paymentMethod: booking.paymentMethod,
         driverEtaMinutes: booking.driverEtaMinutes || 10,
         countdownSeconds: countdown,
         shareTripEnabled: booking.shareTripEnabled,
         driverName: booking.driverProfile?.user.name || null,
         driverPhone: booking.driverProfile?.user.phone || null,
+        driverVehicleBrand: booking.driverProfile?.vehicleBrand || null,
+        driverVehicleModel: booking.driverProfile?.vehicleModel || null,
+        driverVehicleColor: booking.driverProfile?.vehicleColor || null,
+        driverVehiclePlate: booking.driverProfile?.vehiclePlate || null,
       },
     };
   }
