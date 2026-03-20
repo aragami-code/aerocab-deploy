@@ -129,43 +129,58 @@ export class BookingsService {
       }
     }
 
-    // Vérification et déduction des points AVANT création (évite booking sans paiement)
-    if (dto.paymentMethod === 'points') {
-      const pointsNeeded = Math.ceil(finalPrice / 100); // 1 pt = 100 FCFA
-      await this.points.deductPoints(
-        passengerId,
-        pointsNeeded,
-        `Course ${dto.departureAirport} → ${dto.destination}`,
-      );
-    }
-
     // Sélection du driver selon le paramètre activé
     const driver = await this.findBestDriver(dto.departureAirport);
 
-    const booking = await this.prisma.booking.create({
-      data: {
-        passengerId,
-        driverProfileId: driver?.id || null,
-        flightNumber: dto.flightNumber || null,
-        departureAirport: dto.departureAirport,
-        destination: dto.destination,
-        destLat: dto.destLat ?? null,
-        destLng: dto.destLng ?? null,
-        vehicleType: dto.vehicleType,
-        paymentMethod: dto.paymentMethod,
-        estimatedPrice: finalPrice,  // prix backend après promo, pas frontend
-        promoCode: appliedPromoCode,
-        discountAmount,
-        status: 'pending',
-        driverEtaMinutes: 10,
-      },
-      include: {
-        driverProfile: {
-          include: {
-            user: { select: { id: true, name: true } },
+    // Points + booking creation dans une transaction atomique
+    const booking = await this.prisma.$transaction(async (tx) => {
+      if (dto.paymentMethod === 'points') {
+        const pointsNeeded = Math.ceil(finalPrice / 100); // 1 pt = 100 FCFA
+        const balResult = await tx.pointsTransaction.aggregate({
+          where: { userId: passengerId },
+          _sum: { points: true },
+        });
+        const balance = balResult._sum.points ?? 0;
+        if (balance < pointsNeeded) {
+          throw new BadRequestException(
+            `Solde de points insuffisant : ${balance} pts disponibles, ${pointsNeeded} pts requis`,
+          );
+        }
+        await tx.pointsTransaction.create({
+          data: {
+            userId: passengerId,
+            type: 'debit',
+            points: -pointsNeeded,
+            label: `Course ${dto.departureAirport} → ${dto.destination}`,
+          },
+        });
+      }
+
+      return tx.booking.create({
+        data: {
+          passengerId,
+          driverProfileId: driver?.id || null,
+          flightNumber: dto.flightNumber || null,
+          departureAirport: dto.departureAirport,
+          destination: dto.destination,
+          destLat: dto.destLat ?? null,
+          destLng: dto.destLng ?? null,
+          vehicleType: dto.vehicleType,
+          paymentMethod: dto.paymentMethod,
+          estimatedPrice: finalPrice,
+          promoCode: appliedPromoCode,
+          discountAmount,
+          status: 'pending',
+          driverEtaMinutes: 10,
+        },
+        include: {
+          driverProfile: {
+            include: {
+              user: { select: { id: true, name: true } },
+            },
           },
         },
-      },
+      });
     });
 
     // Credit loyalty points (1 pt per 100 FCFA)
