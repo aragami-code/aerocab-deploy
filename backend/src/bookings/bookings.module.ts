@@ -8,6 +8,7 @@ import { PrismaModule } from '../database/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { SettingsModule } from '../settings/settings.module';
+import { PromosModule } from '../promos/promos.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { SettingsModule } from '../settings/settings.module';
     NotificationsModule,
     PointsModule,
     SettingsModule,
+    PromosModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

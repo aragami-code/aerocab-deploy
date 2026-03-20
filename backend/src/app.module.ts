@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { PrismaModule } from './database/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -16,6 +17,8 @@ import { PointsModule } from './points/points.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SettingsModule } from './settings/settings.module';
 import { PaymentsModule } from './payments/payments.module';
+import { ReportsModule } from './reports/reports.module';
+import { PromosModule } from './promos/promos.module';
 
 @Module({
   imports: [
@@ -23,6 +26,7 @@ import { PaymentsModule } from './payments/payments.module';
       isGlobal: true,
       envFilePath: '../../.env',
     }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     RedisModule,
     AuthModule,
@@ -38,6 +42,8 @@ import { PaymentsModule } from './payments/payments.module';
     NotificationsModule,
     SettingsModule,
     PaymentsModule,
+    ReportsModule,
+    PromosModule,
   ],
   controllers: [AppController],
 })

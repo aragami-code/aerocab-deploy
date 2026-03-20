@@ -64,6 +64,16 @@ export class PaymentsService {
     return { paymentUrl: data.data.payment_url };
   }
 
+  // Remboursement — CinetPay Mobile Money Africa ne supporte pas les remboursements automatiques
+  async refund(
+    transactionId: string,
+    amount: number,
+  ): Promise<{ success: boolean; message: string }> {
+    this.logger.warn(`Refund requested for transaction ${transactionId}, amount ${amount}`);
+    // CinetPay ne supporte pas les remboursements via API pour Mobile Money (Afrique)
+    return { success: false, message: 'Remboursement non disponible via CinetPay' };
+  }
+
   // Vérifie le statut d'une transaction auprès de CinetPay
   async verify(transactionId: string): Promise<'ACCEPTED' | 'REFUSED' | 'PENDING'> {
     const apiKey = this.config.get<string>('CINETPAY_API_KEY');

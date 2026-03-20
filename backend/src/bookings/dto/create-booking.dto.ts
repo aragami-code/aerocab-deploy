@@ -32,4 +32,8 @@ export class CreateBookingDto {
   @IsOptional()
   @IsNumber()
   destLng?: number;
+
+  @IsOptional()
+  @IsString()
+  promoCode?: string;
 }

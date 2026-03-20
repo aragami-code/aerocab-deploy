@@ -1,6 +1,8 @@
-import { Controller, Post, Body, Logger } from '@nestjs/common';
+import { Controller, Post, Body, Logger, UseGuards } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { PrismaService } from '../database/prisma.service';
+import { JwtAuthGuard, RolesGuard } from '../auth/guards';
+import { Roles } from '../auth/decorators';
 
 const ACCESS_DURATION_MS = 48 * 60 * 60 * 1000;
 
@@ -64,5 +66,19 @@ export class PaymentsController {
     }
 
     return { received: true };
+  }
+
+  /**
+   * POST /payments/refund
+   * Admin only — demande de remboursement d'une transaction
+   */
+  @Post('refund')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  async refund(
+    @Body('transactionId') transactionId: string,
+    @Body('amount') amount: number,
+  ) {
+    return this.payments.refund(transactionId, amount);
   }
 }

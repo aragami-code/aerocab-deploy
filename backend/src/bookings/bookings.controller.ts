@@ -103,6 +103,11 @@ export class BookingsController {
   }
 
   // Admin
+  @Get(':id/positions')
+  getPositions(@Request() req: any, @Param('id') bookingId: string) {
+    return this.bookingsService.getBookingPositions(req.user.id, bookingId);
+  }
+
   @Get('admin/all')
   @UseGuards(RolesGuard)
   @Roles('admin')

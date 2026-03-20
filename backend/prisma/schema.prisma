@@ -58,6 +58,7 @@ model DriverProfile {
   updatedAt         DateTime                 @updatedAt @map("updated_at")
   bookings          Booking[]
   documents         DriverDocument[]
+  positions         DriverPosition[]
   user              User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([isAvailable, latitude, longitude])
@@ -131,6 +132,8 @@ model Booking {
   vehicleType      String         @map("vehicle_type")
   paymentMethod    String         @map("payment_method")
   estimatedPrice   Float          @map("estimated_price")
+  promoCode        String?        @map("promo_code")
+  discountAmount   Float?         @default(0) @map("discount_amount")
   status           BookingStatus  @default(pending)
   driverEtaMinutes Int?           @default(10) @map("driver_eta_minutes")
   shareTripEnabled Boolean        @default(false) @map("share_trip_enabled")
@@ -142,6 +145,7 @@ model Booking {
   destLng          Float?         @map("dest_lng")
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  positions        DriverPosition[]
 
   @@index([passengerId, status])
   @@index([status])
@@ -247,6 +251,34 @@ model AppSetting {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("app_settings")
+}
+
+model PromoCode {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code       String    @unique @db.VarChar(20)
+  discount   Int
+  maxUses    Int       @default(1) @map("max_uses")
+  usedCount  Int       @default(0) @map("used_count")
+  expiresAt  DateTime? @map("expires_at")
+  isActive   Boolean   @default(true) @map("is_active")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("promo_codes")
+}
+
+model DriverPosition {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId       String        @map("booking_id") @db.Uuid
+  driverProfileId String        @map("driver_profile_id") @db.Uuid
+  latitude        Float
+  longitude       Float
+  recordedAt      DateTime      @default(now()) @map("recorded_at")
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, recordedAt])
+  @@map("driver_positions")
 }
 
 enum UserRole {

@@ -242,6 +242,23 @@ export class DriversService {
       },
     });
 
+    // Sauvegarde la position si une course est en cours (pour le replay)
+    const activeBooking = await this.prisma.booking.findFirst({
+      where: { driverProfileId: profile.id, status: 'in_progress' },
+      select: { id: true, driverProfileId: true },
+    });
+
+    if (activeBooking) {
+      this.prisma.driverPosition.create({
+        data: {
+          bookingId: activeBooking.id,
+          driverProfileId: profile.id,
+          latitude: dto.latitude,
+          longitude: dto.longitude,
+        },
+      }).catch(() => {});
+    }
+
     return { message: 'Position mise a jour' };
   }
 
