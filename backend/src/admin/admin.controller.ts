@@ -76,6 +76,21 @@ export class AdminController {
     );
   }
 
+  // ── Reports ──────────────────────────────────────────
+
+  @Get('reports')
+  async getReports(
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getReports(
+      status,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
   // ── Access Passes ────────────────────────────────────
 
   @Get('access-passes')

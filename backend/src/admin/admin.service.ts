@@ -236,6 +236,37 @@ export class AdminService {
     };
   }
 
+  // ── Reports ──────────────────────────────────────────
+
+  async getReports(status?: string, page = 1, limit = 20) {
+    const where = status ? { status: status as any } : {};
+    const skip = (page - 1) * limit;
+
+    const [reports, total] = await Promise.all([
+      this.prisma.report.findMany({
+        where,
+        include: {
+          reporter: { select: { id: true, phone: true, name: true } },
+          reported: { select: { id: true, phone: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.report.count({ where }),
+    ]);
+
+    return {
+      data: reports,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
   // ── Access Passes ────────────────────────────────────
 
   async getAccessPasses(status?: string, page = 1, limit = 20) {
