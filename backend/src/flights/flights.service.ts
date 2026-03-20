@@ -46,7 +46,7 @@ export class FlightsService {
         airline: flight.airline.name,
         origin: `${flight.departure.airport} (${flight.departure.iata})`,
         destination: `${flight.arrival.airport} (${flight.arrival.iata})`,
-        arrivalAirport: flight.arrival.iata,
+        arrivalAirport: flight.arrival.iata?.trim().toUpperCase() ?? 'DLA',
         scheduledArrival: flight.arrival.scheduled || flight.arrival.estimated,
         status: flight.flight_status,
         source: 'api' as const,
