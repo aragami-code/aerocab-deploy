@@ -7,7 +7,8 @@ export class SmsService {
   private readonly isDev: boolean;
 
   constructor(private configService: ConfigService) {
-    this.isDev = configService.get('NODE_ENV', 'development') !== 'production';
+    this.isDev = configService.get('NODE_ENV', 'development') !== 'production'
+      || configService.get('FORCE_OTP_LOG') === 'true';
   }
 
   async sendOtp(phone: string, code: string): Promise<boolean> {
