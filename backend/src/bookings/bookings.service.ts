@@ -302,18 +302,14 @@ export class BookingsService {
 
     if (!booking) return { booking: null };
 
-    const createdAt = new Date(booking.createdAt).getTime();
-    const now = Date.now();
-    const etaSeconds = (booking.driverEtaMinutes || 10) * 60;
-    const elapsed = Math.floor((now - createdAt) / 1000);
-    const countdown = Math.max(0, etaSeconds - elapsed);
-
     // Récupère le statut du vol lié à cette réservation
     let flightStatus: {
       scheduledArrival: string;
       actualArrival: string | null;
       status: 'on_time' | 'delayed' | 'landed';
     } | null = null;
+
+    let liveEtaMinutes = booking.driverEtaMinutes || 10;
 
     if (booking.flightNumber) {
       const flight = await this.prisma.flight.findFirst({
@@ -328,10 +324,15 @@ export class BookingsService {
         let status: 'on_time' | 'delayed' | 'landed';
         if (actual) {
           status = 'landed';
+          liveEtaMinutes = 10; // déjà atterri, chauffeur en route
         } else if (scheduled < nowDate) {
           status = 'delayed';
+          liveEtaMinutes = 10; // heure dépassée, traiter comme atterri
         } else {
           status = 'on_time';
+          // Recalculer l'ETA en temps réel depuis l'heure d'atterrissage
+          const minutesUntilLanding = Math.floor((scheduled.getTime() - nowDate.getTime()) / 60000);
+          liveEtaMinutes = minutesUntilLanding + 15; // +15 min pour sortie aéroport
         }
 
         flightStatus = {
@@ -341,6 +342,12 @@ export class BookingsService {
         };
       }
     }
+
+    // Countdown basé sur l'ETA live (pas la valeur stockée en DB)
+    const etaSeconds = liveEtaMinutes * 60;
+    const createdAt = new Date(booking.createdAt).getTime();
+    const elapsed = Math.floor((Date.now() - createdAt) / 1000);
+    const countdown = Math.max(0, etaSeconds - elapsed);
 
     return {
       booking: {
@@ -355,7 +362,7 @@ export class BookingsService {
         seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
         estimatedPrice: booking.estimatedPrice,
         paymentMethod: booking.paymentMethod,
-        driverEtaMinutes: booking.driverEtaMinutes || 10,
+        driverEtaMinutes: liveEtaMinutes,
         countdownSeconds: countdown,
         shareTripEnabled: booking.shareTripEnabled,
         driverName: booking.driverProfile?.user.name || null,
