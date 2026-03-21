@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -44,7 +45,39 @@ export class BookingsService {
     private settingsService: SettingsService,
     private promosService: PromosService,
     private ridesGateway: RidesGateway,
+    private config: ConfigService,
   ) {}
+
+  /** Recherche le vol via AviationStack et le sauvegarde en DB si introuvable */
+  private async fetchAndSaveFlight(passengerId: string, flightNumber: string) {
+    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+    if (!apiKey) return null;
+    try {
+      const res = await fetch(
+        `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${flightNumber}`,
+      );
+      const data = (await res.json()) as { data?: any[] };
+      if (!data.data?.length) return null;
+      const f = data.data[0];
+      const scheduledArrival = f.arrival?.scheduled || f.arrival?.estimated;
+      if (!scheduledArrival) return null;
+      return this.prisma.flight.create({
+        data: {
+          userId: passengerId,
+          flightNumber: flightNumber.toUpperCase(),
+          airline: f.airline?.name || null,
+          origin: f.departure?.airport || null,
+          destination: f.arrival?.airport || null,
+          arrivalAirport: (f.arrival?.iata || 'DLA').toUpperCase(),
+          scheduledArrival: new Date(scheduledArrival),
+          actualArrival: f.arrival?.actual ? new Date(f.arrival.actual) : null,
+          source: 'api',
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
 
   // Sélectionne le meilleur driver selon le mode actif (proximité ou rating)
   private async findBestDriver(departureAirport: string, excludeDriverId?: string) {
@@ -312,10 +345,14 @@ export class BookingsService {
     let liveEtaMinutes = booking.driverEtaMinutes || 10;
 
     if (booking.flightNumber) {
-      const flight = await this.prisma.flight.findFirst({
+      let flight = await this.prisma.flight.findFirst({
         where: { userId: passengerId, flightNumber: booking.flightNumber },
         orderBy: { createdAt: 'desc' },
       });
+      // Vol absent en DB → on le récupère depuis AviationStack et on le sauvegarde
+      if (!flight) {
+        flight = await this.fetchAndSaveFlight(passengerId, booking.flightNumber);
+      }
       if (flight) {
         const scheduled = new Date(flight.scheduledArrival);
         const actual = flight.actualArrival ? new Date(flight.actualArrival) : null;

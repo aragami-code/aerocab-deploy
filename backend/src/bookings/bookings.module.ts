@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BookingsController } from './bookings.controller';
 import { BookingsService } from './bookings.service';
 import { RidesGateway } from './rides.gateway';
@@ -12,6 +12,7 @@ import { PromosModule } from '../promos/promos.module';
 
 @Module({
   imports: [
+    ConfigModule,
     PrismaModule,
     NotificationsModule,
     PointsModule,
