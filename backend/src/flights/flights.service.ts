@@ -147,8 +147,10 @@ export class FlightsService {
       const res = await fetch(
         `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${normalized}`,
       );
-      const data = (await res.json()) as { data?: any[] };
-      if (!data.data?.length) return null;
+      const data = (await res.json()) as { data?: any[]; error?: any };
+      // Si AviationStack renvoie une erreur (quota dépassé, clé invalide, vol inconnu)
+      // → fallback sur mock pour ne pas bloquer l'utilisateur
+      if (data.error || !data.data?.length) return this.getMockLiveDetails(normalized);
 
       // Prioriser le vol en cours (active), sinon scheduled, sinon premier résultat
       const f = data.data.find((d: any) => d.flight_status === 'active')
@@ -213,7 +215,7 @@ export class FlightsService {
         live,
       };
     } catch {
-      return null;
+      return this.getMockLiveDetails(normalized);
     }
   }
 
