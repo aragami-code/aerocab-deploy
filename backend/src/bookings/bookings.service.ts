@@ -162,10 +162,10 @@ export class BookingsService {
       }
     }
 
-    // Calcule l'ETA réel selon l'heure d'atterrissage du vol
-    // Si le vol n'est pas encore atterri, on ne dispatche pas le driver immédiatement
+    // Calcule l'ETA selon l'heure d'atterrissage du vol (modèle Blacklane)
+    // Le driver est TOUJOURS assigné à la réservation, même si le vol est dans plusieurs heures.
+    // Il reçoit les infos du vol dès le début et s'organise en conséquence.
     let driverEtaMinutes = 10; // défaut sans vol
-    let shouldDispatchNow = true;
     let scheduledLandingMinutes: number | null = null;
 
     if (dto.flightNumber) {
@@ -178,21 +178,16 @@ export class BookingsService {
         const minutesUntilLanding = Math.floor(
           (new Date(landingTime).getTime() - Date.now()) / 60000,
         );
-        if (minutesUntilLanding > 30) {
-          // Passager encore en vol — chauffeur sera notifié 30 min avant atterrissage
-          shouldDispatchNow = false;
+        if (minutesUntilLanding > 0) {
           scheduledLandingMinutes = minutesUntilLanding;
           driverEtaMinutes = minutesUntilLanding + 15; // atterrissage + sortie aéroport
-        } else if (minutesUntilLanding > 0) {
-          // Atterrissage imminent — dispatcher maintenant
-          driverEtaMinutes = minutesUntilLanding + 15;
         }
         // minutesUntilLanding <= 0 → déjà atterri, ETA = 10 min (défaut)
       }
     }
 
-    // Sélection du driver selon le paramètre activé (seulement si dispatch immédiat)
-    const driver = shouldDispatchNow ? await this.findBestDriver(dto.departureAirport) : null;
+    // Driver assigné immédiatement dans tous les cas (modèle Blacklane)
+    const driver = await this.findBestDriver(dto.departureAirport);
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
@@ -262,8 +257,8 @@ export class BookingsService {
     }
 
     // Notify passenger
-    const passengerMsg = !shouldDispatchNow && scheduledLandingMinutes !== null
-      ? `Réservation enregistrée. Votre chauffeur sera dépêché 30 min avant votre atterrissage (dans ~${scheduledLandingMinutes} min).`
+    const passengerMsg = scheduledLandingMinutes !== null
+      ? `Réservation confirmée. Votre chauffeur sera là à votre atterrissage (dans ~${scheduledLandingMinutes} min).`
       : `Votre course vers ${booking.destination} est enregistrée. Un chauffeur arrive dans ${booking.driverEtaMinutes} min.`;
     this.notifications.sendToUser(
       passengerId,
