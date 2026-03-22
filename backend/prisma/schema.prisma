@@ -44,6 +44,7 @@ model DriverProfile {
   vehicleColor      String                   @map("vehicle_color")
   vehiclePlate      String                   @map("vehicle_plate")
   vehicleYear       Int?                     @map("vehicle_year")
+  vehicleCategory   String?                  @map("vehicle_category")
   languages         String[]                 @default(["fr"])
   status            DriverVerificationStatus @default(pending)
   ratingAvg         Float                    @default(0) @map("rating_avg")

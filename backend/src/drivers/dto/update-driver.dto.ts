@@ -3,12 +3,14 @@ import {
   IsOptional,
   IsInt,
   IsArray,
+  IsIn,
   MinLength,
   MaxLength,
   ArrayMinSize,
   Min,
   Max,
 } from 'class-validator';
+import { VEHICLE_CATEGORIES } from './register-driver.dto';
 
 export class UpdateDriverDto {
   @IsOptional()
@@ -46,4 +48,9 @@ export class UpdateDriverDto {
   @ArrayMinSize(1, { message: 'Au moins une langue est requise' })
   @IsString({ each: true })
   languages?: string[];
+
+  @IsOptional()
+  @IsString()
+  @IsIn(VEHICLE_CATEGORIES, { message: 'Catégorie de véhicule invalide' })
+  vehicleCategory?: string;
 }

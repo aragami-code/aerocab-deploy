@@ -35,6 +35,7 @@ export class DriversService {
       vehicleColor: dto.vehicleColor,
       vehiclePlate: dto.vehiclePlate,
       ...(dto.vehicleYear !== undefined && { vehicleYear: dto.vehicleYear }),
+      ...(dto.vehicleCategory !== undefined && { vehicleCategory: dto.vehicleCategory }),
       languages: dto.languages,
     };
 
@@ -114,6 +115,7 @@ export class DriversService {
         }),
         ...(dto.vehicleYear !== undefined && { vehicleYear: dto.vehicleYear }),
         ...(dto.languages !== undefined && { languages: dto.languages }),
+        ...(dto.vehicleCategory !== undefined && { vehicleCategory: dto.vehicleCategory }),
       },
       include: {
         user: {

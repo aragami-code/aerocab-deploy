@@ -3,12 +3,16 @@ import {
   IsOptional,
   IsInt,
   IsArray,
+  IsIn,
   MinLength,
   MaxLength,
   ArrayMinSize,
   Min,
   Max,
 } from 'class-validator';
+
+export const VEHICLE_CATEGORIES = ['eco', 'eco_plus', 'standard', 'confort', 'confort_plus'] as const;
+export type VehicleCategory = typeof VEHICLE_CATEGORIES[number];
 
 export class RegisterDriverDto {
   @IsOptional()
@@ -42,6 +46,11 @@ export class RegisterDriverDto {
   @Min(2000)
   @Max(2030)
   vehicleYear?: number;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(VEHICLE_CATEGORIES, { message: 'Catégorie de véhicule invalide' })
+  vehicleCategory?: string;
 
   @IsArray()
   @ArrayMinSize(1, { message: 'Au moins une langue est requise' })

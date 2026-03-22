@@ -100,7 +100,11 @@ export class AdminService {
       await this.prisma.$transaction([
         this.prisma.driverProfile.update({
           where: { id: driverProfileId },
-          data: { status: 'approved', verifiedAt: new Date() },
+          data: {
+            status: 'approved',
+            verifiedAt: new Date(),
+            ...(dto.vehicleCategory ? { vehicleCategory: dto.vehicleCategory } : {}),
+          },
         }),
         this.prisma.driverDocument.updateMany({
           where: {

@@ -80,9 +80,10 @@ export class BookingsService {
   }
 
   // Sélectionne le meilleur driver selon le mode actif (proximité ou rating)
-  private async findBestDriver(departureAirport: string, excludeDriverId?: string) {
+  private async findBestDriver(departureAirport: string, excludeDriverId?: string, vehicleCategory?: string) {
     const proximityEnabled = await this.settingsService.isProximityAssignmentEnabled();
     const excludeClause = excludeDriverId ? Prisma.sql`AND id != ${excludeDriverId}::uuid` : Prisma.sql``;
+    const categoryClause = vehicleCategory ? Prisma.sql`AND vehicle_category = ${vehicleCategory}` : Prisma.sql``;
 
     if (proximityEnabled) {
       const coords = AIRPORT_COORDS[departureAirport];
@@ -104,6 +105,7 @@ export class BookingsService {
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
               ${excludeClause}
+              ${categoryClause}
             HAVING 6371 * acos(
                 LEAST(1.0,
                   cos(radians(${coords.lat})) * cos(radians(latitude))
@@ -132,6 +134,7 @@ export class BookingsService {
         status: 'approved',
         isAvailable: true,
         ...(excludeDriverId ? { id: { not: excludeDriverId } } : {}),
+        ...(vehicleCategory ? { vehicleCategory } : {}),
       },
       include: { user: { select: { id: true, name: true } } },
       orderBy: { ratingAvg: 'desc' },
@@ -187,7 +190,7 @@ export class BookingsService {
     }
 
     // Driver assigné immédiatement dans tous les cas (modèle Blacklane)
-    const driver = await this.findBestDriver(dto.departureAirport);
+    const driver = await this.findBestDriver(dto.departureAirport, undefined, dto.vehicleType);
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
@@ -546,8 +549,8 @@ export class BookingsService {
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
     if (booking.status !== 'pending') throw new BadRequestException('Statut incorrect');
 
-    // Cherche un autre driver disponible (en excluant celui qui refuse)
-    const nextDriver = await this.findBestDriver(booking.departureAirport, driverProfile.id);
+    // Cherche un autre driver disponible (en excluant celui qui refuse, même catégorie)
+    const nextDriver = await this.findBestDriver(booking.departureAirport, driverProfile.id, booking.vehicleType);
 
     // Réassigne à un nouveau driver ou laisse orphelin si aucun disponible
     const updated = await this.prisma.booking.update({
