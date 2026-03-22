@@ -135,87 +135,95 @@ export class FlightsService {
 
   /**
    * GET /flights/live/:flightNumber
-   * Données complètes du vol : infos statiques + position temps réel
+   * Infos statiques via AeroDataBox + position live via OpenSky
    */
   async getLiveFlightDetails(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
-    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
 
-    if (!apiKey) return this.getMockLiveDetails(normalized);
+    if (!aeroDataBoxKey) return this.getMockLiveDetails(normalized);
 
+    const staticData = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
+    if (!staticData) return this.getMockLiveDetails(normalized);
+
+    // Position live via OpenSky (gratuit, sans clé)
+    const live = staticData.callSign
+      ? await this.getOpenSkyPosition(staticData.callSign)
+      : null;
+
+    const { callSign, ...rest } = staticData;
+    return { ...rest, live };
+  }
+
+  /**
+   * Récupère les infos complètes d'un vol via AeroDataBox (RapidAPI)
+   */
+  private async getAeroDataBoxFlight(flightNumber: string, apiKey: string) {
     try {
       const res = await fetch(
-        `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${normalized}`,
+        `https://aerodatabox.p.rapidapi.com/flights/number/${flightNumber}`,
+        {
+          headers: {
+            'X-RapidAPI-Key': apiKey,
+            'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com',
+          },
+        },
       );
-      const data = (await res.json()) as { data?: any[]; error?: any };
-      // Si AviationStack renvoie une erreur (quota dépassé, clé invalide, vol inconnu)
-      // → fallback sur mock pour ne pas bloquer l'utilisateur
-      if (data.error || !data.data?.length) return this.getMockLiveDetails(normalized);
+      if (!res.ok) return null;
 
-      // Prioriser le vol en cours (active), sinon scheduled, sinon premier résultat
-      const f = data.data.find((d: any) => d.flight_status === 'active')
-             ?? data.data.find((d: any) => d.flight_status === 'scheduled')
-             ?? data.data[0];
-      const flightIcao: string | null = f.flight?.icao ?? null;
+      const data = await res.json() as any[];
+      if (!Array.isArray(data) || !data.length) return null;
 
-      // Position live : d'abord AviationStack, sinon OpenSky (gratuit, sans clé)
-      let live: {
-        latitude: number; longitude: number; altitude: number;
-        speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
-      } | null = null;
+      // Prioriser le vol en cours, sinon scheduled
+      const f = data.find((d: any) => d.status === 'EnRoute')
+             ?? data.find((d: any) => d.status === 'Departed')
+             ?? data.find((d: any) => d.status === 'Scheduled')
+             ?? data[0];
 
-      if (f.live && f.live.latitude != null) {
-        live = {
-          latitude: f.live.latitude,
-          longitude: f.live.longitude,
-          altitude: f.live.altitude,
-          speedHorizontal: f.live.speed_horizontal,
-          direction: f.live.direction,
-          isGround: f.live.is_ground,
-          updatedAt: f.live.updated,
-        };
-      } else if (flightIcao) {
-        live = await this.getOpenSkyPosition(flightIcao);
-      }
+      const statusMap: Record<string, string> = {
+        EnRoute: 'active', Departed: 'active', Arrived: 'landed',
+        Scheduled: 'scheduled', Canceled: 'cancelled', Diverted: 'diverted',
+      };
+
+      const toIso = (t?: string | null) => t ? new Date(t).toISOString() : null;
 
       return {
-        flightNumber: f.flight?.iata ?? normalized,
-        flightIcao,
-        status: f.flight_status ?? null,
-
+        flightNumber: f.number ?? flightNumber,
+        flightIcao: f.callSign ?? null,
+        callSign: f.callSign ?? null,
+        status: statusMap[f.status] ?? 'scheduled',
         airline: {
           name: f.airline?.name ?? null,
           iata: f.airline?.iata ?? null,
           icao: f.airline?.icao ?? null,
         },
         aircraft: {
-          type: f.aircraft?.iata ?? null,
-          icao: f.aircraft?.icao ?? null,
-          registration: f.aircraft?.registration ?? null,
+          type: f.aircraft?.model ?? null,
+          icao: null,
+          registration: f.aircraft?.reg ?? null,
         },
         departure: {
-          airport: f.departure?.airport ?? null,
-          iata: f.departure?.iata ?? null,
+          airport: f.departure?.airport?.name ?? null,
+          iata: f.departure?.airport?.iata ?? null,
           terminal: f.departure?.terminal ?? null,
           gate: f.departure?.gate ?? null,
-          scheduled: f.departure?.scheduled ?? null,
-          actual: f.departure?.actual ?? null,
+          scheduled: toIso(f.departure?.scheduledTime?.utc),
+          actual: toIso(f.departure?.actualTime?.utc),
           delay: f.departure?.delay ?? 0,
         },
         arrival: {
-          airport: f.arrival?.airport ?? null,
-          iata: f.arrival?.iata ?? null,
+          airport: f.arrival?.airport?.name ?? null,
+          iata: f.arrival?.airport?.iata ?? null,
           terminal: f.arrival?.terminal ?? null,
-          baggage: f.arrival?.baggage ?? null,
-          scheduled: f.arrival?.scheduled ?? null,
-          estimated: f.arrival?.estimated ?? null,
-          actual: f.arrival?.actual ?? null,
+          baggage: f.arrival?.baggageBelt ?? null,
+          scheduled: toIso(f.arrival?.scheduledTime?.utc),
+          estimated: toIso(f.arrival?.estimatedTime?.utc),
+          actual: toIso(f.arrival?.actualTime?.utc),
           delay: f.arrival?.delay ?? 0,
         },
-        live,
       };
     } catch {
-      return this.getMockLiveDetails(normalized);
+      return null;
     }
   }
 
