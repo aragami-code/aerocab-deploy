@@ -400,6 +400,7 @@ export class BookingsService {
         driverEtaMinutes: liveEtaMinutes,
         countdownSeconds: countdown,
         shareTripEnabled: booking.shareTripEnabled,
+        driverUserId: booking.driverProfile?.user.id || null,
         driverName: booking.driverProfile?.user.name || null,
         driverPhone: booking.driverProfile?.user.phone || null,
         driverVehicleBrand: booking.driverProfile?.vehicleBrand || null,
