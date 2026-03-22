@@ -18,39 +18,37 @@ export class DriversService {
   constructor(private prisma: PrismaService) {}
 
   async register(userId: string, dto: RegisterDriverDto) {
-    // Check if user already has a driver profile
-    const existing = await this.prisma.driverProfile.findUnique({
-      where: { userId },
-    });
+    const existing = await this.prisma.driverProfile.findUnique({ where: { userId } });
 
-    if (existing) {
-      throw new BadRequestException('Profil chauffeur deja cree');
-    }
-
-    // Update user role to driver and name
+    // Update user role (and name if provided)
     await this.prisma.user.update({
       where: { id: userId },
-      data: { role: 'driver', name: dto.name },
+      data: {
+        role: 'driver',
+        ...(dto.name ? { name: dto.name } : {}),
+      },
     });
 
-    // Create driver profile
-    const profile = await this.prisma.driverProfile.create({
-      data: {
-        userId,
-        vehicleBrand: dto.vehicleBrand,
-        vehicleModel: dto.vehicleModel,
-        vehicleColor: dto.vehicleColor,
-        vehiclePlate: dto.vehiclePlate,
-        vehicleYear: dto.vehicleYear,
-        languages: dto.languages,
-      },
-      include: {
-        user: {
-          select: { id: true, phone: true, name: true, role: true },
-        },
-        documents: true,
-      },
-    });
+    const vehicleData = {
+      vehicleBrand: dto.vehicleBrand,
+      vehicleModel: dto.vehicleModel,
+      vehicleColor: dto.vehicleColor,
+      vehiclePlate: dto.vehiclePlate,
+      ...(dto.vehicleYear !== undefined && { vehicleYear: dto.vehicleYear }),
+      languages: dto.languages,
+    };
+
+    // Upsert: update if exists (keeps existing status/rating), create if not
+    const profile = existing
+      ? await this.prisma.driverProfile.update({
+          where: { userId },
+          data: vehicleData,
+          include: { user: { select: { id: true, phone: true, name: true, role: true } }, documents: true },
+        })
+      : await this.prisma.driverProfile.create({
+          data: { userId, ...vehicleData },
+          include: { user: { select: { id: true, phone: true, name: true, role: true } }, documents: true },
+        });
 
     this.logger.log(`Driver registered: ${userId}`);
     return profile;

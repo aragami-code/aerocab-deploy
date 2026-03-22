@@ -11,10 +11,11 @@ import {
 } from 'class-validator';
 
 export class RegisterDriverDto {
+  @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(50)
-  name!: string;
+  name?: string;
 
   @IsString()
   @MinLength(1)
