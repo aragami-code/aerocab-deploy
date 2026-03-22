@@ -19,6 +19,17 @@ export class FlightsController {
   constructor(private flightsService: FlightsService) {}
 
   /**
+   * GET /flights/live/:flightNumber
+   * Données complètes : infos statiques + position temps réel
+   */
+  @Get('live/:flightNumber')
+  async getLiveFlightDetails(@Param('flightNumber') flightNumber: string) {
+    const result = await this.flightsService.getLiveFlightDetails(flightNumber);
+    if (!result) return { found: false };
+    return { found: true, flight: result };
+  }
+
+  /**
    * GET /flights/search?flightNumber=AF946
    * Search for flight info from API / mock
    */

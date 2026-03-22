@@ -134,6 +134,106 @@ export class FlightsService {
   }
 
   /**
+   * GET /flights/live/:flightNumber
+   * Données complètes du vol : infos statiques + position temps réel
+   */
+  async getLiveFlightDetails(flightNumber: string) {
+    const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
+    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+
+    if (!apiKey) return this.getMockLiveDetails(normalized);
+
+    try {
+      const res = await fetch(
+        `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${normalized}`,
+      );
+      const data = (await res.json()) as { data?: any[] };
+      if (!data.data?.length) return null;
+
+      const f = data.data[0];
+      return {
+        flightNumber: f.flight?.iata ?? normalized,
+        flightIcao: f.flight?.icao ?? null,
+        status: f.flight_status ?? null,          // active | scheduled | landed | cancelled
+
+        airline: {
+          name: f.airline?.name ?? null,
+          iata: f.airline?.iata ?? null,
+          icao: f.airline?.icao ?? null,
+        },
+        aircraft: {
+          type: f.aircraft?.iata ?? null,          // ex: B77W, A320
+          icao: f.aircraft?.icao ?? null,
+          registration: f.aircraft?.registration ?? null,
+        },
+        departure: {
+          airport: f.departure?.airport ?? null,
+          iata: f.departure?.iata ?? null,
+          terminal: f.departure?.terminal ?? null,
+          gate: f.departure?.gate ?? null,
+          scheduled: f.departure?.scheduled ?? null,
+          actual: f.departure?.actual ?? null,
+          delay: f.departure?.delay ?? 0,
+        },
+        arrival: {
+          airport: f.arrival?.airport ?? null,
+          iata: f.arrival?.iata ?? null,
+          terminal: f.arrival?.terminal ?? null,
+          baggage: f.arrival?.baggage ?? null,
+          scheduled: f.arrival?.scheduled ?? null,
+          estimated: f.arrival?.estimated ?? null,
+          actual: f.arrival?.actual ?? null,
+          delay: f.arrival?.delay ?? 0,
+        },
+        live: f.live ? {
+          latitude: f.live.latitude,
+          longitude: f.live.longitude,
+          altitude: f.live.altitude,        // mètres
+          speedHorizontal: f.live.speed_horizontal, // km/h
+          direction: f.live.direction,      // degrés
+          isGround: f.live.is_ground,
+          updatedAt: f.live.updated,
+        } : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private getMockLiveDetails(flightNumber: string) {
+    const prefix = flightNumber.slice(0, 2);
+    const airlines: Record<string, { name: string; iata: string }> = {
+      AF: { name: 'Air France', iata: 'AF' },
+      TK: { name: 'Turkish Airlines', iata: 'TK' },
+      ET: { name: 'Ethiopian Airlines', iata: 'ET' },
+      CM: { name: 'Camair-Co', iata: 'QC' },
+    };
+    const airline = airlines[prefix] ?? { name: 'Unknown Airline', iata: prefix };
+    const dep = new Date(); dep.setHours(dep.getHours() - 5);
+    const arr = new Date(); arr.setHours(arr.getHours() + 2);
+    return {
+      flightNumber,
+      flightIcao: null,
+      status: 'active',
+      airline: { name: airline.name, iata: airline.iata, icao: null },
+      aircraft: { type: 'B77W', icao: 'B77W', registration: 'F-GSQI' },
+      departure: {
+        airport: 'Paris Charles de Gaulle', iata: 'CDG', terminal: '2E',
+        gate: 'K45', scheduled: dep.toISOString(), actual: dep.toISOString(), delay: 0,
+      },
+      arrival: {
+        airport: 'Douala International', iata: 'DLA', terminal: 'A',
+        baggage: 'B3', scheduled: arr.toISOString(), estimated: arr.toISOString(), actual: null, delay: 0,
+      },
+      live: {
+        latitude: 10.5, longitude: 5.2, altitude: 11278,
+        speedHorizontal: 890, direction: 175, isGround: false,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  /**
    * Mock flight data for development
    */
   private getMockFlightInfo(flightNumber: string) {
