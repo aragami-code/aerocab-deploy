@@ -45,8 +45,9 @@ export class AuthService {
       );
     }
 
-    // Generate 6-digit OTP (fixed in dev mode for easy testing)
-    const isDev = this.config.get('NODE_ENV', 'development') !== 'production';
+    // Generate 6-digit OTP (fixed in dev mode or when FORCE_OTP_LOG=true)
+    const isDev = this.config.get('NODE_ENV', 'development') !== 'production'
+      || this.config.get('FORCE_OTP_LOG') === 'true';
     const code = isDev ? '123456' : Math.floor(100000 + Math.random() * 900000).toString();
 
     // Store OTP in Redis
