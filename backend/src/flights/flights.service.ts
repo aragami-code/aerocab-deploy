@@ -151,10 +151,32 @@ export class FlightsService {
       if (!data.data?.length) return null;
 
       const f = data.data[0];
+      const flightIcao: string | null = f.flight?.icao ?? null;
+
+      // Position live : d'abord AviationStack, sinon OpenSky (gratuit, sans clé)
+      let live: {
+        latitude: number; longitude: number; altitude: number;
+        speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
+      } | null = null;
+
+      if (f.live && f.live.latitude != null) {
+        live = {
+          latitude: f.live.latitude,
+          longitude: f.live.longitude,
+          altitude: f.live.altitude,
+          speedHorizontal: f.live.speed_horizontal,
+          direction: f.live.direction,
+          isGround: f.live.is_ground,
+          updatedAt: f.live.updated,
+        };
+      } else if (flightIcao) {
+        live = await this.getOpenSkyPosition(flightIcao);
+      }
+
       return {
         flightNumber: f.flight?.iata ?? normalized,
-        flightIcao: f.flight?.icao ?? null,
-        status: f.flight_status ?? null,          // active | scheduled | landed | cancelled
+        flightIcao,
+        status: f.flight_status ?? null,
 
         airline: {
           name: f.airline?.name ?? null,
@@ -162,7 +184,7 @@ export class FlightsService {
           icao: f.airline?.icao ?? null,
         },
         aircraft: {
-          type: f.aircraft?.iata ?? null,          // ex: B77W, A320
+          type: f.aircraft?.iata ?? null,
           icao: f.aircraft?.icao ?? null,
           registration: f.aircraft?.registration ?? null,
         },
@@ -185,15 +207,57 @@ export class FlightsService {
           actual: f.arrival?.actual ?? null,
           delay: f.arrival?.delay ?? 0,
         },
-        live: f.live ? {
-          latitude: f.live.latitude,
-          longitude: f.live.longitude,
-          altitude: f.live.altitude,        // mètres
-          speedHorizontal: f.live.speed_horizontal, // km/h
-          direction: f.live.direction,      // degrés
-          isGround: f.live.is_ground,
-          updatedAt: f.live.updated,
-        } : null,
+        live,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Récupère la position live d'un vol via OpenSky Network (gratuit, sans clé)
+   * callsign = code ICAO du vol, ex: "AFR946"
+   */
+  private async getOpenSkyPosition(callsign: string): Promise<{
+    latitude: number; longitude: number; altitude: number;
+    speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
+  } | null> {
+    try {
+      const res = await fetch(
+        `https://opensky-network.org/api/states/all?callsign=${callsign}`,
+        { headers: { 'Accept': 'application/json' } },
+      );
+      if (!res.ok) return null;
+
+      const data = (await res.json()) as { states?: any[][] };
+      if (!data.states?.length) return null;
+
+      // OpenSky renvoie tous les vols avec ce callsign (souvent un seul)
+      // Colonnes: [icao24, callsign, origin_country, time_position, last_contact,
+      //            longitude(5), latitude(6), baro_altitude(7), on_ground(8),
+      //            velocity(9 m/s), true_track(10 °), vertical_rate(11), ...]
+      const state = data.states.find(
+        (s) => s[1]?.trim().toUpperCase() === callsign.toUpperCase(),
+      ) ?? data.states[0];
+
+      const longitude   = state[5] as number | null;
+      const latitude    = state[6] as number | null;
+      const baroAlt     = state[7] as number | null;   // mètres
+      const onGround    = state[8] as boolean;
+      const velocityMs  = state[9] as number | null;   // m/s → km/h
+      const trueTrack   = state[10] as number | null;  // degrés
+      const lastContact = state[4] as number;           // timestamp UNIX
+
+      if (latitude == null || longitude == null) return null;
+
+      return {
+        latitude,
+        longitude,
+        altitude: baroAlt ?? 0,
+        speedHorizontal: velocityMs != null ? Math.round(velocityMs * 3.6) : 0,
+        direction: trueTrack ?? 0,
+        isGround: onGround,
+        updatedAt: new Date(lastContact * 1000).toISOString(),
       };
     } catch {
       return null;
