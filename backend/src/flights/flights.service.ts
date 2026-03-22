@@ -150,7 +150,10 @@ export class FlightsService {
       const data = (await res.json()) as { data?: any[] };
       if (!data.data?.length) return null;
 
-      const f = data.data[0];
+      // Prioriser le vol en cours (active), sinon scheduled, sinon premier résultat
+      const f = data.data.find((d: any) => d.flight_status === 'active')
+             ?? data.data.find((d: any) => d.flight_status === 'scheduled')
+             ?? data.data[0];
       const flightIcao: string | null = f.flight?.icao ?? null;
 
       // Position live : d'abord AviationStack, sinon OpenSky (gratuit, sans clé)
