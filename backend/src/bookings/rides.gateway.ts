@@ -10,6 +10,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '../database/prisma.service';
 
 /**
  * Gateway principal (namespace /) pour les chauffeurs.
@@ -29,7 +30,10 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(RidesGateway.name);
   private userSockets = new Map<string, string[]>();
 
-  constructor(private jwtService: JwtService) {}
+  constructor(
+    private jwtService: JwtService,
+    private prisma: PrismaService,
+  ) {}
 
   async handleConnection(client: Socket) {
     try {
@@ -82,7 +86,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * emit('join:driver', { driverId: profile.id })
    */
   @SubscribeMessage('join:driver')
-  handleJoinDriver(
+  async handleJoinDriver(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { driverId: string },
   ) {
@@ -92,5 +96,31 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
       `[Rides] Driver ${client.data.userId} joined room driver:${data.driverId}`,
     );
     client.emit('joined:driver', { room: `driver:${data.driverId}` });
+
+    // Re-envoyer le booking pending s'il en existe un (rattrapage de race condition)
+    try {
+      const pending = await this.prisma.booking.findFirst({
+        where: { driverProfileId: data.driverId, status: 'pending' },
+        include: { passenger: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (pending) {
+        const seats: Record<string, number> = {
+          eco: 4, eco_plus: 4, standard: 5, confort: 5, confort_plus: 7,
+        };
+        client.emit('booking:new_request', {
+          id: pending.id,
+          passengerId: pending.passengerId,
+          passengerName: pending.passenger?.name ?? null,
+          flightNumber: pending.flightNumber,
+          destination: pending.destination,
+          vehicleType: pending.vehicleType,
+          estimatedPrice: pending.estimatedPrice,
+          departureAirport: pending.departureAirport,
+          seats: seats[pending.vehicleType] ?? 4,
+        });
+        this.logger.log(`[Rides] Re-sent pending booking ${pending.id} to driver ${data.driverId}`);
+      }
+    } catch { /* non bloquant */ }
   }
 }
