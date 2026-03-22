@@ -7,12 +7,17 @@ export class RedisService implements OnModuleDestroy {
   private readonly client: Redis;
 
   constructor(private configService: ConfigService) {
-    this.client = new Redis({
-      host: this.configService.get('REDIS_HOST', 'localhost'),
-      port: this.configService.get('REDIS_PORT', 6379),
-      password: this.configService.get('REDIS_PASSWORD', undefined),
-      db: this.configService.get('REDIS_DB', 0),
-    });
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    if (redisUrl) {
+      this.client = new Redis(redisUrl);
+    } else {
+      this.client = new Redis({
+        host: this.configService.get('REDIS_HOST', 'localhost'),
+        port: this.configService.get('REDIS_PORT', 6379),
+        password: this.configService.get('REDIS_PASSWORD', undefined),
+        db: this.configService.get('REDIS_DB', 0),
+      });
+    }
   }
 
   async get(key: string): Promise<string | null> {
