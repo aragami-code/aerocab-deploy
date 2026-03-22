@@ -601,6 +601,49 @@ export class BookingsService {
 
     if (!booking) return { booking: null };
 
+    // Statut du vol en temps réel
+    let flightStatus: {
+      scheduledArrival: string;
+      actualArrival: string | null;
+      status: 'on_time' | 'delayed' | 'landed';
+      minutesUntilLanding: number;
+    } | null = null;
+
+    if (booking.flightNumber) {
+      let flight = await this.prisma.flight.findFirst({
+        where: { flightNumber: booking.flightNumber },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!flight) {
+        flight = await this.fetchAndSaveFlight(booking.passengerId, booking.flightNumber);
+      }
+      if (flight) {
+        const scheduled = new Date(flight.scheduledArrival);
+        const actual = flight.actualArrival ? new Date(flight.actualArrival) : null;
+        const now = new Date();
+        let status: 'on_time' | 'delayed' | 'landed';
+        let minutesUntilLanding: number;
+
+        if (actual) {
+          status = 'landed';
+          minutesUntilLanding = 0;
+        } else if (scheduled < now) {
+          status = 'delayed';
+          minutesUntilLanding = 0;
+        } else {
+          status = 'on_time';
+          minutesUntilLanding = Math.floor((scheduled.getTime() - now.getTime()) / 60000);
+        }
+
+        flightStatus = {
+          scheduledArrival: flight.scheduledArrival.toISOString(),
+          actualArrival: flight.actualArrival?.toISOString() || null,
+          status,
+          minutesUntilLanding,
+        };
+      }
+    }
+
     return {
       booking: {
         id: booking.id,
@@ -609,6 +652,7 @@ export class BookingsService {
         passengerName: (booking.passenger as any)?.name || null,
         passengerPhone: (booking.passenger as any)?.phone || null,
         flightNumber: booking.flightNumber,
+        flightStatus,
         destination: booking.destination,
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
