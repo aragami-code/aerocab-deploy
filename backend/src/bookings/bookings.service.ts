@@ -449,69 +449,16 @@ export class BookingsService {
       const [bookings, total] = await Promise.all([
         this.prisma.booking.findMany({
           where: { passengerId },
-          include: {
-            driverProfile: {
-              include: {
-                user: { select: { id: true, name: true } },
-              },
-            },
-          },
           orderBy: { createdAt: 'desc' },
           skip,
           take: limit,
         }),
         this.prisma.booking.count({ where: { passengerId } }),
       ]);
-
-      // Enrich with conversationId if possible
-      const enriched = await Promise.all(
-        bookings.map(async (b) => {
-          if (!b.driverProfile || !b.driverProfile.userId) return b;
-          
-          try {
-            let flightId: string | null = null;
-            if (b.flightNumber) {
-              const flight = await this.prisma.flight.findFirst({
-                where: { userId: passengerId, flightNumber: b.flightNumber },
-                orderBy: { createdAt: 'desc' },
-                select: { id: true },
-              });
-              flightId = flight?.id || null;
-            }
-
-            const conv = await this.prisma.conversation.findFirst({
-              where: {
-                passengerId,
-                driverId: b.driverProfile.userId,
-                flightId: flightId,
-              },
-              select: { id: true },
-            });
-
-            return { ...b, conversationId: conv?.id };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.logger.error(`[HistoryEnrich] Error for booking ${b.id}: ${msg}`);
-            return b;
-          }
-        }),
-      );
-
-      return { data: enriched, total, page, limit };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`[HistoryGlobal] Error for user ${passengerId}: ${msg}`);
-      // Fallback: return raw data without enrichment if global failure
-      try {
-        const bookings = await this.prisma.booking.findMany({
-          where: { passengerId },
-          orderBy: { createdAt: 'desc' },
-          take: limit,
-        });
-        return { data: bookings, total: bookings.length, page, limit };
-      } catch (innerErr) {
-        return { data: [], total: 0, page, limit };
-      }
+      return { data: bookings, total, page, limit };
+    } catch (err: any) {
+      this.logger.error(`[HistoryMinimal] Error for user ${passengerId}: ${err.message || String(err)}`);
+      return { data: [], total: 0, page, limit };
     }
   }
 
