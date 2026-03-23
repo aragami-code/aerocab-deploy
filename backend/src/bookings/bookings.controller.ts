@@ -19,6 +19,11 @@ export class BookingsController {
     return this.bookingsService.getActiveBooking(req.user.id);
   }
 
+  @Get(':id')
+  findOne(@Request() req: any, @Param('id') id: string) {
+    return this.bookingsService.getBookingById(req.user.id, id);
+  }
+
   @Get('history')
   getHistory(
     @Request() req: any,

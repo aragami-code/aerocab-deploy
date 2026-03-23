@@ -459,7 +459,81 @@ export class BookingsService {
       }),
       this.prisma.booking.count({ where: { passengerId } }),
     ]);
-    return { data: bookings, total, page, limit };
+
+    // Enrich with conversationId if possible
+    const enriched = await Promise.all(
+      bookings.map(async (b) => {
+        if (!b.driverProfile) return b;
+        
+        // Find matching flight for the flight number if it exists
+        let flightId: string | undefined;
+        if (b.flightNumber) {
+          const flight = await this.prisma.flight.findFirst({
+            where: { userId: passengerId, flightNumber: b.flightNumber },
+            orderBy: { createdAt: 'desc' },
+          });
+          flightId = flight?.id;
+        }
+
+        const conv = await this.prisma.conversation.findUnique({
+          where: {
+            passengerId_driverId_flightId: {
+              passengerId,
+              driverId: b.driverProfile.userId,
+              flightId: flightId || null as any,
+            },
+          },
+          select: { id: true },
+        });
+
+        return { ...b, conversationId: conv?.id };
+      }),
+    );
+
+    return { data: enriched, total, page, limit };
+  }
+
+  async getBookingById(userId: string, id: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id },
+      include: {
+        driverProfile: {
+          include: {
+            user: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== userId) throw new ForbiddenException('Accès refusé');
+
+    // Find conversationId
+    let conversationId: string | undefined;
+    if (booking.driverProfile) {
+      let flightId: string | undefined;
+      if (booking.flightNumber) {
+        const flight = await this.prisma.flight.findFirst({
+          where: { userId, flightNumber: booking.flightNumber },
+          orderBy: { createdAt: 'desc' },
+        });
+        flightId = flight?.id;
+      }
+
+      const conv = await this.prisma.conversation.findUnique({
+        where: {
+          passengerId_driverId_flightId: {
+            passengerId: userId,
+            driverId: booking.driverProfile.userId,
+            flightId: flightId || null as any,
+          },
+        },
+        select: { id: true },
+      });
+      conversationId = conv?.id;
+    }
+
+    return { ...booking, conversationId };
   }
 
   async getPassengerStats(passengerId: string) {
