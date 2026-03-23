@@ -478,20 +478,19 @@ export class BookingsService {
             flightId = flight?.id;
           }
 
-          const conv = await this.prisma.conversation.findUnique({
+          const conv = await this.prisma.conversation.findFirst({
             where: {
-              passengerId_driverId_flightId: {
-                passengerId,
-                driverId: b.driverProfile.userId,
-                flightId: flightId || (null as any),
-              },
+              passengerId,
+              driverId: b.driverProfile.userId,
+              flightId: flightId || null,
             },
             select: { id: true },
           });
 
           return { ...b, conversationId: conv?.id };
         } catch (err) {
-          this.logger.error(`Error enriching booking ${b.id}: ${err.message}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`Error enriching booking ${b.id}: ${msg}`);
           return b;
         }
       }),
