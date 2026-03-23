@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
@@ -38,6 +38,8 @@ const VEHICLE_SEATS: Record<string, number> = {
 
 @Injectable()
 export class BookingsService {
+  private readonly logger = new Logger(BookingsService.name);
+
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
@@ -465,28 +467,33 @@ export class BookingsService {
       bookings.map(async (b) => {
         if (!b.driverProfile) return b;
         
-        // Find matching flight for the flight number if it exists
-        let flightId: string | undefined;
-        if (b.flightNumber) {
-          const flight = await this.prisma.flight.findFirst({
-            where: { userId: passengerId, flightNumber: b.flightNumber },
-            orderBy: { createdAt: 'desc' },
-          });
-          flightId = flight?.id;
-        }
+        try {
+          // Find matching flight for the flight number if it exists
+          let flightId: string | undefined;
+          if (b.flightNumber) {
+            const flight = await this.prisma.flight.findFirst({
+              where: { userId: passengerId, flightNumber: b.flightNumber },
+              orderBy: { createdAt: 'desc' },
+            });
+            flightId = flight?.id;
+          }
 
-        const conv = await this.prisma.conversation.findUnique({
-          where: {
-            passengerId_driverId_flightId: {
-              passengerId,
-              driverId: b.driverProfile.userId,
-              flightId: flightId || null as any,
+          const conv = await this.prisma.conversation.findUnique({
+            where: {
+              passengerId_driverId_flightId: {
+                passengerId,
+                driverId: b.driverProfile.userId,
+                flightId: flightId || (null as any),
+              },
             },
-          },
-          select: { id: true },
-        });
+            select: { id: true },
+          });
 
-        return { ...b, conversationId: conv?.id };
+          return { ...b, conversationId: conv?.id };
+        } catch (err) {
+          this.logger.error(`Error enriching booking ${b.id}: ${err.message}`);
+          return b;
+        }
       }),
     );
 
