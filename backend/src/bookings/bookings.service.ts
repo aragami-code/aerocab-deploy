@@ -444,22 +444,24 @@ export class BookingsService {
   }
 
   async getBookingHistory(passengerId: string, page = 1, limit = 20) {
-    try {
-      const skip = Math.max(0, (page - 1) * limit);
-      const [bookings, total] = await Promise.all([
-        this.prisma.booking.findMany({
-          where: { passengerId },
-          orderBy: { createdAt: 'desc' },
-          skip,
-          take: limit,
-        }),
-        this.prisma.booking.count({ where: { passengerId } }),
-      ]);
-      return { data: bookings, total, page, limit };
-    } catch (err: any) {
-      this.logger.error(`[HistoryMinimal] Error for user ${passengerId}: ${err.message || String(err)}`);
-      return { data: [], total: 0, page, limit };
-    }
+    // Definitive isolation test: No DB calls
+    return { 
+      data: [{
+        id: '00000000-0000-0000-0000-000000000000',
+        passengerId,
+        departureAirport: 'DLA',
+        destination: 'Test Destination',
+        vehicleType: 'eco',
+        paymentMethod: 'cash',
+        estimatedPrice: 5000,
+        status: 'completed',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }], 
+      total: 1, 
+      page, 
+      limit 
+    };
   }
 
   async getBookingById(userId: string, id: string) {
