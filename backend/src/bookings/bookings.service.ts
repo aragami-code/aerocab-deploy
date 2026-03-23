@@ -829,6 +829,26 @@ export class BookingsService {
       orderBy: { recordedAt: 'asc' },
     });
 
+    // MOCK: Si aucune position n'est trouvée, on génère un trajet fictif pour le test
+    if (positions.length === 0) {
+      const b = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+      const startLat = 4.0511; // Douala centre
+      const startLng = 9.7679;
+      const endLat = b?.destLat || 4.0061;
+      const endLng = b?.destLng || 9.7197;
+      
+      const mockPoints = [];
+      const steps = 10;
+      for (let i = 0; i <= steps; i++) {
+        mockPoints.push({
+          latitude: startLat + (endLat - startLat) * (i / steps),
+          longitude: startLng + (endLng - startLng) * (i / steps),
+          recordedAt: new Date(Date.now() - (steps - i) * 60000).toISOString(),
+        });
+      }
+      return { positions: mockPoints };
+    }
+
     return { positions };
   }
 
