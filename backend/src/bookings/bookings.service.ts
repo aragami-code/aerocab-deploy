@@ -444,24 +444,49 @@ export class BookingsService {
   }
 
   async getBookingHistory(passengerId: string, page = 1, limit = 20) {
-    // Definitive isolation test: No DB calls
-    return { 
-      data: [{
-        id: '00000000-0000-0000-0000-000000000000',
-        passengerId,
-        departureAirport: 'DLA',
-        destination: 'Test Destination',
-        vehicleType: 'eco',
-        paymentMethod: 'cash',
-        estimatedPrice: 5000,
-        status: 'completed',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }], 
-      total: 1, 
-      page, 
-      limit 
-    };
+    try {
+      const skip = Math.max(0, (page - 1) * limit);
+      const [bookings, total] = await Promise.all([
+        this.prisma.booking.findMany({
+          where: { passengerId },
+          include: {
+            driverProfile: {
+              include: {
+                user: { select: { id: true, name: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        this.prisma.booking.count({ where: { passengerId } }),
+      ]);
+
+      // Simple enrichment for conversationId if driver exists
+      const enriched = await Promise.all(
+        bookings.map(async (b) => {
+          if (!b.driverProfile || !b.driverProfile.userId) return b;
+          try {
+            const conv = await this.prisma.conversation.findFirst({
+              where: {
+                passengerId,
+                driverId: b.driverProfile.userId,
+              },
+              select: { id: true },
+            });
+            return { ...b, conversationId: conv?.id };
+          } catch {
+            return b;
+          }
+        }),
+      );
+
+      return { data: enriched, total, page, limit };
+    } catch (err: any) {
+      this.logger.error(`[HistoryReal] Error for ${passengerId}: ${err.message}`);
+      return { data: [], total: 0, page, limit };
+    }
   }
 
   async getBookingById(userId: string, id: string) {
