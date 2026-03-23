@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request, InternalServerErrorException } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
@@ -25,21 +25,29 @@ export class BookingsController {
   }
 
   @Get('history')
-  getHistory(
+  async getHistory(
     @Request() req: any,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.bookingsService.getBookingHistory(
-      req.user.id,
-      page ? parseInt(page) : 1,
-      limit ? parseInt(limit) : 20,
-    );
+    try {
+      return await this.bookingsService.getBookingHistory(
+        req.user.id,
+        page ? parseInt(page) : 1,
+        limit ? parseInt(limit) : 20,
+      );
+    } catch (e) {
+      throw new InternalServerErrorException(`History Error: ${e.message || String(e)}`);
+    }
   }
 
   @Get('stats')
-  getStats(@Request() req: any) {
-    return this.bookingsService.getPassengerStats(req.user.id);
+  async getStats(@Request() req: any) {
+    try {
+      return await this.bookingsService.getPassengerStats(req.user.id);
+    } catch (e) {
+      throw new InternalServerErrorException(`Stats Error: ${e.message || String(e)}`);
+    }
   }
 
   @Patch(':id/share-trip')
