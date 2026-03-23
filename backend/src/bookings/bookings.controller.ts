@@ -19,35 +19,27 @@ export class BookingsController {
     return this.bookingsService.getActiveBooking(req.user.id);
   }
 
-  @Get(':id')
-  findOne(@Request() req: any, @Param('id') id: string) {
-    return this.bookingsService.getBookingById(req.user.id, id);
-  }
-
   @Get('history')
-  async getHistory(
+  getHistory(
     @Request() req: any,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    try {
-      return await this.bookingsService.getBookingHistory(
-        req.user.id,
-        page ? parseInt(page) : 1,
-        limit ? parseInt(limit) : 20,
-      );
-    } catch (e) {
-      throw new InternalServerErrorException(`History Error: ${e.message || String(e)}`);
-    }
+    return this.bookingsService.getBookingHistory(
+      req.user.id,
+      page ? parseInt(page) : 1,
+      limit ? parseInt(limit) : 20,
+    );
   }
 
   @Get('stats')
-  async getStats(@Request() req: any) {
-    try {
-      return await this.bookingsService.getPassengerStats(req.user.id);
-    } catch (e) {
-      throw new InternalServerErrorException(`Stats Error: ${e.message || String(e)}`);
-    }
+  getStats(@Request() req: any) {
+    return this.bookingsService.getPassengerStats(req.user.id);
+  }
+
+  @Get(':id')
+  findOne(@Request() req: any, @Param('id') id: string) {
+    return this.bookingsService.getBookingById(req.user.id, id);
   }
 
   @Patch(':id/share-trip')
