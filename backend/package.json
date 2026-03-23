@@ -5,7 +5,7 @@
   "description": "AeroCab Connect - API Backend (NestJS)",
   "scripts": {
     "dev": "nest start --watch",
-    "build": "nest build",
+    "build": "npx prisma generate && nest build",
     "start": "node dist/main",
     "start:prod": "node dist/main",
     "lint": "eslint . --ext .ts",
