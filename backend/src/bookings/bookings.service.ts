@@ -225,10 +225,16 @@ export class BookingsService {
     // but the broadcast will be sent to all.
     const driver = eligibleDrivers.length > 0 ? eligibleDrivers[0] : null;
 
+    // Sanity check: Coordinates (guards against NaN from client)
+    const cleanDestLat = (typeof dto.destLat === 'number' && !isNaN(dto.destLat)) ? dto.destLat : null;
+    const cleanDestLng = (typeof dto.destLng === 'number' && !isNaN(dto.destLng)) ? dto.destLng : null;
+    const cleanPickupLat = (typeof dto.pickupLat === 'number' && !isNaN(dto.pickupLat)) ? dto.pickupLat : null;
+    const cleanPickupLng = (typeof dto.pickupLng === 'number' && !isNaN(dto.pickupLng)) ? dto.pickupLng : null;
+
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
       if (dto.paymentMethod === 'points') {
-        const pointsNeeded = Math.ceil(finalPrice / 100); // 1 pt = 100 FCFA
+        const pointsNeeded = Math.ceil(finalPrice / 100); 
         const balResult = await tx.pointsTransaction.aggregate({
           where: { userId: passengerId },
           _sum: { points: true },
@@ -236,7 +242,7 @@ export class BookingsService {
         const balance = balResult._sum.points ?? 0;
         if (balance < pointsNeeded) {
           throw new BadRequestException(
-            `Solde de points insuffisant : ${balance} pts disponibles, ${pointsNeeded} pts requis`,
+            `Solde de points insuffisant : ${balance} pts disponibles`,
           );
         }
         await tx.pointsTransaction.create({
@@ -255,9 +261,9 @@ export class BookingsService {
           driverProfileId: driver?.id || null,
           flightNumber: dto.flightNumber || null,
           departureAirport: dto.departureAirport,
-          destination: dto.destination,
-          destLat: dto.destLat,
-          destLng: dto.destLng,
+          destination: dto.destination || 'Destination',
+          destLat: cleanDestLat,
+          destLng: cleanDestLng,
           vehicleType: dto.vehicleType,
           paymentMethod: dto.paymentMethod,
           estimatedPrice: finalPrice,
@@ -266,9 +272,9 @@ export class BookingsService {
           status: 'pending',
           driverEtaMinutes,
           type: dto.type || 'ARRIVAL',
-          pickupAddress: dto.pickupAddress || null,
-          pickupLat: dto.pickupLat || null,
-          pickupLng: dto.pickupLng || null,
+          pickupAddress: dto.pickupAddress || 'Aéroport',
+          pickupLat: cleanPickupLat,
+          pickupLng: cleanPickupLng,
         } as any,
         include: {
           passenger: { select: { name: true } },
