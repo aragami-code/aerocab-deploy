@@ -64,28 +64,24 @@ export class DispatchService {
     // Haversine formula in RAW SQL as per User Mandate
     const nearby = await this.prisma.$queryRaw<any[]>(
       Prisma.sql`
-        SELECT id,
-          6371 * acos(
-            LEAST(1.0,
-              cos(radians(${coords.lat})) * cos(radians(latitude))
-              * cos(radians(longitude) - radians(${coords.lng}))
-              + sin(radians(${coords.lat})) * sin(radians(latitude))
-            )
-          ) AS distance_km
-        FROM driver_profiles
-        WHERE status = 'approved'
-          AND is_available = true
-          AND is_online = true
-          AND latitude IS NOT NULL
-          AND longitude IS NOT NULL
-        HAVING 6371 * acos(
-            LEAST(1.0,
-              cos(radians(${coords.lat})) * cos(radians(latitude))
-              * cos(radians(longitude) - radians(${coords.lng}))
-              + sin(radians(${coords.lat})) * sin(radians(latitude))
-            )
-          ) <= ${PROXIMITY_RADIUS_KM}
-        ORDER BY distance_km ASC, score DESC
+        SELECT id, distance_km FROM (
+          SELECT id,
+            6371 * acos(
+              LEAST(1.0,
+                cos(radians(${coords.lat})) * cos(radians(latitude))
+                * cos(radians(longitude) - radians(${coords.lng}))
+                + sin(radians(${coords.lat})) * sin(radians(latitude))
+              )
+            ) AS distance_km
+          FROM driver_profiles
+          WHERE status = 'approved'
+            AND is_available = true
+            AND is_online = true
+            AND latitude IS NOT NULL
+            AND longitude IS NOT NULL
+        ) AS drivers
+        WHERE distance_km <= ${PROXIMITY_RADIUS_KM}
+        ORDER BY distance_km ASC
         LIMIT 20
       `
     );
