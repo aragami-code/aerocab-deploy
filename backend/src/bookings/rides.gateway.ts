@@ -123,4 +123,21 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     } catch { /* non bloquant */ }
   }
+
+  /**
+   * Notify a specific driver about a new booking request. 
+   * Used for broad broadcast (Pre-landing) and targeted broadcast (Post-landing).
+   */
+  notifyNewBooking(driverId: string, data: any) {
+    const seats: Record<string, number> = {
+      eco: 4, eco_plus: 4, standard: 5, confort: 5, confort_plus: 7,
+    };
+    
+    this.server.to(`driver:${driverId}`).emit('booking:new_request', {
+      ...data,
+      seats: seats[data.vehicleType] ?? 4,
+    });
+    
+    this.logger.log(`[Rides] Notified driver ${driverId} about booking ${data.id}`);
+  }
 }

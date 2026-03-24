@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { DispatchService } from './dispatch.service';
+import { PricingService } from './pricing.service';
 import { BookingsController } from './bookings.controller';
 import { BookingsService } from './bookings.service';
 import { RidesGateway } from './rides.gateway';
@@ -26,7 +28,7 @@ import { PromosModule } from '../promos/promos.module';
     }),
   ],
   controllers: [BookingsController],
-  providers: [BookingsService, RidesGateway],
-  exports: [BookingsService],
+  providers: [BookingsService, RidesGateway, DispatchService, PricingService],
+  exports: [BookingsService, DispatchService, PricingService],
 })
 export class BookingsModule {}

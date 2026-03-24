@@ -6,6 +6,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PointsService } from '../points/points.service';
 import { SettingsService } from '../settings/settings.service';
 import { PromosService } from '../promos/promos.service';
+import { PricingService } from './pricing.service';
+import { DispatchService } from './dispatch.service';
 import { RidesGateway } from './rides.gateway';
 import { Prisma } from '@prisma/client';
 
@@ -47,6 +49,8 @@ export class BookingsService {
     private settingsService: SettingsService,
     private promosService: PromosService,
     private ridesGateway: RidesGateway,
+    private pricingService: PricingService,
+    private dispatchService: DispatchService,
     private config: ConfigService,
   ) {}
 
@@ -145,11 +149,20 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
-    // Prix autoritatif depuis la table backend (ignore la valeur du client)
-    const authorizedPrice = VEHICLE_PRICES[dto.vehicleType];
-    if (!authorizedPrice) {
+    // Prix autoritatif depuis la table backend (avec Surge conditionnel)
+    let basePrice = VEHICLE_PRICES[dto.vehicleType];
+    if (!basePrice) {
       throw new BadRequestException(`Type de véhicule invalide: ${dto.vehicleType}`);
     }
+
+    // Phase 3: Injection du Surge Pricing (Calcul dynamique de la demande)
+    try {
+      basePrice = await this.pricingService.calculateEstimatedPrice(basePrice, dto.departureAirport);
+    } catch (err) {
+      this.logger.warn(`Surge Pricing failed, using base price: ${err.message}`);
+    }
+
+    const authorizedPrice = basePrice;
 
     // Applique le code promo si fourni
     let finalPrice = authorizedPrice;
@@ -191,8 +204,21 @@ export class BookingsService {
       }
     }
 
-    // Driver assigné immédiatement dans tous les cas (modèle Blacklane)
-    const driver = await this.findBestDriver(dto.departureAirport, undefined, dto.vehicleType);
+    // Phase 3: Smart Dispatch Activation
+    // Determine if Pre-landing (Flight is still in air) or Post-landing (Already arrived or no flight)
+    let isPreLanding = false;
+    if (scheduledLandingMinutes && scheduledLandingMinutes > 0) {
+      isPreLanding = true;
+    }
+
+    const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
+      { departureAirport: dto.departureAirport } as any, 
+      isPreLanding
+    );
+
+    // Initial driver assignment (Selection of the top one from the match for the initial record)
+    // but the broadcast will be sent to all.
+    const driver = eligibleDrivers.length > 0 ? eligibleDrivers[0] : null;
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
@@ -236,6 +262,7 @@ export class BookingsService {
           driverEtaMinutes,
         },
         include: {
+          passenger: { select: { name: true } },
           driverProfile: {
             include: {
               user: { select: { id: true, name: true } },
@@ -271,28 +298,31 @@ export class BookingsService {
       passengerMsg,
     ).catch(() => {});
 
-    // Notify driver if assigned
-    if (booking.driverProfile) {
-      this.notifications.sendToUser(
-        booking.driverProfile.user.id,
-        'Nouvelle course 🚗',
-        `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
-      ).catch(() => {});
+    // Phase 3: Smart Broadcast Activation
+    // Notify all eligible drivers (Pre-landing: All, Post-landing: Nearby)
+    if (eligibleDrivers.length > 0) {
+      for (const d of eligibleDrivers) {
+        // Send Push Notification
+        this.notifications.sendToUser(
+          d.userId, 
+          'Nouvelle course disponible 🚗',
+          `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`
+        ).catch(() => {});
 
-      // Emit socket to driver's personal room
-      this.ridesGateway.server
-        .to(`driver:${booking.driverProfileId}`)
-        .emit('booking:new_request', {
+        // Emit Socket.io
+        this.ridesGateway.notifyNewBooking(d.id, {
           id: booking.id,
           passengerId: booking.passengerId,
-          passengerName: null,
+          passengerName: booking.passenger?.name || 'Client',
           flightNumber: booking.flightNumber,
           destination: booking.destination,
           vehicleType: booking.vehicleType,
           estimatedPrice: booking.estimatedPrice,
           departureAirport: booking.departureAirport,
-          seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
+          isPreLanding: isPreLanding,
         });
+      }
+      this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} drivers.`);
     }
 
     return {
@@ -473,9 +503,19 @@ export class BookingsService {
                 passengerId,
                 driverId: b.driverProfile.userId,
               },
-              select: { id: true },
             });
-            return { ...b, conversationId: conv?.id };
+
+            const rating = conv ? await this.prisma.rating.findUnique({
+              where: {
+                fromUserId_conversationId: { fromUserId: passengerId, conversationId: conv.id },
+              },
+            }) : null;
+
+            return { 
+              ...b, 
+              conversationId: conv?.id,
+              hasRated: !!rating 
+            };
           } catch {
             return b;
           }
@@ -526,6 +566,23 @@ export class BookingsService {
           select: { id: true },
         });
         conversationId = conv?.id;
+
+        let hasRated = false;
+        if (conversationId) {
+          const rating = await this.prisma.rating.findUnique({
+            where: {
+              fromUserId_conversationId: { fromUserId: userId, conversationId },
+            },
+          });
+          hasRated = !!rating;
+        }
+
+        return { 
+          ...booking, 
+          estimatedPrice: booking.estimatedPrice || 0,
+          conversationId,
+          hasRated
+        };
       }
     } catch (e) {
       console.error('[Bookings] Error fetching conversationId:', e);
@@ -534,7 +591,8 @@ export class BookingsService {
     return { 
       ...booking, 
       estimatedPrice: booking.estimatedPrice || 0,
-      conversationId 
+      conversationId: undefined,
+      hasRated: false
     };
   }
 
