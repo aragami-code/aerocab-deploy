@@ -334,6 +334,10 @@ export class BookingsService {
       this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} drivers.`);
     }
 
+    if (isNaN(finalPrice)) {
+      throw new BadRequestException('Le calcul du prix a échoué (NaN)');
+    }
+
     return {
       id: booking.id,
       status: booking.status,
@@ -350,9 +354,9 @@ export class BookingsService {
       createdAt: booking.createdAt,
     };
     } catch (e: any) {
-      console.error('[BookingsService] createBooking error:', e?.message, e?.code, e?.meta);
+      this.logger.error(`[BookingsService] createBooking error: ${e?.message} | Code: ${e?.code} | Meta: ${JSON.stringify(e?.meta)}`);
       if (e instanceof BadRequestException) throw e;
-      throw new InternalServerErrorException('Booking creation failed');
+      throw new InternalServerErrorException(`Booking creation failed: ${e?.message || 'Unknown error'}`);
     }
   }
 
