@@ -840,6 +840,7 @@ export class BookingsService {
     });
 
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:driver_arrived', { id: updated.id });
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: updated.id, status: 'arrived_at_airport' });
     this.notifications.sendToUser(booking.passengerId, 'Chauffeur arrivé 📍', 'Votre chauffeur est à l\'aéroport.').catch(() => {});
 
     return { id: updated.id, status: updated.status };
@@ -859,6 +860,7 @@ export class BookingsService {
       data: { status: 'in_progress' },
     });
 
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: updated.id, status: 'in_progress' });
     return { id: updated.id, status: updated.status };
   }
 
@@ -883,6 +885,8 @@ export class BookingsService {
     ]);
 
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:completed', { id: updated.id });
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: updated.id, status: 'completed' });
+    this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_updated', { id: updated.id, status: 'completed' });
     this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroCab !').catch(() => {});
 
     // Points fidélité pour le chauffeur
