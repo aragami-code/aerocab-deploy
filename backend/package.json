@@ -5,9 +5,9 @@
   "description": "AeroCab Connect - API Backend (NestJS)",
   "scripts": {
     "dev": "nest start --watch",
-    "build": "npx prisma generate && npx prisma db push --accept-data-loss && nest build",
+    "build": "npx prisma generate && nest build",
     "start": "node dist/main",
-    "start:prod": "node dist/main",
+    "start:prod": "npx prisma db push --accept-data-loss && node dist/main",
     "lint": "eslint . --ext .ts",
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate",
