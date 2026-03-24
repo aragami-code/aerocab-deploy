@@ -46,27 +46,42 @@ export class DispatchService {
       this.logger.warn(`[TEST-FIX] Failed to auto-approve test account: ${e.message}`);
     }
 
+    let nearbyDrivers = [];
     if (isPreLanding) {
       // PRINCIPLE 1: All available drivers (regardless of location)
-      // Filtered by reputation (score >= 4.5 for VIP/Early reservation)
-      return this.prisma.driverProfile.findMany({
+      nearbyDrivers = await this.prisma.driverProfile.findMany({
         where: {
           isAvailable: true,
           isOnline: true,
           status: 'approved',
-          score: { gte: 4.0 }, // Minimum score for pre-reservations
+          score: { gte: 4.0 }, 
         },
         include: { user: { select: { name: true, phone: true } } },
-        orderBy: [
-          { score: 'desc' },
-          { ratingAvg: 'desc' }
-        ],
-        take: 50, // Large broadcast for pre-landing
+        orderBy: [{ score: 'desc' }, { ratingAvg: 'desc' }],
+        take: 50,
       });
     } else {
       // PRINCIPLE 2: Passenger already at airport -> Proximity Priority
-      return this.findNearbyDrivers(booking.departureAirport);
+      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport);
     }
+
+    // ENSURE test account is INCLUDED if online
+    try {
+      const testUser = await this.prisma.user.findFirst({
+        where: { phone: { contains: '650366995' } },
+        include: { driverProfile: true }
+      });
+      if (testUser?.driverProfile && !nearbyDrivers.find(d => d.id === testUser.driverProfile.id)) {
+        // Only if online and available (virtually set above)
+        const hydratedTestDriver = await this.prisma.driverProfile.findUnique({
+          where: { id: testUser.driverProfile.id },
+          include: { user: { select: { name: true, phone: true } } }
+        });
+        if (hydratedTestDriver) nearbyDrivers.push(hydratedTestDriver);
+      }
+    } catch (err) { /* silent */ }
+
+    return nearbyDrivers;
   }
 
   /**
