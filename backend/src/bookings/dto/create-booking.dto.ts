@@ -40,5 +40,17 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
+  pickupAddress?: string;
+
+  @IsOptional()
+  @IsNumber()
+  pickupLat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  pickupLng?: number;
+
+  @IsOptional()
+  @IsString()
   promoCode?: string;
 }

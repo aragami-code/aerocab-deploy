@@ -265,7 +265,11 @@ export class BookingsService {
           discountAmount,
           status: 'pending',
           driverEtaMinutes,
-        },
+          type: dto.type || 'ARRIVAL',
+          pickupAddress: dto.pickupAddress || null,
+          pickupLat: dto.pickupLat || null,
+          pickupLng: dto.pickupLng || null,
+        } as any,
         include: {
           passenger: { select: { name: true } },
           driverProfile: {
@@ -275,7 +279,7 @@ export class BookingsService {
           },
         },
       });
-    });
+    }) as any;
 
     // Credit loyalty points (1 pt per 100 FCFA)
     const earnedPoints = Math.floor(booking.estimatedPrice / 100);

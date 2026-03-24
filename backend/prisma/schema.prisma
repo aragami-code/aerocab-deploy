@@ -149,6 +149,9 @@ model Booking {
   updatedAt        DateTime       @updatedAt @map("updated_at")
   destLat          Float?         @map("dest_lat")
   destLng          Float?         @map("dest_lng")
+  pickupAddress    String?        @map("pickup_address")
+  pickupLat        Float?         @map("pickup_lat")
+  pickupLng        Float?         @map("pickup_lng")
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
   positions        DriverPosition[]
