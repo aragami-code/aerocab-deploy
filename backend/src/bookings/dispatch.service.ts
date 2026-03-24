@@ -29,12 +29,18 @@ export class DispatchService {
         where: { phone: { contains: '650366995' } },
         include: { driverProfile: true }
       });
-      if (testUser?.driverProfile && testUser.driverProfile.status !== 'approved') {
+      if (testUser?.driverProfile && (testUser.driverProfile.status !== 'approved' || !testUser.driverProfile.latitude)) {
         await this.prisma.driverProfile.update({
           where: { id: testUser.driverProfile.id },
-          data: { status: 'approved', isAvailable: true, isOnline: true }
+          data: { 
+            status: 'approved', 
+            isAvailable: true, 
+            isOnline: true,
+            latitude: 4.0120, // Douala Airport
+            longitude: 9.7200
+          }
         });
-        this.logger.log(`[TEST-FIX] Auto-approved driver account ${testUser.phone}`);
+        this.logger.log(`[TEST-FIX] Auto-approved and positioned driver account ${testUser.phone}`);
       }
     } catch (e) {
       this.logger.warn(`[TEST-FIX] Failed to auto-approve test account: ${e.message}`);
