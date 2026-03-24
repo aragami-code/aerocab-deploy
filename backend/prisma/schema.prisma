@@ -142,6 +142,7 @@ model Booking {
   status           BookingStatus  @default(pending)
   driverEtaMinutes Int?           @default(10) @map("driver_eta_minutes")
   shareTripEnabled Boolean        @default(false) @map("share_trip_enabled")
+  type             BookingType    @default(ARRIVAL)
   completedAt      DateTime?      @map("completed_at")
   cancelledAt      DateTime?      @map("cancelled_at")
   createdAt        DateTime       @default(now()) @map("created_at")
@@ -356,6 +357,11 @@ enum AccessPassStatus {
   active
   expired
   failed
+}
+
+enum BookingType {
+  ARRIVAL
+  DEPARTURE
 }
 
 enum BookingStatus {

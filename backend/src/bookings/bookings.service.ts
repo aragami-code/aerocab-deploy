@@ -86,13 +86,18 @@ export class BookingsService {
   }
 
   // Sélectionne le meilleur driver selon le mode actif (proximité ou rating)
-  private async findBestDriver(departureAirport: string, excludeDriverId?: string, vehicleCategory?: string) {
+  private async findBestDriver(
+    departureAirport: string, 
+    excludeDriverId?: string, 
+    vehicleCategory?: string,
+    customCoords?: { lat: number; lng: number }
+  ) {
     const proximityEnabled = await this.settingsService.isProximityAssignmentEnabled();
     const excludeClause = excludeDriverId ? Prisma.sql`AND id != ${excludeDriverId}::uuid` : Prisma.sql``;
     const categoryClause = vehicleCategory ? Prisma.sql`AND vehicle_category = ${vehicleCategory}` : Prisma.sql``;
 
     if (proximityEnabled) {
-      const coords = AIRPORT_COORDS[departureAirport];
+      const coords = customCoords || AIRPORT_COORDS[departureAirport];
       if (coords) {
         // Haversine en SQL — retourne le driver le plus proche dans le rayon
         const nearby = await this.prisma.$queryRaw<{ id: string; distance_km: number }[]>(
@@ -251,8 +256,8 @@ export class BookingsService {
           flightNumber: dto.flightNumber || null,
           departureAirport: dto.departureAirport,
           destination: dto.destination,
-          destLat: dto.destLat ?? null,
-          destLng: dto.destLng ?? null,
+          destLat: dto.destLat,
+          destLng: dto.destLng,
           vehicleType: dto.vehicleType,
           paymentMethod: dto.paymentMethod,
           estimatedPrice: finalPrice,

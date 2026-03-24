@@ -35,5 +35,10 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
+  @IsIn(['ARRIVAL', 'DEPARTURE'], { message: 'Type de réservation invalide' })
+  type?: 'ARRIVAL' | 'DEPARTURE';
+
+  @IsOptional()
+  @IsString()
   promoCode?: string;
 }
