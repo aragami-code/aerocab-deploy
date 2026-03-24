@@ -221,6 +221,16 @@ export class BookingsService {
       isPreLanding
     );
 
+    // FIX: 2-Phase Dispatch (Confirmation flow)
+    // If no nearby drivers found, and it's not a pre-landing flight,
+    // and the user hasn't already "forced" the booking.
+    if (eligibleDrivers.length === 0 && !isPreLanding && dto.force !== 'true') {
+      const globalDrivers = await this.dispatchService.findGlobalEligibleDrivers(dto.vehicleType);
+      if (globalDrivers.length > 0) {
+        throw new BadRequestException('NO_NEARBY_DRIVERS');
+      }
+    }
+
     // Initial driver assignment (Selection of the top one from the match for the initial record)
     // but the broadcast will be sent to all.
     const driver = eligibleDrivers.length > 0 ? eligibleDrivers[0] : null;

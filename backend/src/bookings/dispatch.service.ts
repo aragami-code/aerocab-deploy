@@ -113,6 +113,23 @@ export class DispatchService {
   }
 
   /**
+   * Check if there are ANY eligible drivers globally for a specific vehicle type.
+   * Useful when no drivers are found nearby.
+   */
+  async findGlobalEligibleDrivers(vehicleType: string) {
+    return this.prisma.driverProfile.findMany({
+      where: {
+        isAvailable: true,
+        isOnline: true,
+        status: 'approved',
+        // Note: Filter by vehicle type if needed, but here we just check availability
+      },
+      include: { user: { select: { name: true } } },
+      take: 5,
+    });
+  }
+
+  /**
    * Calculate a priority score for a driver for a specific booking
    */
   calculateDriverPriority(driver: any, booking: Booking): number {

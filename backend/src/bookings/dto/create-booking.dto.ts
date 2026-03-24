@@ -53,4 +53,8 @@ export class CreateBookingDto {
   @IsOptional()
   @IsString()
   promoCode?: string;
+
+  @IsOptional()
+  @IsString()
+  force?: string; // string "true" logic due to form-data or simple toggle
 }
