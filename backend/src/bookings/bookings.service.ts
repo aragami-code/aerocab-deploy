@@ -504,32 +504,38 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Réservation introuvable');
     if (booking.passengerId !== userId) throw new ForbiddenException('Accès refusé');
 
-    // Find conversationId
+    // Find conversationId safely
     let conversationId: string | undefined;
-    if (booking.driverProfile) {
-      let flightId: string | undefined;
-      if (booking.flightNumber) {
-        const flight = await this.prisma.flight.findFirst({
-          where: { userId, flightNumber: booking.flightNumber },
-          orderBy: { createdAt: 'desc' },
-        });
-        flightId = flight?.id;
-      }
+    try {
+      if (booking.driverProfile) {
+        let flightId: string | undefined;
+        if (booking.flightNumber) {
+          const flight = await this.prisma.flight.findFirst({
+            where: { userId, flightNumber: booking.flightNumber },
+            orderBy: { createdAt: 'desc' },
+          });
+          flightId = flight?.id;
+        }
 
-      const conv = await this.prisma.conversation.findUnique({
-        where: {
-          passengerId_driverId_flightId: {
+        const conv = await this.prisma.conversation.findFirst({
+          where: {
             passengerId: userId,
             driverId: booking.driverProfile.userId,
-            flightId: flightId || null as any,
+            flightId: flightId || null,
           },
-        },
-        select: { id: true },
-      });
-      conversationId = conv?.id;
+          select: { id: true },
+        });
+        conversationId = conv?.id;
+      }
+    } catch (e) {
+      console.error('[Bookings] Error fetching conversationId:', e);
     }
 
-    return { ...booking, conversationId };
+    return { 
+      ...booking, 
+      estimatedPrice: booking.estimatedPrice || 0,
+      conversationId 
+    };
   }
 
   async getPassengerStats(passengerId: string) {
