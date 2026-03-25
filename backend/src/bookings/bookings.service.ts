@@ -20,13 +20,17 @@ const AIRPORT_COORDS: Record<string, { lat: number; lng: number }> = {
 // Rayon de recherche par défaut (km)
 const PROXIMITY_RADIUS_KM = 20;
 
-// Table de prix authoritative (ne pas faire confiance au client)
-const VEHICLE_PRICES: Record<string, number> = {
-  eco:         5000,
-  eco_plus:    6000,
-  standard:    7000,
-  confort:     10000,
-  confort_plus: 12000,
+// Prix de base au KM (FCFA) - Ajustable selon l'économie locale
+const BASE_PRICE_PER_KM = 250; 
+const MIN_PRICE = 3000;
+
+// Coefficients par catégorie de véhicule
+const VEHICLE_COEFFICIENTS: Record<string, number> = {
+  eco:          1.0,
+  eco_plus:     1.2,
+  standard:     1.4,
+  confort:      2.0,
+  confort_plus: 2.5,
 };
 
 // Capacité par type de véhicule
@@ -152,11 +156,29 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
-    // Prix autoritatif depuis la table backend (avec Surge conditionnel)
-    let basePrice = VEHICLE_PRICES[dto.vehicleType];
-    if (!basePrice) {
-      throw new BadRequestException(`Type de véhicule invalide: ${dto.vehicleType}`);
+    // --- NOUVELLE LOGIQUE DE PRIX KILOMÉTRIQUE ---
+    let distanceKm = 15; // Défaut de sécurité si coordoonnées absentes
+    
+    // 1. Calcul de la distance entre l'aéroport et la destination
+    const airportCoords = AIRPORT_COORDS[dto.departureAirport];
+    if (airportCoords && dto.destLat && dto.destLng) {
+      // Formule Haversine simplifiée pour la distance
+      const R = 6371; // Rayon de la terre
+      const dLat = (dto.destLat - airportCoords.lat) * Math.PI / 180;
+      const dLon = (dto.destLng - airportCoords.lng) * Math.PI / 180;
+      const a = 
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(airportCoords.lat * Math.PI / 180) * Math.cos(dto.destLat * Math.PI / 180) * 
+        Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      distanceKm = R * c;
     }
+
+    // 2. Calcul du prix brut : KM * PrixBase * Coefficient
+    const coeff = VEHICLE_COEFFICIENTS[dto.vehicleType] || 1.0;
+    let basePrice = Math.max(MIN_PRICE, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+
+    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Coeff: ${coeff} | Final Base: ${basePrice}`);
 
     // Phase 3: Injection du Surge Pricing (Calcul dynamique de la demande)
     try {
