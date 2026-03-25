@@ -284,23 +284,40 @@ export class BookingsService {
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
-      if (dto.paymentMethod !== 'cash') {
+      if (dto.paymentMethod === 'points') {
+        // Paiement par points de fidélité (PointsTransaction)
+        const result = await tx.pointsTransaction.aggregate({
+          where: { userId: passengerId },
+          _sum: { points: true },
+        });
+        const pointsBalance = result._sum.points ?? 0;
+
+        if (pointsBalance < pointsAfterDiscount) {
+          throw new BadRequestException(
+            `Solde de points insuffisant : ${pointsBalance} pts disponibles (Besoin de ${pointsAfterDiscount} pts)`,
+          );
+        }
+
+        await tx.pointsTransaction.create({
+          data: { userId: passengerId, type: 'debit', points: -pointsAfterDiscount, label: 'Paiement course' },
+        });
+
+      } else if (dto.paymentMethod !== 'cash') {
+        // Paiement par wallet (orange_money, mtn_momo, card…)
         const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
         const balance = wallet?.balance ?? 0;
 
         if (balance < pointsAfterDiscount) {
           throw new BadRequestException(
-            `Solde de points insuffisant : ${balance} pts disponibles (Besoin de ${pointsAfterDiscount} pts)`,
+            `Solde insuffisant : ${balance} XAF disponibles (Besoin de ${pointsAfterDiscount} XAF)`,
           );
         }
 
-        // Débit du Wallet (Points)
         await tx.wallet.update({
           where: { userId: passengerId },
           data: { balance: { decrement: pointsAfterDiscount } },
         });
 
-        // Historisation de la transaction financière
         await tx.transaction.create({
           data: {
             walletId: wallet!.id,
