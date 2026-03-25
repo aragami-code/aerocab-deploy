@@ -16,6 +16,39 @@ export class PaymentsController {
   ) {}
 
   /**
+   * POST /payments/recharge
+   * Permet à un utilisateur (passager ou chauffeur) de recharger son wallet.
+   */
+  @Post('recharge')
+  @UseGuards(JwtAuthGuard)
+  async recharge(@Body() body: { amount: number; method: string }, @Body('user') user: any) {
+    const userId = user.id;
+    const amount = body.amount;
+
+    // 1. Création d'une transaction en attente
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+    const transaction = await this.prisma.transaction.create({
+      data: {
+        walletId: wallet!.id,
+        amount,
+        type: 'deposit',
+        status: 'pending',
+        reference: `WALLET-${Date.now()}-${userId.slice(0, 8)}`,
+      },
+    });
+
+    // 2. Initialisation CinetPay
+    const userInfo = await this.prisma.user.findUnique({ where: { id: userId } });
+    return this.payments.initiate({
+      transactionId: transaction.reference!,
+      amount,
+      description: `Recharge Wallet AeroGo — ${amount} pts`,
+      customerName: userInfo?.name || 'Client',
+      customerPhone: userInfo?.phone || '',
+    });
+  }
+
+  /**
    * POST /payments/webhook
    * Appelé par CinetPay après un paiement (pas d'auth — IP CinetPay uniquement)
    * Vérifie le statut auprès de CinetPay avant toute activation.
@@ -55,7 +88,28 @@ export class PaymentsController {
 
         this.logger.log(`Pass ${passId} activé`);
       }
-      // Autres types de transactions à gérer ici si besoin
+      
+      // Recharge de Wallet : transactionId = "WALLET-{ts}-{userId}"
+      else if (transactionId.startsWith('WALLET-')) {
+        const tx = await this.prisma.transaction.findUnique({
+          where: { reference: transactionId },
+          include: { wallet: true }
+        });
+
+        if (tx && tx.status === 'pending') {
+          await this.prisma.$transaction([
+            this.prisma.transaction.update({
+              where: { id: tx.id },
+              data: { status: 'completed' }
+            }),
+            this.prisma.wallet.update({
+              where: { id: tx.walletId },
+              data: { balance: { increment: tx.amount } }
+            })
+          ]);
+          this.logger.log(`Wallet ${tx.walletId} crédité de ${tx.amount} pts`);
+        }
+      }
     } else if (verifiedStatus === 'REFUSED') {
       if (transactionId.startsWith('ACCESS-')) {
         const passId = transactionId.slice('ACCESS-'.length);
