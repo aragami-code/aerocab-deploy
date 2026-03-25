@@ -50,8 +50,11 @@ export class PaymentsController {
 
   /**
    * POST /payments/webhook
-   * Appelé par CinetPay après un paiement (pas d'auth — IP CinetPay uniquement)
-   * Vérifie le statut auprès de CinetPay avant toute activation.
+   * Appelé par CinetPay après un paiement.
+   * Sécurité multicouche :
+   *   1. Validation du cpm_site_id contre CINETPAY_SITE_ID (quand configuré)
+   *   2. Vérification que la transaction existe en DB avant d'appeler CinetPay
+   *   3. Re-vérification indépendante du statut via l'API CinetPay
    */
   @Post('webhook')
   async handleWebhook(@Body() body: Record<string, string>) {
@@ -59,6 +62,25 @@ export class PaymentsController {
 
     if (!transactionId) {
       this.logger.warn('Webhook reçu sans cpm_trans_id');
+      return { received: true };
+    }
+
+    // 1. Valider le site_id si configuré (empêche les webhooks d'un autre compte CinetPay)
+    const configuredSiteId = process.env.CINETPAY_SITE_ID;
+    if (configuredSiteId && body.cpm_site_id && body.cpm_site_id !== configuredSiteId) {
+      this.logger.warn(`Webhook rejeté: cpm_site_id=${body.cpm_site_id} ne correspond pas au site configuré`);
+      return { received: true };
+    }
+
+    // 2. Vérifier que la transaction existe en DB (évite de spammer l'API CinetPay)
+    const txExists = transactionId.startsWith('ACCESS-')
+      ? await this.prisma.accessPass.findFirst({ where: { paymentRef: transactionId }, select: { id: true } })
+      : transactionId.startsWith('WALLET-')
+        ? await this.prisma.transaction.findUnique({ where: { reference: transactionId }, select: { id: true } })
+        : null;
+
+    if (!txExists) {
+      this.logger.warn(`Webhook ignoré: transaction inconnue ${transactionId}`);
       return { received: true };
     }
 
