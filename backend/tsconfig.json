@@ -13,8 +13,7 @@
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"],
-      "@aerogo24/shared": ["../packages/shared/src/index.ts"]
+      "@/*": ["./src/*"]
     },
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true
