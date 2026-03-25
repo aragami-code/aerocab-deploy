@@ -5,7 +5,7 @@
   "description": "AeroGo 24 Connect - API Backend (NestJS)",
   "scripts": {
     "dev": "nest start --watch",
-    "build": "npx prisma generate && nest build",
+    "build": "npx prisma generate && nest build && tsc-alias",
     "start": "node dist/main",
     "start:prod": "npx prisma db push --accept-data-loss && node dist/main",
     "lint": "eslint . --ext .ts",
@@ -55,6 +55,7 @@
     "prisma": "^6.0.0",
     "ts-jest": "^29.4.6",
     "ts-loader": "^9.5.0",
+    "tsc-alias": "^1.8.16",
     "typescript": "^5.7.0"
   }
 }
