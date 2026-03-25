@@ -10,10 +10,10 @@ import {
   HttpCode,
   UseInterceptors,
   UploadedFile,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
-import * as path from 'path';
 import * as fs from 'fs';
 import { DriversService } from './drivers.service';
 import {
@@ -73,11 +73,24 @@ export class DriversController {
       storage: diskStorage({
         destination: UPLOAD_DIR,
         filename: (_req, file, cb) => {
-          const ext = path.extname(file.originalname) || '.jpg';
+          // Extension basée sur le MIME réel, pas sur le nom client
+          const MIME_TO_EXT: Record<string, string> = {
+            'image/jpeg': '.jpg',
+            'image/png':  '.png',
+            'application/pdf': '.pdf',
+          };
+          const ext = MIME_TO_EXT[file.mimetype] ?? '.bin';
           cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
         },
       }),
       limits: { fileSize: 5 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'application/pdf'];
+        if (!ALLOWED_MIMES.includes(file.mimetype)) {
+          return cb(new BadRequestException('Type de fichier non autorisé. Formats acceptés : JPG, PNG, PDF'), false);
+        }
+        cb(null, true);
+      },
     }),
   )
   async uploadDocument(
