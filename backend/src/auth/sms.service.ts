@@ -32,7 +32,7 @@ export class SmsService {
       // const twilio = require('twilio');
       // const client = twilio(accountSid, authToken);
       // await client.messages.create({
-      //   body: `AeroCab Connect - Votre code de verification: ${code}`,
+      //   body: `AeroGo 24 Connect - Votre code de verification: ${code}`,
       //   from: fromNumber,
       //   to: phone,
       // });

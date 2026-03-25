@@ -24,7 +24,7 @@ import {
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser, Roles } from '../auth/decorators';
 
-const UPLOAD_DIR = '/tmp/aerocab-uploads';
+const UPLOAD_DIR = '/tmp/aerogo24-uploads';
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }

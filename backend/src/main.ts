@@ -4,7 +4,7 @@ import { ValidationPipe } from '@nestjs/common';
 import * as fs from 'fs';
 import { AppModule } from './app.module';
 
-const UPLOAD_DIR = '/tmp/aerocab-uploads';
+const UPLOAD_DIR = '/tmp/aerogo24-uploads';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -31,7 +31,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`AeroCab API running on port ${port}`);
+  console.log(`AeroGo 24 API running on port ${port}`);
 }
 
 bootstrap();

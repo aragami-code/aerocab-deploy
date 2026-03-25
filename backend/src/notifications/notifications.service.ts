@@ -76,7 +76,7 @@ export class NotificationsService implements OnModuleInit {
           priority: 'high',
           notification: {
             sound: 'default',
-            channelId: 'aerocab_default',
+            channelId: 'aerogo24_default',
           },
         },
       });

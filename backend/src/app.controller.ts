@@ -18,7 +18,7 @@ export class AppController {
     return {
       status: 'ok',
       timestamp: new Date().toISOString(),
-      service: 'aerocab-api',
+      service: 'aerogo24-api',
       version: '0.1.0',
       database: dbStatus,
     };

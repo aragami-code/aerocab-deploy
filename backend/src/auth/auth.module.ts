@@ -13,7 +13,7 @@ import { JwtStrategy } from './jwt.strategy';
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
-        secret: config.get('JWT_SECRET', 'aerocab-dev-secret-change-in-production'),
+        secret: config.get('JWT_SECRET', 'aerogo24-dev-secret-change-in-production'),
         signOptions: { expiresIn: '30d' },
       }),
       inject: [ConfigService],

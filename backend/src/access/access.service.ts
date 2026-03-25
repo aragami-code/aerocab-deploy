@@ -11,7 +11,7 @@ import {
   ACCESS_PRICE,
   ACCESS_CURRENCY,
   ACCESS_DURATION_HOURS,
-} from '@aerocab/shared';
+} from '@aerogo24/shared';
 
 const ACCESS_DURATION_MS = ACCESS_DURATION_HOURS * 60 * 60 * 1000;
 
@@ -96,8 +96,8 @@ export class AccessService {
     const { paymentUrl } = await this.paymentsService.initiate({
       transactionId: paymentRef,
       amount: ACCESS_PRICE,
-      description: 'Pass AeroCab 48h',
-      customerName: user?.name || 'Client AeroCab',
+      description: 'Pass AeroGo 24 48h',
+      customerName: user?.name || 'Client AeroGo 24',
       customerPhone: user?.phone || '',
       channels: 'MOBILE_MONEY',
       returnPath: 'access',

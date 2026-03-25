@@ -23,11 +23,11 @@ export class PaymentsService {
     const apiKey = this.config.get<string>('CINETPAY_API_KEY');
     const siteId = this.config.get<string>('CINETPAY_SITE_ID');
     const backendUrl = this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com');
-    const appScheme = 'landingride-passenger';
+    const appScheme = 'aerogo24-passenger';
 
-    const nameParts = (params.customerName || 'Client AeroCab').trim().split(' ');
+    const nameParts = (params.customerName || 'Client AeroGo 24').trim().split(' ');
     const surname = nameParts[0] || 'Client';
-    const name = nameParts.slice(1).join(' ') || 'AeroCab';
+    const name = nameParts.slice(1).join(' ') || 'AeroGo 24';
 
     const returnUrl = `${appScheme}://payment/return?ref=${encodeURIComponent(params.transactionId)}&type=${params.returnPath ?? 'payment'}`;
     const notifyUrl = `${backendUrl}/api/payments/webhook`;

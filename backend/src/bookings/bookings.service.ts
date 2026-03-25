@@ -20,9 +20,8 @@ const AIRPORT_COORDS: Record<string, { lat: number; lng: number }> = {
 // Rayon de recherche par défaut (km)
 const PROXIMITY_RADIUS_KM = 20;
 
-// Prix de base au KM (FCFA) - Ajustable selon l'économie locale
+// Prix de base au KM (FCFA)
 const BASE_PRICE_PER_KM = 250; 
-const MIN_PRICE = 3000;
 
 // Coefficients par catégorie de véhicule
 const VEHICLE_COEFFICIENTS: Record<string, number> = {
@@ -31,6 +30,15 @@ const VEHICLE_COEFFICIENTS: Record<string, number> = {
   standard:     1.4,
   confort:      2.0,
   confort_plus: 2.5,
+};
+
+// Prix Plancher (Minimum Fare) par catégorie de véhicule
+const VEHICLE_MIN_PRICES: Record<string, number> = {
+  eco:          3000,
+  eco_plus:     3500,
+  standard:     5000,
+  confort:      8000,
+  confort_plus: 12000,
 };
 
 // Capacité par type de véhicule
@@ -186,7 +194,8 @@ export class BookingsService {
 
     // 2. Calcul du prix brut en POINTS (1 FCFA = 1 POINT)
     const coeff = VEHICLE_COEFFICIENTS[dto.vehicleType] || 1.0;
-    const priceInFcfa = Math.max(MIN_PRICE, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+    const minPrice = VEHICLE_MIN_PRICES[dto.vehicleType] || 3000;
+    const priceInFcfa = Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
     
     // Le prix final en points
     const finalPricePoints = priceInFcfa; // Taux 1:1 par défaut
@@ -926,7 +935,7 @@ export class BookingsService {
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:completed', { id: updated.id });
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: updated.id, status: 'completed' });
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_updated', { id: updated.id, status: 'completed' });
-    this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroCab !').catch(() => {});
+    this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroGo 24 !').catch(() => {});
 
     // Versement du montant de la course sur le Wallet du chauffeur
     const driverUser = await this.prisma.driverProfile.findUnique({
@@ -1042,4 +1051,63 @@ export class BookingsService {
       pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     };
   }
+
+  // --- NOUVEL ENDPOINT POUR L'ESTIMATION DES PRIX ---
+  async estimatePrices(dto: Partial<CreateBookingDto>) {
+    let distanceKm = 15;
+    const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
+    const isDeparture = dto.type === 'DEPARTURE';
+    
+    // Coordonnées de départ et d'arrivée
+    const startCoords = isDeparture 
+      ? { lat: dto.pickupLat, lng: dto.pickupLng } 
+      : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null);
+    
+    const endCoords = isDeparture 
+      ? (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null)
+      : { lat: dto.destLat, lng: dto.destLng };
+
+    if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
+      const R = 6371;
+      const dLat = (endCoords.lat - startCoords.lat) * Math.PI / 180;
+      const dLon = (endCoords.lng - startCoords.lng) * Math.PI / 180;
+      const a = 
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(startCoords.lat * Math.PI / 180) * Math.cos(endCoords.lat * Math.PI / 180) * 
+        Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      distanceKm = R * c;
+    }
+
+    // Calculate surge multiplier ONCE for the area
+    let surgeMultiplier = 1.0;
+    try {
+      if (dto.departureAirport) {
+        // use base 1000 to get a ratio out of estimate function
+        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport);
+        surgeMultiplier = simulated / 1000;
+      }
+    } catch {
+      // ignore
+    }
+
+    // Construct estimates for all vehicle categories
+    const estimates: Record<string, { priceInFcfa: number, priceInPoints: number }> = {};
+    for (const vType of Object.keys(VEHICLE_COEFFICIENTS)) {
+      const coeff = VEHICLE_COEFFICIENTS[vType];
+      const minPrice = VEHICLE_MIN_PRICES[vType] || 3000;
+      
+      const unSurgedPriceInFcfa = Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+      const surgedPriceInFcfa = Math.round(unSurgedPriceInFcfa * surgeMultiplier);
+      
+      // Conversion rule: 100 FCFA = 1 Point Or 1 FCFA = 1 Point ?
+      // Wait! The user said "nombre de point que cela fera". Earlier I saw "1 pt = 100 FCFA" in frontend. Let's use pointsInFcfa / 100.
+      const priceInPoints = Math.ceil(surgedPriceInFcfa / 100);
+      
+      estimates[vType] = { priceInFcfa: surgedPriceInFcfa, priceInPoints };
+    }
+
+    return { distanceKm, surgeMultiplier, estimates };
+  }
+
 }

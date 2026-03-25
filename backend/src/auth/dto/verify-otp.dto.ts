@@ -14,8 +14,8 @@ export class VerifyOtpDto {
 
   /**
    * Optional intended role sent by the client app.
-   * - "passenger" from the AeroCab passenger app
-   * - "driver" from the AeroCab Pro driver app
+   * - "passenger" from the AeroGo 24 passenger app
+   * - "driver" from the AeroGo 24 Pro driver app
    *
    * Used when creating a new user to assign the correct role.
    * Ignored for existing users (their role is already set).

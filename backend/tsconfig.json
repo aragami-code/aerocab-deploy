@@ -14,7 +14,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@aerocab/shared": ["../packages/shared/src/index.ts"]
+      "@aerogo24/shared": ["../packages/shared/src/index.ts"]
     },
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true

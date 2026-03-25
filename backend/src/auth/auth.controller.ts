@@ -47,7 +47,7 @@ export class AuthController {
     // Google renvoie error=access_denied si l'utilisateur refuse, ou redirect_uri_mismatch etc.
     if (error || !code) {
       const deepLink = state ? Buffer.from(state, 'base64').toString('utf8') : '';
-      return res.redirect(`${deepLink || 'landingride-passenger://'}?error=${error || 'no_code'}`);
+      return res.redirect(`${deepLink || 'aerogo24-passenger://'}?error=${error || 'no_code'}`);
     }
     return this.authService.googleCallback(code, state, res);
   }

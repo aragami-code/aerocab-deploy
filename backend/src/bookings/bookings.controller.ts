@@ -14,6 +14,11 @@ export class BookingsController {
     return this.bookingsService.createBooking(req.user.id, dto);
   }
 
+  @Post('estimate')
+  estimate(@Body() dto: Partial<CreateBookingDto>) {
+    return this.bookingsService.estimatePrices(dto);
+  }
+
   @Get('active')
   getActive(@Request() req: any) {
     return this.bookingsService.getActiveBooking(req.user.id);

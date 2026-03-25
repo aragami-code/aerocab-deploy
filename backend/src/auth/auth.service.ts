@@ -13,7 +13,7 @@ import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
   OTP_MAX_ATTEMPTS,
-} from '@aerocab/shared';
+} from '@aerogo24/shared';
 
 const OTP_TTL = OTP_EXPIRY_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_TTL = OTP_COOLDOWN_MINUTES * 60; // seconds
