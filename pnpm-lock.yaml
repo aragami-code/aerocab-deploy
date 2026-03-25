@@ -10,7 +10,7 @@ importers:
 
   backend:
     dependencies:
-      '@aerocab/shared':
+      '@aerogo24/shared':
         specifier: workspace:*
         version: link:../packages/shared
       '@nestjs/common':
