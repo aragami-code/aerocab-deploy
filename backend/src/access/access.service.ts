@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { ConfigService } from '@nestjs/config';
@@ -38,36 +39,10 @@ export class AccessService {
     }
 
     const apiKey = this.config.get<string>('CINETPAY_API_KEY', '');
-    const isDev = !apiKey;
-
-    if (isDev) {
-      // Mode dev : activation immédiate sans paiement
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + ACCESS_DURATION_MS);
-      const paymentRef = `PAY-DEV-${Date.now()}`;
-      const pass = await this.prisma.accessPass.create({
-        data: {
-          userId,
-          amount: ACCESS_PRICE,
-          currency: ACCESS_CURRENCY,
-          status: 'active',
-          paymentRef,
-          paymentMethod: dto.paymentMethod,
-          activatedAt: now,
-          expiresAt,
-        },
-      });
-      return {
-        id: pass.id,
-        status: 'active',
-        paymentRef,
-        amount: ACCESS_PRICE,
-        currency: ACCESS_CURRENCY,
-        activatedAt: now.toISOString(),
-        expiresAt: expiresAt.toISOString(),
-        paymentUrl: null as string | null,
-        message: 'Acces 48h active (mode dev)',
-      };
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        'Le service de paiement est temporairement indisponible. Veuillez réessayer plus tard.',
+      );
     }
 
     // Production : créer un pass en attente puis initier CinetPay
