@@ -162,47 +162,54 @@ export class BookingsService {
     });
   }
 
-  async createBooking(passengerId: string, dto: CreateBookingDto) {
-    try {
-    // --- NOUVELLE LOGIQUE DE PRIX KILOMÉTRIQUE & POINTS ---
-    let distanceKm = 15; // Défaut de sécurité si coordoonnées absentes
-    
-    // 1. Calcul de la distance réelle entre l'origine et la destination
-    const airportCoords = AIRPORT_COORDS[dto.departureAirport];
+  // ─── Méthodes de calcul partagées ────────────────────────────────────────
+
+  private computeDistanceKm(dto: Partial<CreateBookingDto>): number {
+    const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
     const isDeparture = dto.type === 'DEPARTURE';
-    
-    // Coordonnées de départ et d'arrivée
-    const startCoords = isDeparture 
-      ? { lat: dto.pickupLat, lng: dto.pickupLng } 
+
+    const startCoords = isDeparture
+      ? { lat: dto.pickupLat, lng: dto.pickupLng }
       : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null);
-    
-    const endCoords = isDeparture 
+
+    const endCoords = isDeparture
       ? (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null)
       : { lat: dto.destLat, lng: dto.destLng };
 
     if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
-      const R = 6371; // Rayon de la terre
+      const R = 6371;
       const dLat = (endCoords.lat - startCoords.lat) * Math.PI / 180;
       const dLon = (endCoords.lng - startCoords.lng) * Math.PI / 180;
-      const a = 
-        Math.sin(dLat/2) * Math.sin(dLat/2) +
-        Math.cos(startCoords.lat * Math.PI / 180) * Math.cos(endCoords.lat * Math.PI / 180) * 
-        Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      distanceKm = R * c;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(startCoords.lat * Math.PI / 180) * Math.cos(endCoords.lat * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // 2. Calcul du prix brut en POINTS (1 FCFA = 1 POINT)
-    const coeff = VEHICLE_COEFFICIENTS[dto.vehicleType] || 1.0;
-    const minPrice = VEHICLE_MIN_PRICES[dto.vehicleType] || 3000;
-    const priceInFcfa = Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
-    
-    // Le prix final en points
-    const finalPricePoints = priceInFcfa; // Taux 1:1 par défaut
+    return 15; // Défaut de sécurité si coordonnées absentes
+  }
 
-    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Coeff: ${coeff} | Points: ${finalPricePoints}`);
+  /** Prix en FCFA et en points (taux 1:1 — 1 FCFA = 1 point) */
+  private computeBasePriceForVehicle(distanceKm: number, vehicleType: string): number {
+    const coeff = VEHICLE_COEFFICIENTS[vehicleType] || 1.0;
+    const minPrice = VEHICLE_MIN_PRICES[vehicleType] || 3000;
+    return Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+  }
 
-    // Phase 3: Injection du Surge Pricing (Calcul dynamique de la demande)
+  // ─── Fin méthodes partagées ───────────────────────────────────────────────
+
+  async createBooking(passengerId: string, dto: CreateBookingDto) {
+    try {
+    // 1. Distance et prix de base
+    const isDeparture = dto.type === 'DEPARTURE';
+    const distanceKm = this.computeDistanceKm(dto);
+    const priceInFcfa = this.computeBasePriceForVehicle(distanceKm, dto.vehicleType);
+    const finalPricePoints = priceInFcfa; // 1 FCFA = 1 point
+
+    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Points: ${finalPricePoints}`);
+
+    // 2. Surge Pricing
     let dynamicPricePoints = finalPricePoints;
     try {
       dynamicPricePoints = await this.pricingService.calculateEstimatedPrice(finalPricePoints, dto.departureAirport);
@@ -1073,59 +1080,26 @@ export class BookingsService {
     };
   }
 
-  // --- NOUVEL ENDPOINT POUR L'ESTIMATION DES PRIX ---
+  // --- ESTIMATION DES PRIX ---
   async estimatePrices(dto: Partial<CreateBookingDto>) {
-    let distanceKm = 15;
-    const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
-    const isDeparture = dto.type === 'DEPARTURE';
-    
-    // Coordonnées de départ et d'arrivée
-    const startCoords = isDeparture 
-      ? { lat: dto.pickupLat, lng: dto.pickupLng } 
-      : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null);
-    
-    const endCoords = isDeparture 
-      ? (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null)
-      : { lat: dto.destLat, lng: dto.destLng };
+    const distanceKm = this.computeDistanceKm(dto);
 
-    if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
-      const R = 6371;
-      const dLat = (endCoords.lat - startCoords.lat) * Math.PI / 180;
-      const dLon = (endCoords.lng - startCoords.lng) * Math.PI / 180;
-      const a = 
-        Math.sin(dLat/2) * Math.sin(dLat/2) +
-        Math.cos(startCoords.lat * Math.PI / 180) * Math.cos(endCoords.lat * Math.PI / 180) * 
-        Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      distanceKm = R * c;
-    }
-
-    // Calculate surge multiplier ONCE for the area
+    // Surge multiplier pour la zone
     let surgeMultiplier = 1.0;
     try {
       if (dto.departureAirport) {
-        // use base 1000 to get a ratio out of estimate function
         const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport);
         surgeMultiplier = simulated / 1000;
       }
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
 
-    // Construct estimates for all vehicle categories
-    const estimates: Record<string, { priceInFcfa: number, priceInPoints: number }> = {};
+    // Estimation pour chaque catégorie de véhicule
+    const estimates: Record<string, { priceInFcfa: number; priceInPoints: number }> = {};
     for (const vType of Object.keys(VEHICLE_COEFFICIENTS)) {
-      const coeff = VEHICLE_COEFFICIENTS[vType];
-      const minPrice = VEHICLE_MIN_PRICES[vType] || 3000;
-      
-      const unSurgedPriceInFcfa = Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
-      const surgedPriceInFcfa = Math.round(unSurgedPriceInFcfa * surgeMultiplier);
-      
-      // Conversion rule: 100 FCFA = 1 Point Or 1 FCFA = 1 Point ?
-      // Wait! The user said "nombre de point que cela fera". Earlier I saw "1 pt = 100 FCFA" in frontend. Let's use pointsInFcfa / 100.
-      const priceInPoints = Math.ceil(surgedPriceInFcfa / 100);
-      
-      estimates[vType] = { priceInFcfa: surgedPriceInFcfa, priceInPoints };
+      const basePrice = this.computeBasePriceForVehicle(distanceKm, vType);
+      const surgedPrice = Math.round(basePrice * surgeMultiplier);
+      // Taux 1:1 — cohérent avec createBooking (1 FCFA = 1 point)
+      estimates[vType] = { priceInFcfa: surgedPrice, priceInPoints: surgedPrice };
     }
 
     return { distanceKm, surgeMultiplier, estimates };
