@@ -286,6 +286,10 @@ export class BookingsService {
     const booking = await this.prisma.$transaction(async (tx) => {
       if (dto.paymentMethod === 'points') {
         // Paiement par points de fidélité (PointsTransaction)
+        // SELECT FOR UPDATE sur l'utilisateur pour éviter la race condition :
+        // deux réservations simultanées ne peuvent pas lire le même solde.
+        await tx.$executeRaw`SELECT id FROM users WHERE id = ${passengerId}::uuid FOR UPDATE`;
+
         const result = await tx.pointsTransaction.aggregate({
           where: { userId: passengerId },
           _sum: { points: true },

@@ -41,7 +41,7 @@ export class AccessService {
     const apiKey = this.config.get<string>('CINETPAY_API_KEY', '');
     if (!apiKey) {
       throw new ServiceUnavailableException(
-        'Le service de paiement est temporairement indisponible. Veuillez réessayer plus tard.',
+        'Le paiement en ligne est momentanément indisponible. Nos équipes sont sur le coup — réessayez dans quelques minutes. 🙏',
       );
     }
 
