@@ -40,6 +40,7 @@ export const ACCESS_CURRENCY = 'XAF';
 export const ACCESS_DURATION_HOURS = 48;
 
 // ===== Auth Constants =====
+export const APP_NAME = 'AeroGo 24';
 export const OTP_LENGTH = 6;
 export const OTP_EXPIRY_MINUTES = 5;
 export const OTP_MAX_ATTEMPTS = 3;
