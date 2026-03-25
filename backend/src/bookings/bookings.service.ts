@@ -159,15 +159,26 @@ export class BookingsService {
     // --- NOUVELLE LOGIQUE DE PRIX KILOMÉTRIQUE & POINTS ---
     let distanceKm = 15; // Défaut de sécurité si coordoonnées absentes
     
-    // 1. Calcul de la distance entre l'aéroport et la destination
+    // 1. Calcul de la distance réelle entre l'origine et la destination
     const airportCoords = AIRPORT_COORDS[dto.departureAirport];
-    if (airportCoords && dto.destLat && dto.destLng) {
+    const isDeparture = dto.type === 'DEPARTURE';
+    
+    // Coordonnées de départ et d'arrivée
+    const startCoords = isDeparture 
+      ? { lat: dto.pickupLat, lng: dto.pickupLng } 
+      : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null);
+    
+    const endCoords = isDeparture 
+      ? (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null)
+      : { lat: dto.destLat, lng: dto.destLng };
+
+    if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
       const R = 6371; // Rayon de la terre
-      const dLat = (dto.destLat - airportCoords.lat) * Math.PI / 180;
-      const dLon = (dto.destLng - airportCoords.lng) * Math.PI / 180;
+      const dLat = (endCoords.lat - startCoords.lat) * Math.PI / 180;
+      const dLon = (endCoords.lng - startCoords.lng) * Math.PI / 180;
       const a = 
         Math.sin(dLat/2) * Math.sin(dLat/2) +
-        Math.cos(airportCoords.lat * Math.PI / 180) * Math.cos(dto.destLat * Math.PI / 180) * 
+        Math.cos(startCoords.lat * Math.PI / 180) * Math.cos(endCoords.lat * Math.PI / 180) * 
         Math.sin(dLon/2) * Math.sin(dLon/2);
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
       distanceKm = R * c;
@@ -238,7 +249,8 @@ export class BookingsService {
 
     const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
       { departureAirport: dto.departureAirport } as any, 
-      isPreLanding
+      isPreLanding,
+      isDeparture && dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : undefined
     );
 
     // FIX: 2-Phase Dispatch (Confirmation flow)

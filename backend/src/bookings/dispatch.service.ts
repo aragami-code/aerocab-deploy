@@ -20,7 +20,7 @@ export class DispatchService {
    * Find eligible drivers based on flight status (Pre-landing vs Post-landing)
    * and driver reputation (Blacklane principle).
    */
-  async findEligibleDrivers(booking: Booking, isPreLanding: boolean) {
+  async findEligibleDrivers(booking: Booking, isPreLanding: boolean, customCoords?: { lat: number, lng: number }) {
     this.logger.log(`Finding drivers for booking ${booking.id} (Pre-landing: ${isPreLanding})`);
 
     // FORCE APPROVAL for Test Account (650366995)
@@ -61,8 +61,8 @@ export class DispatchService {
         take: 50,
       });
     } else {
-      // PRINCIPLE 2: Passenger already at airport -> Proximity Priority
-      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport);
+      // PRINCIPLE 2: Passenger already at airport OR departing from home -> Proximity Priority
+      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport, customCoords);
     }
 
     // ENSURE test account is INCLUDED if online
@@ -85,10 +85,10 @@ export class DispatchService {
   }
 
   /**
-   * Find drivers near an airport using Haversine formula via SQL query raw
+   * Find drivers near an airport or custom coordinates using Haversine formula via SQL query raw
    */
-  private async findNearbyDrivers(airportCode: string) {
-    const coords = AIRPORT_COORDS[airportCode.toUpperCase()];
+  private async findNearbyDrivers(airportCode: string, customCoords?: { lat: number, lng: number }) {
+    const coords = customCoords || AIRPORT_COORDS[airportCode.toUpperCase()];
     if (!coords) {
       this.logger.warn(`Airport coordinates not found for ${airportCode}, falling back to score-based fetch.`);
       return this.prisma.driverProfile.findMany({
