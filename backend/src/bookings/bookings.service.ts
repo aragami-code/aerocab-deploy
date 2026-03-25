@@ -156,13 +156,12 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
-    // --- NOUVELLE LOGIQUE DE PRIX KILOMÉTRIQUE ---
+    // --- NOUVELLE LOGIQUE DE PRIX KILOMÉTRIQUE & POINTS ---
     let distanceKm = 15; // Défaut de sécurité si coordoonnées absentes
     
     // 1. Calcul de la distance entre l'aéroport et la destination
     const airportCoords = AIRPORT_COORDS[dto.departureAirport];
     if (airportCoords && dto.destLat && dto.destLng) {
-      // Formule Haversine simplifiée pour la distance
       const R = 6371; // Rayon de la terre
       const dLat = (dto.destLat - airportCoords.lat) * Math.PI / 180;
       const dLon = (dto.destLng - airportCoords.lng) * Math.PI / 180;
@@ -174,33 +173,34 @@ export class BookingsService {
       distanceKm = R * c;
     }
 
-    // 2. Calcul du prix brut : KM * PrixBase * Coefficient
+    // 2. Calcul du prix brut en POINTS (1 FCFA = 1 POINT)
     const coeff = VEHICLE_COEFFICIENTS[dto.vehicleType] || 1.0;
-    let basePrice = Math.max(MIN_PRICE, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+    const priceInFcfa = Math.max(MIN_PRICE, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+    
+    // Le prix final en points
+    const finalPricePoints = priceInFcfa; // Taux 1:1 par défaut
 
-    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Coeff: ${coeff} | Final Base: ${basePrice}`);
+    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Coeff: ${coeff} | Points: ${finalPricePoints}`);
 
     // Phase 3: Injection du Surge Pricing (Calcul dynamique de la demande)
+    let dynamicPricePoints = finalPricePoints;
     try {
-      basePrice = await this.pricingService.calculateEstimatedPrice(basePrice, dto.departureAirport);
+      dynamicPricePoints = await this.pricingService.calculateEstimatedPrice(finalPricePoints, dto.departureAirport);
     } catch (err) {
-      this.logger.warn(`Surge Pricing failed, using base price: ${err.message}`);
+      this.logger.warn(`Surge Pricing failed, using base points: ${err.message}`);
     }
 
-    const authorizedPrice = basePrice;
-
-    // Applique le code promo si fourni
-    let finalPrice = authorizedPrice;
+    // Applique le code promo si fourni (sur les points)
+    let pointsAfterDiscount = dynamicPricePoints;
     let discountAmount = 0;
     let appliedPromoCode: string | null = null;
 
     if (dto.promoCode) {
       const promo = await this.promosService.validatePromo(dto.promoCode);
       if (promo) {
-        discountAmount = Math.round(authorizedPrice * (promo.discount / 100));
-        finalPrice = authorizedPrice - discountAmount;
+        discountAmount = Math.round(dynamicPricePoints * (promo.discount / 100));
+        pointsAfterDiscount = dynamicPricePoints - discountAmount;
         appliedPromoCode = dto.promoCode.toUpperCase();
-        // Incrémente le compteur d'utilisation
         this.promosService.applyPromo(dto.promoCode).catch(() => {});
       }
     }
@@ -263,25 +263,32 @@ export class BookingsService {
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
-      if (dto.paymentMethod === 'points') {
-        const pointsNeeded = Math.ceil(finalPrice / 100); 
-        const balResult = await tx.pointsTransaction.aggregate({
-          where: { userId: passengerId },
-          _sum: { points: true },
-        });
-        const balance = balResult._sum.points ?? 0;
-        if (balance < pointsNeeded) {
+      if (dto.paymentMethod !== 'cash') {
+        const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
+        const balance = wallet?.balance ?? 0;
+
+        if (balance < pointsAfterDiscount) {
           throw new BadRequestException(
-            `Solde de points insuffisant : ${balance} pts disponibles`,
+            `Solde de points insuffisant : ${balance} pts disponibles (Besoin de ${pointsAfterDiscount} pts)`,
           );
         }
-        await tx.pointsTransaction.create({
+
+        // Débit du Wallet (Points)
+        await tx.wallet.update({
+          where: { userId: passengerId },
+          data: { balance: { decrement: pointsAfterDiscount } },
+        });
+
+        // Historisation de la transaction financière
+        await tx.transaction.create({
           data: {
-            userId: passengerId,
-            type: 'debit',
-            points: -pointsNeeded,
-            label: `Course ${dto.departureAirport} → ${dto.destination}`,
-          },
+            walletId: wallet!.id,
+            amount: pointsAfterDiscount,
+            type: 'payment',
+            status: 'completed',
+            reference: `RIDE-${Date.now()}`,
+            metadata: { bookingRef: dto.flightNumber || 'URBAN' }
+          }
         });
       }
 
@@ -296,7 +303,7 @@ export class BookingsService {
           destLng: cleanDestLng,
           vehicleType: dto.vehicleType,
           paymentMethod: dto.paymentMethod,
-          estimatedPrice: finalPrice,
+          estimatedPrice: pointsAfterDiscount,
           promoCode: appliedPromoCode,
           discountAmount,
           status: 'pending',
@@ -370,7 +377,7 @@ export class BookingsService {
       this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} drivers.`);
     }
 
-    if (isNaN(finalPrice)) {
+    if (isNaN(pointsAfterDiscount)) {
       throw new BadRequestException('Le calcul du prix a échoué (NaN)');
     }
 
