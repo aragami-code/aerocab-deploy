@@ -916,15 +916,45 @@ export class BookingsService {
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_updated', { id: updated.id, status: 'completed' });
     this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroCab !').catch(() => {});
 
-    // Points fidélité pour le chauffeur
+    // Versement du montant de la course sur le Wallet du chauffeur
     const driverUser = await this.prisma.driverProfile.findUnique({
       where: { id: driverProfile.id },
       select: { userId: true },
     });
+    
+    if (driverUser && booking.paymentMethod !== 'cash') {
+      // 1. Récupère ou crée le wallet du chauffeur
+      let driverWallet = await this.prisma.wallet.findUnique({ where: { userId: driverUser.userId } });
+      if (!driverWallet) {
+        driverWallet = await this.prisma.wallet.create({ data: { userId: driverUser.userId, balance: 0 } });
+      }
+
+      // 2. Crédite le wallet du montant de la course
+      await this.prisma.wallet.update({
+        where: { id: driverWallet.id },
+        data: { balance: { increment: booking.estimatedPrice } },
+      });
+
+      // 3. Enregistre la transaction
+      await this.prisma.transaction.create({
+        data: {
+          walletId: driverWallet.id,
+          amount: booking.estimatedPrice,
+          type: 'deposit',
+          status: 'completed',
+          reference: `EARN-${booking.id}`,
+          metadata: { bookingId: booking.id, passengerId: booking.passengerId }
+        }
+      });
+
+      this.logger.log(`[Wallet] Credited driver ${driverUser.userId} with ${booking.estimatedPrice} points.`);
+    }
+
+    // Garde aussi les points de fidélité bonus (optionnel)
     if (driverUser) {
-      const earnedPoints = Math.floor((booking.estimatedPrice as number) / 200);
-      if (earnedPoints > 0) {
-        this.points.addPoints(driverUser.userId, earnedPoints, `Course complétée`).catch(() => {});
+      const earnedBonus = Math.floor((booking.estimatedPrice as number) / 200);
+      if (earnedBonus > 0) {
+        this.points.addPoints(driverUser.userId, earnedBonus, `Bonus course complétée`).catch(() => {});
       }
     }
 
