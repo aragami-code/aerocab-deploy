@@ -11,6 +11,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { SettingsModule } from '../settings/settings.module';
 import { PromosModule } from '../promos/promos.module';
+import { FlightsModule } from '../flights/flights.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { PromosModule } from '../promos/promos.module';
     PointsModule,
     SettingsModule,
     PromosModule,
+    FlightsModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

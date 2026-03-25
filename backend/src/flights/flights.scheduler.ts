@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service';
 import { ConfigService } from '@nestjs/config';
+import { FlightsService } from './flights.service';
 
 @Injectable()
 export class FlightsScheduler {
@@ -10,13 +11,15 @@ export class FlightsScheduler {
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
+    private flightsService: FlightsService,
   ) {}
 
-  // Toutes les 15 minutes — met à jour les vols pas encore atterris
+  // Toutes les 10 minutes — met à jour les vols pas encore atterris
   @Cron(CronExpression.EVERY_10_MINUTES)
   async syncFlightStatuses() {
-    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
-    if (!apiKey) return; // Pas d'API key → skip silencieusement
+    // On vérifie maintenant la clé AeroDataBox
+    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
+    if (!aeroDataBoxKey) return; 
 
     const now = new Date();
     const cutoff = new Date(now.getTime() + 6 * 60 * 60 * 1000); // 6h à l'avance max
@@ -29,34 +32,31 @@ export class FlightsScheduler {
         scheduledArrival: { lte: cutoff },
         source: 'api',
       },
-      take: 50, // max 50 par batch pour éviter de dépasser les quotas
+      take: 20, // max 20 par batch pour éviter de dépasser les quotas RapidAPI
     });
 
     if (flights.length === 0) return;
 
-    this.logger.log(`Syncing ${flights.length} flights...`);
+    this.logger.log(`[FlightsScheduler] Syncing ${flights.length} flights via AeroDataBox...`);
 
     for (const flight of flights) {
+      if (!flight.flightNumber) continue;
       try {
-        const res = await fetch(
-          `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${flight.flightNumber}`,
-        );
-        const data = await res.json() as any;
-        const info = data?.data?.[0];
+        const info = await this.flightsService.searchFlight(flight.flightNumber);
         if (!info) continue;
 
-        const status: string = info.flight_status;
-        const actualLanding: string | null = info.arrival?.actual ?? null;
-
-        if (status === 'landed' && actualLanding) {
+        // Si le statut indique que l'avion est arriv (selon les rgles de FlightsService/AeroDataBox)
+        if (info.status === 'Arrived' || info.status === 'Landed') {
           await this.prisma.flight.update({
             where: { id: flight.id },
-            data: { actualArrival: new Date(actualLanding) },
+            data: { 
+              actualArrival: info.scheduledArrival ? new Date(info.scheduledArrival) : new Date(),
+            },
           });
-          this.logger.log(`Flight ${flight.flightNumber} landed at ${actualLanding}`);
+          this.logger.log(`[FlightsScheduler] Flight ${flight.flightNumber} marked as landed.`);
         }
-      } catch {
-        // silencieux — un vol en erreur n'arrête pas les autres
+      } catch (err) {
+        this.logger.error(`[FlightsScheduler] Error syncing flight ${flight.flightNumber}: ${err.message}`);
       }
     }
   }

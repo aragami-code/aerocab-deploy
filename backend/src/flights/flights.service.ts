@@ -11,34 +11,59 @@ export class FlightsService {
   ) {}
 
   /**
-   * Search flight info from AviationStack API (or mock in dev)
+   * Search flight info using AeroDataBox (primary) or local mock
    */
   async searchFlight(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
-    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
 
-    if (!apiKey) {
-      // Mock response for development
+    if (!aeroDataBoxKey) {
+      // Mock response for development if no API key is provided
+      console.warn(`[FlightsService] No AeroDataBox API key found. Returning mock data for ${normalized}.`);
       return this.getMockFlightInfo(normalized);
     }
+
+    try {
+      // We use the existing getAeroDataBoxFlight method for consistency
+      const flight = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
+
+      if (!flight) {
+        return null;
+      }
+
+      return {
+        flightNumber: flight.flightNumber,
+        airline: flight.airline.name,
+        origin: flight.departure.airport 
+          ? `${flight.departure.airport} (${flight.departure.iata})`
+          : flight.departure.iata,
+        destination: flight.arrival.airport
+          ? `${flight.arrival.airport} (${flight.arrival.iata})`
+          : flight.arrival.iata,
+        arrivalAirport: flight.arrival.iata?.trim().toUpperCase() ?? 'DLA',
+        scheduledArrival: flight.arrival.scheduled || flight.arrival.estimated,
+        status: flight.status,
+        source: 'api' as const,
+      };
+    } catch (error) {
+      console.error(`[FlightsService] Error searching flight ${normalized} via AeroDataBox:`, error);
+      return null;
+    }
+  }
+
+  /* AviationStack code commented out as requested
+  async searchFlightAviationStack(flightNumber: string) {
+    const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
+    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+
+    if (!apiKey) return this.getMockFlightInfo(normalized);
 
     try {
       const response = await fetch(
         `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${normalized}`,
       );
-      const data = (await response.json()) as {
-        data?: Array<{
-          flight: { iata: string };
-          airline: { name: string };
-          departure: { airport: string; iata: string };
-          arrival: { airport: string; iata: string; scheduled: string; estimated: string };
-          flight_status: string;
-        }>;
-      };
-
-      if (!data.data || data.data.length === 0) {
-        return null;
-      }
+      const data = await response.json();
+      if (!data.data || data.data.length === 0) return null;
 
       const flight = data.data[0];
       return {
@@ -55,6 +80,7 @@ export class FlightsService {
       return null;
     }
   }
+  */
 
   /**
    * Create a flight record for a user

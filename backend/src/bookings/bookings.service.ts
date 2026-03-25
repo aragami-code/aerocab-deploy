@@ -38,6 +38,8 @@ const VEHICLE_SEATS: Record<string, number> = {
   confort_plus: 7,
 };
 
+import { FlightsService } from '../flights/flights.service';
+
 @Injectable()
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
@@ -52,35 +54,31 @@ export class BookingsService {
     private pricingService: PricingService,
     private dispatchService: DispatchService,
     private config: ConfigService,
+    private flightsService: FlightsService,
   ) {}
 
-  /** Recherche le vol via AviationStack et le sauvegarde en DB si introuvable */
+  /** Recherche le vol via AeroDataBox et le sauvegarde en DB si introuvable */
   private async fetchAndSaveFlight(passengerId: string, flightNumber: string) {
-    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
-    if (!apiKey) return null;
+    // On utilise maintenant le service FlightsService qui centralise la logique AeroDataBox
     try {
-      const res = await fetch(
-        `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${flightNumber}`,
-      );
-      const data = (await res.json()) as { data?: any[] };
-      if (!data.data?.length) return null;
-      const f = data.data[0];
-      const scheduledArrival = f.arrival?.scheduled || f.arrival?.estimated;
-      if (!scheduledArrival) return null;
+      const f = await this.flightsService.searchFlight(flightNumber);
+      if (!f) return null;
+
       return this.prisma.flight.create({
         data: {
           userId: passengerId,
           flightNumber: flightNumber.toUpperCase(),
-          airline: f.airline?.name || null,
-          origin: f.departure?.airport || null,
-          destination: f.arrival?.airport || null,
-          arrivalAirport: (f.arrival?.iata || 'DLA').toUpperCase(),
-          scheduledArrival: new Date(scheduledArrival),
-          actualArrival: f.arrival?.actual ? new Date(f.arrival.actual) : null,
+          airline: f.airline || null,
+          origin: f.origin || null,
+          destination: f.destination || null,
+          arrivalAirport: (f.arrivalAirport || 'DLA').toUpperCase(),
+          scheduledArrival: new Date(f.scheduledArrival),
+          actualArrival: null, // AeroDataBox search doesn't always give actual in this format
           source: 'api',
         },
       });
-    } catch {
+    } catch (e) {
+      this.logger.error(`[BookingsService] Error in fetchAndSaveFlight: ${e.message}`);
       return null;
     }
   }
