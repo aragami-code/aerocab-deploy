@@ -16,14 +16,14 @@ COPY backend/ ./backend/
 # Install all dependencies from root (resolves workspace: protocol)
 RUN pnpm install --no-frozen-lockfile
 
-# Build shared package first (so @aerocab/shared resolves to compiled JS)
-RUN pnpm --filter @aerocab/shared build
+# Build shared package first (so @aerogo24/shared resolves to compiled JS)
+RUN pnpm --filter @aerogo24/shared build
 
 # Generate Prisma client
-RUN pnpm --filter @aerocab/api exec prisma generate
+RUN pnpm --filter @aerogo24/api exec prisma generate
 
 # Build NestJS
-RUN pnpm --filter @aerocab/api build
+RUN pnpm --filter @aerogo24/api build
 
 # Stage 2: Production
 FROM node:20-alpine AS production
