@@ -46,4 +46,4 @@ WORKDIR /app/backend
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "prisma db push --accept-data-loss --skip-generate && node dist/backend/src/main"]
+CMD ["sh", "-c", "prisma db push --accept-data-loss --skip-generate && node dist/main"]
