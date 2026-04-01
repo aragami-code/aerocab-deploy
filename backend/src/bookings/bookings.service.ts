@@ -20,25 +20,13 @@ const AIRPORT_COORDS: Record<string, { lat: number; lng: number }> = {
 // Rayon de recherche par défaut (km)
 const PROXIMITY_RADIUS_KM = 20;
 
-// Prix de base au KM (FCFA)
-const BASE_PRICE_PER_KM = 250; 
-
-// Coefficients par catégorie de véhicule
-const VEHICLE_COEFFICIENTS: Record<string, number> = {
-  eco:          1.0,
-  eco_plus:     1.2,
-  standard:     1.4,
-  confort:      2.0,
-  confort_plus: 2.5,
+// Valeurs par défaut (écrasées par la DB via SettingsService)
+const DEFAULT_BASE_PRICE_PER_KM = 250;
+const DEFAULT_VEHICLE_COEFFICIENTS: Record<string, number> = {
+  eco: 1.0, eco_plus: 1.2, standard: 1.4, confort: 2.0, confort_plus: 2.5,
 };
-
-// Prix Plancher (Minimum Fare) par catégorie de véhicule
-const VEHICLE_MIN_PRICES: Record<string, number> = {
-  eco:          3000,
-  eco_plus:     3500,
-  standard:     5000,
-  confort:      8000,
-  confort_plus: 12000,
+const DEFAULT_VEHICLE_MIN_PRICES: Record<string, number> = {
+  eco: 3000, eco_plus: 3500, standard: 5000, confort: 8000, confort_plus: 12000,
 };
 
 // Capacité par type de véhicule
@@ -190,11 +178,66 @@ export class BookingsService {
     return 15; // Défaut de sécurité si coordonnées absentes
   }
 
-  /** Prix en FCFA et en points (taux 1:1 — 1 FCFA = 1 point) */
-  private computeBasePriceForVehicle(distanceKm: number, vehicleType: string): number {
-    const coeff = VEHICLE_COEFFICIENTS[vehicleType] || 1.0;
-    const minPrice = VEHICLE_MIN_PRICES[vehicleType] || 3000;
-    return Math.max(minPrice, Math.round(distanceKm * BASE_PRICE_PER_KM * coeff));
+  /** Détermine si l'heure actuelle tombe dans la plage nuit (22h-05h) */
+  private isNightTime(): boolean {
+    const h = new Date().getHours();
+    return h >= 22 || h < 5;
+  }
+
+  /** Détermine si l'heure actuelle est en heure de pointe selon la config */
+  private isRushHour(surgeConfig: { rushHourStart: string; rushHourEnd: string; rushHourStart2: string; rushHourEnd2: string }): boolean {
+    const now = new Date();
+    const h = now.getHours();
+    const m = now.getMinutes();
+    const toMinutes = (t: string) => {
+      const [hh, mm] = t.split(':').map(Number);
+      return hh * 60 + mm;
+    };
+    const current = h * 60 + m;
+    const inRange = (s: string, e: string) => current >= toMinutes(s) && current <= toMinutes(e);
+    return inRange(surgeConfig.rushHourStart, surgeConfig.rushHourEnd) ||
+           inRange(surgeConfig.rushHourStart2, surgeConfig.rushHourEnd2);
+  }
+
+  /** Calcule le multiplicateur de surcharge contextuelle */
+  private async computeSurgeContext(dto: CreateBookingDto): Promise<{
+    multiplier: number;
+    nightSurge: boolean;
+    rainSurge: boolean;
+    rushHourSurge: boolean;
+  }> {
+    const tariffs = await this.settingsService.getTariffs();
+    const surge = tariffs.surge;
+    const night = this.isNightTime();
+    const rush = this.isRushHour(surge);
+    const rain = dto.rainSurge === true;
+    let multiplier = 1.0;
+    if (night) multiplier *= surge.nightMultiplier;
+    if (rain)  multiplier *= surge.rainMultiplier;
+    if (rush)  multiplier *= surge.rushHourMultiplier;
+    return { multiplier: Math.round(multiplier * 100) / 100, nightSurge: night, rainSurge: rain, rushHourSurge: rush };
+  }
+
+  /** Calcule le prix total de la consigne (FCFA) */
+  private async computeConsignePrice(vehicleType: string, days: number): Promise<{ dailyRate: number; total: number }> {
+    const tariffs = await this.settingsService.getTariffs();
+    const dailyRate = tariffs.consigne[vehicleType]?.dailyRate ?? 8000;
+    return { dailyRate, total: dailyRate * days };
+  }
+
+  /** Prix en FCFA basé sur les tarifs DB (avec fallback sur les défauts)
+   *  Formule : startupFee + (distanceKm × basePricePerKm × coeff), min = minFare
+   *  Le startupFee inclut les `startupMinutes` premières minutes de trajet.
+   */
+  private async computeBasePriceForVehicle(distanceKm: number, vehicleType: string): Promise<number> {
+    const tariffs = await this.settingsService.getTariffs();
+    const vehicle = tariffs.vehicles[vehicleType];
+    const basePricePerKm = vehicle?.basePricePerKm ?? tariffs.basePricePerKm ?? DEFAULT_BASE_PRICE_PER_KM;
+    const coeff          = vehicle?.coefficient    ?? DEFAULT_VEHICLE_COEFFICIENTS[vehicleType] ?? 1.0;
+    const minFare        = vehicle?.minFare        ?? DEFAULT_VEHICLE_MIN_PRICES[vehicleType]   ?? 3000;
+    const startupFee     = tariffs.startupFee     ?? 500;
+    const distancePrice  = Math.round(distanceKm * basePricePerKm * coeff);
+    return Math.max(minFare, startupFee + distancePrice);
   }
 
   // ─── Fin méthodes partagées ───────────────────────────────────────────────
@@ -204,17 +247,36 @@ export class BookingsService {
     // 1. Distance et prix de base
     const isDeparture = dto.type === 'DEPARTURE';
     const distanceKm = this.computeDistanceKm(dto);
-    const priceInFcfa = this.computeBasePriceForVehicle(distanceKm, dto.vehicleType);
+    const priceInFcfa = await this.computeBasePriceForVehicle(distanceKm, dto.vehicleType);
     const finalPricePoints = priceInFcfa; // 1 FCFA = 1 point
 
     this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Points: ${finalPricePoints}`);
 
-    // 2. Surge Pricing
+    // 2. Surge Pricing (offre/demande)
     let dynamicPricePoints = finalPricePoints;
+    let supplyDemandMultiplier = 1.0;
     try {
       dynamicPricePoints = await this.pricingService.calculateEstimatedPrice(finalPricePoints, dto.departureAirport);
+      supplyDemandMultiplier = finalPricePoints > 0 ? dynamicPricePoints / finalPricePoints : 1.0;
     } catch (err) {
       this.logger.warn(`Surge Pricing failed, using base points: ${err.message}`);
+    }
+
+    // 3. Surcharges contextuelles (nuit / pluie / heure de pointe)
+    const surgeCtx = await this.computeSurgeContext(dto);
+    dynamicPricePoints = Math.round(dynamicPricePoints * surgeCtx.multiplier);
+    const finalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
+    this.logger.log(`[Surge] offre/demande=${supplyDemandMultiplier.toFixed(2)} ctx=${surgeCtx.multiplier.toFixed(2)} total=${finalSurgeMultiplier.toFixed(2)} nuit=${surgeCtx.nightSurge} pluie=${surgeCtx.rainSurge} rush=${surgeCtx.rushHourSurge}`);
+
+    // 4. Consigne du véhicule (si demandée)
+    let consigneTotal = 0;
+    let consigneDailyRate = 0;
+    const consigneVehicleType = dto.consigneVehicleType || dto.vehicleType;
+    if (dto.withConsigne && dto.consigneDays && dto.consigneDays > 0) {
+      const consigne = await this.computeConsignePrice(consigneVehicleType, dto.consigneDays);
+      consigneTotal = consigne.total;
+      consigneDailyRate = consigne.dailyRate;
+      this.logger.log(`[Consigne] ${dto.consigneDays}j × ${consigneDailyRate} FCFA = ${consigneTotal} FCFA`);
     }
 
     // Applique le code promo si fourni (sur les points)
@@ -289,56 +351,43 @@ export class BookingsService {
     const cleanPickupLat = (typeof dto.pickupLat === 'number' && !isNaN(dto.pickupLat)) ? dto.pickupLat : null;
     const cleanPickupLng = (typeof dto.pickupLng === 'number' && !isNaN(dto.pickupLng)) ? dto.pickupLng : null;
 
+    // Taux de conversion : 1 point = 100 FCFA
+    const FCFA_PER_POINT = 100;
+    const pointsRequired = Math.ceil(pointsAfterDiscount / FCFA_PER_POINT);
+
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
-      if (dto.paymentMethod === 'points') {
-        // Paiement par points de fidélité (PointsTransaction)
-        // SELECT FOR UPDATE sur l'utilisateur pour éviter la race condition :
-        // deux réservations simultanées ne peuvent pas lire le même solde.
-        await tx.$executeRaw`SELECT id FROM users WHERE id = ${passengerId}::uuid FOR UPDATE`;
+      if (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points') {
+        // Paiement par wallet (balance en points)
+        // SELECT FOR UPDATE pour éviter les race conditions sur le solde
+        await tx.$executeRaw`SELECT id FROM wallets WHERE user_id = ${passengerId}::uuid FOR UPDATE`;
 
-        const result = await tx.pointsTransaction.aggregate({
-          where: { userId: passengerId },
-          _sum: { points: true },
-        });
-        const pointsBalance = result._sum.points ?? 0;
-
-        if (pointsBalance < pointsAfterDiscount) {
-          throw new BadRequestException(
-            `Solde de points insuffisant : ${pointsBalance} pts disponibles (Besoin de ${pointsAfterDiscount} pts)`,
-          );
-        }
-
-        await tx.pointsTransaction.create({
-          data: { userId: passengerId, type: 'debit', points: -pointsAfterDiscount, label: 'Paiement course' },
-        });
-
-      } else if (dto.paymentMethod !== 'cash') {
-        // Paiement par wallet (orange_money, mtn_momo, card…)
         const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
         const balance = wallet?.balance ?? 0;
 
-        if (balance < pointsAfterDiscount) {
+        if (balance < pointsRequired) {
           throw new BadRequestException(
-            `Solde insuffisant : ${balance} XAF disponibles (Besoin de ${pointsAfterDiscount} XAF)`,
+            `Solde insuffisant : ${balance} pts disponibles (Besoin de ${pointsRequired} pts pour ${pointsAfterDiscount} FCFA)`,
           );
         }
 
         await tx.wallet.update({
           where: { userId: passengerId },
-          data: { balance: { decrement: pointsAfterDiscount } },
+          data: { balance: { decrement: pointsRequired } },
         });
 
-        await tx.transaction.create({
-          data: {
-            walletId: wallet!.id,
-            amount: pointsAfterDiscount,
-            type: 'payment',
-            status: 'completed',
-            reference: `RIDE-${Date.now()}`,
-            metadata: { bookingRef: dto.flightNumber || 'URBAN' }
-          }
-        });
+        if (wallet) {
+          await tx.transaction.create({
+            data: {
+              walletId: wallet.id,
+              amount: pointsAfterDiscount,
+              type: 'payment',
+              status: 'completed',
+              reference: `RIDE-${Date.now()}`,
+              metadata: { bookingRef: dto.flightNumber || 'URBAN', points: pointsRequired }
+            }
+          });
+        }
       }
 
       return tx.booking.create({
@@ -361,6 +410,17 @@ export class BookingsService {
           pickupAddress: dto.pickupAddress || 'Aéroport',
           pickupLat: cleanPickupLat,
           pickupLng: cleanPickupLng,
+          // Surcharges
+          surgeMultiplier: finalSurgeMultiplier,
+          nightSurge: surgeCtx.nightSurge,
+          rainSurge: surgeCtx.rainSurge,
+          rushHourSurge: surgeCtx.rushHourSurge,
+          // Consigne
+          withConsigne: dto.withConsigne || false,
+          consigneDays: dto.consigneDays || null,
+          consigneDailyRate: consigneDailyRate || null,
+          consigneVehicleType: dto.withConsigne ? consigneVehicleType : null,
+          consigneTotal: consigneTotal || null,
         } as any,
         include: {
           passenger: { select: { name: true } },
@@ -972,16 +1032,20 @@ export class BookingsService {
     });
     
     if (driverUser && booking.paymentMethod !== 'cash') {
+      // Taux de conversion : 1 point = 100 FCFA
+      const FCFA_PER_POINT_DRIVER = 100;
+      const pointsEarned = Math.floor((booking.estimatedPrice as number) / FCFA_PER_POINT_DRIVER);
+
       // 1. Récupère ou crée le wallet du chauffeur
       let driverWallet = await this.prisma.wallet.findUnique({ where: { userId: driverUser.userId } });
       if (!driverWallet) {
         driverWallet = await this.prisma.wallet.create({ data: { userId: driverUser.userId, balance: 0 } });
       }
 
-      // 2. Crédite le wallet du montant de la course
+      // 2. Crédite le wallet en points
       await this.prisma.wallet.update({
         where: { id: driverWallet.id },
-        data: { balance: { increment: booking.estimatedPrice } },
+        data: { balance: { increment: pointsEarned } },
       });
 
       // 3. Enregistre la transaction
@@ -992,11 +1056,11 @@ export class BookingsService {
           type: 'deposit',
           status: 'completed',
           reference: `EARN-${booking.id}`,
-          metadata: { bookingId: booking.id, passengerId: booking.passengerId }
+          metadata: { bookingId: booking.id, passengerId: booking.passengerId, points: pointsEarned }
         }
       });
 
-      this.logger.log(`[Wallet] Credited driver ${driverUser.userId} with ${booking.estimatedPrice} points.`);
+      this.logger.log(`[Wallet] Credited driver ${driverUser.userId} with ${pointsEarned} points (${booking.estimatedPrice} FCFA).`);
     }
 
     // Garde aussi les points de fidélité bonus (optionnel)
@@ -1084,25 +1148,54 @@ export class BookingsService {
   async estimatePrices(dto: Partial<CreateBookingDto>) {
     const distanceKm = this.computeDistanceKm(dto);
 
-    // Surge multiplier pour la zone
-    let surgeMultiplier = 1.0;
+    // Surge offre/demande
+    let supplyDemandMultiplier = 1.0;
     try {
       if (dto.departureAirport) {
         const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport);
-        surgeMultiplier = simulated / 1000;
+        supplyDemandMultiplier = simulated / 1000;
       }
     } catch { /* ignore */ }
 
-    // Estimation pour chaque catégorie de véhicule
-    const estimates: Record<string, { priceInFcfa: number; priceInPoints: number }> = {};
-    for (const vType of Object.keys(VEHICLE_COEFFICIENTS)) {
-      const basePrice = this.computeBasePriceForVehicle(distanceKm, vType);
-      const surgedPrice = Math.round(basePrice * surgeMultiplier);
-      // Taux 1:1 — cohérent avec createBooking (1 FCFA = 1 point)
-      estimates[vType] = { priceInFcfa: surgedPrice, priceInPoints: surgedPrice };
+    // Surcharges contextuelles (nuit / pluie / heure de pointe)
+    const surgeCtx = await this.computeSurgeContext(dto as CreateBookingDto);
+    const totalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
+
+    // Estimation par catégorie de véhicule
+    const tariffs = await this.settingsService.getTariffs();
+    const estimates: Record<string, {
+      priceInFcfa: number; priceInPoints: number;
+      baseFcfa: number; surgeFcfa: number;
+    }> = {};
+    for (const vType of Object.keys(tariffs.vehicles)) {
+      const basePrice = await this.computeBasePriceForVehicle(distanceKm, vType);
+      const surgedPrice = Math.round(basePrice * totalSurgeMultiplier);
+      estimates[vType] = {
+        priceInFcfa:   surgedPrice,
+        priceInPoints: surgedPrice,
+        baseFcfa:      basePrice,
+        surgeFcfa:     surgedPrice - basePrice,
+      };
     }
 
-    return { distanceKm, surgeMultiplier, estimates };
+    // Tarifs consigne par véhicule
+    const consigneDailyRates: Record<string, number> = {};
+    for (const vType of Object.keys(tariffs.consigne)) {
+      consigneDailyRates[vType] = tariffs.consigne[vType]?.dailyRate ?? 8000;
+    }
+
+    return {
+      distanceKm,
+      surgeMultiplier: totalSurgeMultiplier,
+      surgeContext: {
+        nightSurge:    surgeCtx.nightSurge,
+        rainSurge:     surgeCtx.rainSurge,
+        rushHourSurge: surgeCtx.rushHourSurge,
+        multiplier:    surgeCtx.multiplier,
+      },
+      estimates,
+      consigneDailyRates,
+    };
   }
 
 }

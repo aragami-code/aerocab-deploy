@@ -3,9 +3,10 @@ import { PaymentsService } from './payments.service';
 import { WalletService } from './wallet.service';
 import { PaymentsController } from './payments.controller';
 import { PrismaModule } from '../database/prisma.module';
+import { SettingsModule } from '../settings/settings.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, SettingsModule],
   controllers: [PaymentsController],
   providers: [PaymentsService, WalletService],
   exports: [PaymentsService, WalletService],

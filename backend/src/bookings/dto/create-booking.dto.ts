@@ -1,4 +1,4 @@
-import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, Min, Max } from 'class-validator';
+import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, Min, Max } from 'class-validator';
 
 const VALID_VEHICLE_TYPES = ['eco', 'eco_plus', 'standard', 'confort', 'confort_plus'];
 const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money', 'mtn_momo'];
@@ -14,7 +14,7 @@ export class CreateBookingDto {
   paymentMethod!: string;
 
   @IsString()
-  @IsIn(VALID_AIRPORTS, { message: 'Aéroport de départ invalide' })
+  @IsIn(VALID_AIRPORTS, { message: 'Aéroport invalide' })
   departureAirport!: string;
 
   @IsString()
@@ -35,8 +35,8 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['ARRIVAL', 'DEPARTURE'], { message: 'Type de réservation invalide' })
-  type?: 'ARRIVAL' | 'DEPARTURE';
+  @IsIn(['ARRIVAL', 'DEPARTURE', 'INTERNATIONAL'], { message: 'Type de réservation invalide' })
+  type?: 'ARRIVAL' | 'DEPARTURE' | 'INTERNATIONAL';
 
   @IsOptional()
   @IsString()
@@ -56,5 +56,26 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
-  force?: string; // string "true" logic due to form-data or simple toggle
+  force?: string;
+
+  // ── Consigne ────────────────────────────────────────────────────────────────
+  @IsOptional()
+  @IsBoolean()
+  withConsigne?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1, { message: 'Minimum 1 jour de consigne' })
+  @Max(90, { message: 'Maximum 90 jours' })
+  consigneDays?: number;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(VALID_VEHICLE_TYPES, { message: 'Type de véhicule de consigne invalide' })
+  consigneVehicleType?: string; // peut différer du vehicleType principal
+
+  // ── Surcharges contextuelles ─────────────────────────────────────────────────
+  @IsOptional()
+  @IsBoolean()
+  rainSurge?: boolean;    // L'utilisateur signale qu'il pleut
 }

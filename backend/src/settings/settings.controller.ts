@@ -1,5 +1,5 @@
-import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
-import { SettingsService } from './settings.service';
+import { Controller, Get, Patch, Put, Body, UseGuards } from '@nestjs/common';
+import { SettingsService, TariffsConfig } from './settings.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { IsBoolean } from 'class-validator';
@@ -30,5 +30,16 @@ export class SettingsController {
   async setProximity(@Body() dto: SetProximityDto) {
     await this.settings.setProximityAssignment(dto.enabled);
     return { proximityAssignment: dto.enabled };
+  }
+
+  @Get('tariffs')
+  async getTariffs() {
+    return this.settings.getTariffs();
+  }
+
+  @Put('tariffs')
+  async setTariffs(@Body() body: TariffsConfig) {
+    await this.settings.setTariffs(body);
+    return this.settings.getTariffs();
   }
 }

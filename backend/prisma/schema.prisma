@@ -152,6 +152,20 @@ model Booking {
   pickupAddress    String?        @map("pickup_address")
   pickupLat        Float?         @map("pickup_lat")
   pickupLng        Float?         @map("pickup_lng")
+
+  // ── Consigne du véhicule ────────────────────────────────────────────────────
+  withConsigne         Boolean  @default(false) @map("with_consigne")
+  consigneDays         Int?     @map("consigne_days")
+  consigneDailyRate    Float?   @map("consigne_daily_rate")   // FCFA/jour
+  consigneVehicleType  String?  @map("consigne_vehicle_type")
+  consigneTotal        Float?   @map("consigne_total")        // Prix total consigne (FCFA)
+
+  // ── Surcharges dynamiques ───────────────────────────────────────────────────
+  surgeMultiplier  Float  @default(1.0) @map("surge_multiplier")
+  nightSurge       Boolean @default(false) @map("night_surge")    // 22h–05h
+  rainSurge        Boolean @default(false) @map("rain_surge")
+  rushHourSurge    Boolean @default(false) @map("rush_hour_surge")
+
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
   positions        DriverPosition[]
@@ -363,8 +377,9 @@ enum AccessPassStatus {
 }
 
 enum BookingType {
-  ARRIVAL
-  DEPARTURE
+  ARRIVAL        // À l'aéroport → destination
+  DEPARTURE      // Lieu quelconque → aéroport
+  INTERNATIONAL  // Hors du pays, réservation à l'avance (vol arrivée → destination)
 }
 
 enum BookingStatus {

@@ -29,8 +29,8 @@ export class WalletService {
    * Record a financial transaction (Deposit, Payment, etc.)
    * Uses Prisma $transaction for ACID compliance.
    */
-  async createTransaction(walletId: string, amount: number, type: TransactionType, reference?: string) {
-    this.logger.log(`Processing ${type} for wallet ${walletId}: ${amount} XAF`);
+  async createTransaction(walletId: string, amount: number, type: TransactionType, reference?: string, metadata?: any) {
+    this.logger.log(`Processing ${type} for wallet ${walletId}: ${amount} (Meta: ${JSON.stringify(metadata)})`);
 
     return this.prisma.$transaction(async (tx) => {
       // 1. Fetch wallet with lock (implicit in update)
@@ -43,7 +43,7 @@ export class WalletService {
         throw new BadRequestException('Insufficient funds in wallet');
       }
 
-      // 3. Create the transaction record (Idempotency check handled by @unique reference if provided)
+      // 3. Create the transaction record
       const transaction = await tx.transaction.create({
         data: {
           walletId,
@@ -51,6 +51,7 @@ export class WalletService {
           type,
           status: TransactionStatus.completed,
           reference,
+          metadata: metadata || {},
         },
       });
 
