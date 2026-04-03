@@ -58,6 +58,20 @@ export class RatingsService {
     // Update driver's average rating if rated user is a driver
     await this.updateDriverRatingAvg(data.toUserId);
 
+    // Reward points to the rater (100 pts pour avoir noté)
+    try {
+      await this.prisma.pointsTransaction.create({
+        data: {
+          userId: fromUserId,
+          type: 'credit',
+          points: 100,
+          label: 'Récompense notation',
+        },
+      });
+    } catch (e) {
+      // Silent fail pour ne pas bloquer la notation
+    }
+
     return rating;
   }
 
