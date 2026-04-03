@@ -1053,11 +1053,15 @@ export class BookingsService {
       this.logger.log(`[Wallet] Credited driver ${driverUser.userId} with ${pointsEarned} points (${booking.estimatedPrice} FCFA).`);
     }
 
-    // Garde aussi les points de fidélité bonus (optionnel)
-    if (driverUser) {
-      const earnedBonus = Math.floor((booking.estimatedPrice as number) / 200);
-      if (earnedBonus > 0) {
-        this.points.addPoints(driverUser.userId, earnedBonus, `Bonus course complétée`).catch(() => {});
+    // Cashback 1% au passager si paiement par points
+    if (booking.paymentMethod === 'points' || booking.paymentMethod === 'wallet') {
+      const cashback = Math.floor((booking.estimatedPrice as number) * 0.01);
+      if (cashback > 0) {
+        this.points.addPoints(
+          booking.passengerId,
+          cashback,
+          `Cashback 1% course (${booking.estimatedPrice} FCFA)`,
+        ).catch(() => {});
       }
     }
 
