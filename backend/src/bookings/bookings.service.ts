@@ -351,19 +351,18 @@ export class BookingsService {
     const cleanPickupLat = (typeof dto.pickupLat === 'number' && !isNaN(dto.pickupLat)) ? dto.pickupLat : null;
     const cleanPickupLng = (typeof dto.pickupLng === 'number' && !isNaN(dto.pickupLng)) ? dto.pickupLng : null;
 
-    // Taux de conversion : 1 point = 100 FCFA
-    const FCFA_PER_POINT = 100;
-    const pointsRequired = Math.ceil(pointsAfterDiscount / FCFA_PER_POINT);
+    // Taux de conversion : 1 point = 1 FCFA
+    const pointsRequired = Math.ceil(pointsAfterDiscount);
 
     // Points + booking creation dans une transaction atomique
     const booking = await this.prisma.$transaction(async (tx) => {
       if (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points') {
-        // Paiement par wallet (balance en points)
-        // SELECT FOR UPDATE pour éviter les race conditions sur le solde
-        await tx.$executeRaw`SELECT id FROM wallets WHERE user_id = ${passengerId}::uuid FOR UPDATE`;
-
-        const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
-        const balance = wallet?.balance ?? 0;
+        // Paiement par points (points_transactions)
+        const result = await tx.pointsTransaction.aggregate({
+          where: { userId: passengerId },
+          _sum: { points: true },
+        });
+        const balance = result._sum.points ?? 0;
 
         if (balance < pointsRequired) {
           throw new BadRequestException(
@@ -371,23 +370,14 @@ export class BookingsService {
           );
         }
 
-        await tx.wallet.update({
-          where: { userId: passengerId },
-          data: { balance: { decrement: pointsRequired } },
+        await tx.pointsTransaction.create({
+          data: {
+            userId: passengerId,
+            type: 'debit',
+            points: -pointsRequired,
+            label: `Réservation course ${dto.flightNumber || 'URBAN'} (${pointsAfterDiscount} FCFA)`,
+          },
         });
-
-        if (wallet) {
-          await tx.transaction.create({
-            data: {
-              walletId: wallet.id,
-              amount: pointsAfterDiscount,
-              type: 'payment',
-              status: 'completed',
-              reference: `RIDE-${Date.now()}`,
-              metadata: { bookingRef: dto.flightNumber || 'URBAN', points: pointsRequired }
-            }
-          });
-        }
       }
 
       return tx.booking.create({
