@@ -69,10 +69,27 @@ export class AuthService {
     return { message: 'OTP envoye avec succes', expiresIn: OTP_TTL };
   }
 
+  private generateReferralCode(): string {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  }
+
+  async getReferralInfo(userId: string) {
+    const user = await (this.prisma.user as any).findUnique({
+      where: { id: userId },
+      select: { referralCode: true, referrals: { select: { id: true } } },
+    });
+    return {
+      referralCode: user?.referralCode ?? null,
+      referralCount: user?.referrals?.length ?? 0,
+    };
+  }
+
   async verifyOtp(
     phone: string,
     code: string,
     intendedRole?: 'passenger' | 'driver',
+    referralCode?: string,
   ): Promise<{
     accessToken: string;
     refreshToken: string;
@@ -115,11 +132,48 @@ export class AuthService {
 
     if (!user) {
       const role = intendedRole || 'passenger';
-      user = await this.prisma.user.create({
-        data: { phone, role },
+
+      // Génère un code de parrainage unique
+      let newReferralCode: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        const candidate = this.generateReferralCode();
+        const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+        if (!exists) { newReferralCode = candidate; break; }
+      }
+
+      // Cherche le parrain si un code a été fourni
+      let referrer: { id: string } | null = null;
+      if (referralCode) {
+        referrer = await (this.prisma.user as any).findUnique({
+          where: { referralCode: referralCode.toUpperCase() },
+          select: { id: true },
+        });
+      }
+
+      user = await (this.prisma.user as any).create({
+        data: {
+          phone,
+          role,
+          referralCode: newReferralCode,
+          referredBy: referrer?.id ?? null,
+        },
       });
       isNewUser = true;
       this.logger.log(`New user created: ${user.id} (${phone}) role=${role}`);
+
+      // Crédite parrain + filleul (500 pts chacun)
+      if (referrer) {
+        const REFERRAL_BONUS = 500;
+        await Promise.all([
+          this.prisma.pointsTransaction.create({
+            data: { userId: referrer.id, type: 'credit', points: REFERRAL_BONUS, label: `Parrainage — nouvel inscrit` },
+          }),
+          this.prisma.pointsTransaction.create({
+            data: { userId: user.id, type: 'credit', points: REFERRAL_BONUS, label: `Bonus parrainage à l'inscription` },
+          }),
+        ]);
+        this.logger.log(`Referral bonus: ${REFERRAL_BONUS} pts → parrain ${referrer.id} + filleul ${user.id}`);
+      }
     } else {
       this.logger.log(`User logged in: ${user.id} (${phone})`);
     }

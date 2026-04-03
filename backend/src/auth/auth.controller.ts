@@ -17,7 +17,13 @@ export class AuthController {
   @Post('otp/verify')
   @HttpCode(200)
   async verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.authService.verifyOtp(dto.phone, dto.code, dto.intendedRole);
+    return this.authService.verifyOtp(dto.phone, dto.code, dto.intendedRole, dto.referralCode);
+  }
+
+  @Get('referral')
+  @UseGuards(JwtAuthGuard)
+  async getReferral(@CurrentUser('id') userId: string) {
+    return this.authService.getReferralInfo(userId);
   }
 
   @Post('refresh')

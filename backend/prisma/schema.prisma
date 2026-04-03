@@ -20,6 +20,10 @@ model User {
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @updatedAt @map("updated_at")
   googleId               String?             @unique @map("google_id")
+  referralCode           String?             @unique @map("referral_code")
+  referredBy             String?             @map("referred_by") @db.Uuid
+  referrer               User?               @relation("Referrals", fields: [referredBy], references: [id])
+  referrals              User[]              @relation("Referrals")
   accessPasses           AccessPass[]
   bookings               Booking[]
   driverConversations    Conversation[]      @relation("DriverConversations")

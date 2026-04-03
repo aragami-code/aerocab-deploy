@@ -26,4 +26,8 @@ export class VerifyOtpDto {
     message: 'intendedRole must be "passenger" or "driver"',
   })
   intendedRole?: 'passenger' | 'driver';
+
+  @IsOptional()
+  @IsString()
+  referralCode?: string;
 }
