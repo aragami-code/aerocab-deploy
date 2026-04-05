@@ -19,6 +19,7 @@ import { SettingsModule } from './settings/settings.module';
 import { PaymentsModule } from './payments/payments.module';
 import { ReportsModule } from './reports/reports.module';
 import { PromosModule } from './promos/promos.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { PromosModule } from './promos/promos.module';
     PaymentsModule,
     ReportsModule,
     PromosModule,
+    AuditModule,
   ],
   controllers: [AppController],
 })

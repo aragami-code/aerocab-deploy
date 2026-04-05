@@ -74,6 +74,29 @@ export class AuthService {
     return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   }
 
+  async applyReferral(userId: string, referralCode: string): Promise<{ success: boolean; message: string }> {
+    const user = await (this.prisma.user as any).findUnique({
+      where: { id: userId },
+      select: { referredById: true },
+    });
+    if (user?.referredById) return { success: false, message: 'Vous avez déjà un parrain.' };
+    const referrer = await (this.prisma.user as any).findUnique({
+      where: { referralCode: referralCode.toUpperCase() },
+      select: { id: true },
+    });
+    if (!referrer) return { success: false, message: 'Code de parrainage invalide.' };
+    if (referrer.id === userId) return { success: false, message: 'Vous ne pouvez pas utiliser votre propre code.' };
+    await (this.prisma.user as any).update({
+      where: { id: userId },
+      data: { referredById: referrer.id },
+    });
+    await Promise.all([
+      this.prisma.pointsTransaction.create({ data: { userId: referrer.id, points: 500, type: 'credit', label: 'Parrainage accepté' } }),
+      this.prisma.pointsTransaction.create({ data: { userId, points: 500, type: 'credit', label: 'Bonus parrainage inscription' } }),
+    ]);
+    return { success: true, message: '500 points offerts à vous et votre parrain !' };
+  }
+
   async getReferralInfo(userId: string) {
     const user = await (this.prisma.user as any).findUnique({
       where: { id: userId },

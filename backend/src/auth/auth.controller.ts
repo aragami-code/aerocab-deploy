@@ -26,6 +26,13 @@ export class AuthController {
     return this.authService.getReferralInfo(userId);
   }
 
+  @Post('referral/apply')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  async applyReferral(@CurrentUser('id') userId: string, @Body() body: { code: string }) {
+    return this.authService.applyReferral(userId, body.code);
+  }
+
   @Post('refresh')
   @HttpCode(200)
   async refresh(@Body() dto: RefreshTokenDto) {

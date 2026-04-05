@@ -424,3 +424,22 @@ enum TransactionStatus {
   completed
   failed
 }
+
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String
+  entity     String
+  entityId   String?
+  userId     String?
+  adminId    String?
+  meta       Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

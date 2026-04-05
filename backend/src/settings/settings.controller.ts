@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Put, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
 import { SettingsService, TariffsConfig } from './settings.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
@@ -37,7 +37,7 @@ export class SettingsController {
     return this.settings.getTariffs();
   }
 
-  @Put('tariffs')
+  @Patch('tariffs')
   async setTariffs(@Body() body: TariffsConfig) {
     await this.settings.setTariffs(body);
     return this.settings.getTariffs();
