@@ -140,4 +140,8 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
     
     this.logger.log(`[Rides] Notified driver ${driverId} about booking ${data.id}`);
   }
+
+  notifyPassenger(passengerId: string, event: string, data: any) {
+    this.server.to(`passenger:${passengerId}`).emit(event, data);
+  }
 }
