@@ -244,6 +244,14 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
+    // 0. Guard : pas de double réservation active
+    const existingActive = await this.prisma.booking.findFirst({
+      where: { passengerId, status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] } },
+    });
+    if (existingActive) {
+      throw new BadRequestException('Vous avez déjà une course en cours. Annulez-la avant d\'en créer une nouvelle.');
+    }
+
     // 1. Distance et prix de base
     const isDeparture = dto.type === 'DEPARTURE';
     const distanceKm = this.computeDistanceKm(dto);
@@ -290,7 +298,7 @@ export class BookingsService {
         discountAmount = Math.round(dynamicPricePoints * (promo.discount / 100));
         pointsAfterDiscount = dynamicPricePoints - discountAmount;
         appliedPromoCode = dto.promoCode.toUpperCase();
-        this.promosService.applyPromo(dto.promoCode).catch(() => {});
+        await this.promosService.applyPromo(dto.promoCode);
       }
     }
 
@@ -433,9 +441,11 @@ export class BookingsService {
       ).catch(() => {});
     }
 
-    // Bonus for first booking
-    const totalBookings = await this.prisma.booking.count({ where: { passengerId } });
-    if (totalBookings === 1) {
+    // Bonus for first booking — count exclut la course qui vient d'être créée
+    const totalBookings = await this.prisma.booking.count({
+      where: { passengerId, id: { not: booking.id } },
+    });
+    if (totalBookings === 0) {
       this.points.addPoints(passengerId, 500, 'Bonus première course').catch(() => {});
     }
 
@@ -475,6 +485,43 @@ export class BookingsService {
       }
       this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} drivers.`);
     }
+
+    // Timeout 60s : annuler la réservation si aucun chauffeur n'a accepté
+    const bookingId = booking.id;
+    const passengerIdForTimeout = passengerId;
+    setTimeout(async () => {
+      try {
+        const bookingToTimeout = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+        const updated = await this.prisma.booking.updateMany({
+          where: { id: bookingId, status: 'pending' },
+          data: { status: 'cancelled' },
+        });
+        if (updated.count > 0) {
+          this.logger.warn(`[Timeout] Booking ${bookingId} annulé : aucun chauffeur en 60s`);
+          this.notifications.sendToUser(
+            passengerIdForTimeout,
+            'Aucun chauffeur disponible ❌',
+            'Votre réservation a été annulée automatiquement. Aucun chauffeur n\'a accepté dans les délais. Veuillez réessayer.',
+          ).catch(() => {});
+          this.ridesGateway.notifyPassenger(passengerIdForTimeout, 'booking_timeout', { bookingId });
+
+          // Remboursement des points si paiement par wallet
+          if (bookingToTimeout && (bookingToTimeout.paymentMethod === 'wallet' || bookingToTimeout.paymentMethod === 'points') && bookingToTimeout.estimatedPrice > 0) {
+            const pointsToRefund = Math.ceil(bookingToTimeout.estimatedPrice as number);
+            await this.prisma.pointsTransaction.create({
+              data: {
+                userId: passengerIdForTimeout,
+                type: 'credit',
+                points: pointsToRefund,
+                label: `Remboursement timeout course ${bookingId.slice(0, 8)}`,
+              },
+            }).catch((e) => this.logger.error(`[Timeout] Refund failed: ${e.message}`));
+          }
+        }
+      } catch (e: any) {
+        this.logger.error(`[Timeout] Erreur annulation booking ${bookingId}: ${e?.message}`);
+      }
+    }, 60_000);
 
     if (isNaN(pointsAfterDiscount)) {
       throw new BadRequestException('Le calcul du prix a échoué (NaN)');
@@ -622,10 +669,25 @@ export class BookingsService {
       throw new BadRequestException('Cette réservation ne peut plus être annulée');
     }
 
-    return this.prisma.booking.update({
+    const cancelled = await this.prisma.booking.update({
       where: { id: bookingId },
       data: { status: 'cancelled', cancelledAt: new Date() },
     });
+
+    // Remboursement des points si paiement par wallet
+    if ((booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') && booking.estimatedPrice > 0) {
+      const pointsToRefund = Math.ceil(booking.estimatedPrice as number);
+      await this.prisma.pointsTransaction.create({
+        data: {
+          userId: passengerId,
+          type: 'credit',
+          points: pointsToRefund,
+          label: `Remboursement annulation course ${bookingId.slice(0, 8)}`,
+        },
+      }).catch((e) => this.logger.error(`[CancelBooking] Refund failed: ${e.message}`));
+    }
+
+    return cancelled;
   }
 
   async getBookingHistory(passengerId: string, page = 1, limit = 20) {
@@ -870,6 +932,13 @@ export class BookingsService {
         departureAirport: booking.departureAirport,
         seats: VEHICLE_SEATS[booking.vehicleType] ?? 4,
       });
+
+      this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: bookingId, status: 'pending' });
+      this.notifications.sendToUser(booking.passengerId, 'Nouveau chauffeur en recherche 🔄', 'Votre chauffeur précédent a refusé. Nous cherchons un autre chauffeur pour vous.').catch(() => {});
+    } else {
+      // Aucun chauffeur disponible pour réassigner
+      this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: bookingId, status: 'pending' });
+      this.notifications.sendToUser(booking.passengerId, 'Recherche en cours 🔄', 'Le chauffeur assigné a refusé. Nous cherchons un autre chauffeur disponible.').catch(() => {});
     }
 
     return { id: bookingId, status: 'pending' };
@@ -1022,9 +1091,8 @@ export class BookingsService {
     });
     
     if (driverUser && booking.paymentMethod !== 'cash') {
-      // Taux de conversion : 1 point = 100 FCFA
-      const FCFA_PER_POINT_DRIVER = 100;
-      const pointsEarned = Math.floor((booking.estimatedPrice as number) / FCFA_PER_POINT_DRIVER);
+      // Taux de conversion : 1 point = 1 FCFA (identique au paiement passager)
+      const pointsEarned = Math.floor(booking.estimatedPrice as number);
 
       // 1. Récupère ou crée le wallet du chauffeur
       let driverWallet = await this.prisma.wallet.findUnique({ where: { userId: driverUser.userId } });
