@@ -158,10 +158,16 @@ export class BookingsService {
 
     const startCoords = isDeparture
       ? { lat: dto.pickupLat, lng: dto.pickupLng }
-      : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null);
+      // ARRIVAL : départ = aéroport (coords hardcodées ou pickupLat/Lng transmis par le client)
+      : (airportCoords
+          ? { lat: airportCoords.lat, lng: airportCoords.lng }
+          : (dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : null));
 
     const endCoords = isDeparture
-      ? (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null)
+      // DEPARTURE : destination = aéroport (coords hardcodées ou destLat/Lng transmis par le client)
+      ? (airportCoords
+          ? { lat: airportCoords.lat, lng: airportCoords.lng }
+          : (dto.destLat && dto.destLng ? { lat: dto.destLat, lng: dto.destLng } : null))
       : { lat: dto.destLat, lng: dto.destLng };
 
     if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
@@ -333,10 +339,21 @@ export class BookingsService {
       isPreLanding = true;
     }
 
+    // Coords de dispatch :
+    //   DEPARTURE → cherche les drivers autour du lieu de prise en charge (position du passager)
+    //   ARRIVAL avec aéroport inconnu → utilise pickupLat/Lng (= position aéroport envoyée par le client)
+    const knownAirport = AIRPORT_COORDS[dto.departureAirport];
+    const dispatchCustomCoords =
+      isDeparture && dto.pickupLat && dto.pickupLng
+        ? { lat: dto.pickupLat, lng: dto.pickupLng }
+        : (!knownAirport && dto.pickupLat && dto.pickupLng)
+          ? { lat: dto.pickupLat, lng: dto.pickupLng }
+          : undefined;
+
     const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
-      { departureAirport: dto.departureAirport } as any, 
+      { departureAirport: dto.departureAirport } as any,
       isPreLanding,
-      isDeparture && dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : undefined
+      dispatchCustomCoords,
     );
 
     // FIX: 2-Phase Dispatch (Confirmation flow)
