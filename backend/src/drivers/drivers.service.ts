@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { RidesGateway } from '../bookings/rides.gateway';
 import { RegisterDriverDto } from './dto/register-driver.dto';
 import { UpdateDriverDto } from './dto/update-driver.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
@@ -15,7 +16,10 @@ import { UploadDocumentDto } from './dto/upload-document.dto';
 export class DriversService {
   private readonly logger = new Logger(DriversService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private ridesGateway: RidesGateway,
+  ) {}
 
   async register(userId: string, dto: RegisterDriverDto) {
     const existing = await this.prisma.driverProfile.findUnique({ where: { userId } });
@@ -257,6 +261,38 @@ export class DriversService {
           longitude: dto.longitude,
         },
       }).catch(() => {});
+
+      // Émettre la position en temps réel au passager
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: activeBooking.id },
+        select: { passengerId: true },
+      });
+      if (booking?.passengerId) {
+        this.ridesGateway.server
+          .to(`passenger:${booking.passengerId}`)
+          .emit('driver:position', {
+            bookingId: activeBooking.id,
+            latitude: dto.latitude,
+            longitude: dto.longitude,
+            timestamp: new Date().toISOString(),
+          });
+      }
+    }
+
+    // Émettre aussi pour les courses confirmées (chauffeur en route)
+    const confirmedBooking = await this.prisma.booking.findFirst({
+      where: { driverProfileId: profile.id, status: 'confirmed' },
+      select: { id: true, passengerId: true },
+    });
+    if (confirmedBooking?.passengerId) {
+      this.ridesGateway.server
+        .to(`passenger:${confirmedBooking.passengerId}`)
+        .emit('driver:position', {
+          bookingId: confirmedBooking.id,
+          latitude: dto.latitude,
+          longitude: dto.longitude,
+          timestamp: new Date().toISOString(),
+        });
     }
 
     return { message: 'Position mise a jour' };

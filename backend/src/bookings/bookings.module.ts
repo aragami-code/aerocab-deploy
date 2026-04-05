@@ -31,6 +31,6 @@ import { FlightsModule } from '../flights/flights.module';
   ],
   controllers: [BookingsController],
   providers: [BookingsService, RidesGateway, DispatchService, PricingService],
-  exports: [BookingsService, DispatchService, PricingService],
+  exports: [BookingsService, DispatchService, PricingService, RidesGateway],
 })
 export class BookingsModule {}
