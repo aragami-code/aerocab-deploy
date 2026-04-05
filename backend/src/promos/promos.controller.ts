@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
 import { PromosService } from './promos.service';
 import { CreatePromoDto } from './dto/create-promo.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
@@ -34,5 +34,19 @@ export class PromosController {
     const result = await this.promosService.validatePromo(code);
     if (!result) return { valid: false, discount: 0 };
     return { valid: true, discount: result.discount };
+  }
+
+  @Patch(':id/toggle')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  toggle(@Param('id') id: string) {
+    return this.promosService.togglePromo(id);
+  }
+
+  @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  remove(@Param('id') id: string) {
+    return this.promosService.deletePromo(id);
   }
 }

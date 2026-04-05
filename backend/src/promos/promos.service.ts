@@ -52,4 +52,16 @@ export class PromosService {
       pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     };
   }
+
+  async togglePromo(id: string) {
+    const promo = await this.prisma.promoCode.findUniqueOrThrow({ where: { id } });
+    return this.prisma.promoCode.update({
+      where: { id },
+      data: { isActive: !promo.isActive },
+    });
+  }
+
+  async deletePromo(id: string) {
+    return this.prisma.promoCode.delete({ where: { id } });
+  }
 }
