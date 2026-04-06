@@ -5,13 +5,28 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { SettingsService } from '../settings/settings.service';
 import { VerifyDriverDto, VerificationAction } from './dto';
 
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private settingsService: SettingsService,
+  ) {}
+
+  // ── Tariffs ──────────────────────────────────────────
+
+  async getTariffs() {
+    return this.settingsService.getTariffs();
+  }
+
+  async setTariffs(config: any) {
+    return this.settingsService.setTariffs(config);
+  }
+
 
   // ── Driver Verification ──────────────────────────────
 

@@ -105,4 +105,18 @@ export class AdminController {
       limit ? parseInt(limit, 10) : 20,
     );
   }
+
+  // ── Settings/Tariffs ─────────────────────────────────
+
+  @Get('settings/tariffs')
+  async getTariffs() {
+    return this.adminService.getTariffs();
+  }
+
+  @Patch('settings/tariffs')
+  async setTariffs(@Body() body: any) {
+    return this.adminService.setTariffs(body);
+  }
+
 }
+

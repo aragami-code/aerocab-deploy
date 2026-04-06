@@ -13,9 +13,9 @@ export class CreateBookingDto {
   @IsIn(VALID_PAYMENT_METHODS, { message: 'Méthode de paiement invalide' })
   paymentMethod!: string;
 
+  @IsOptional()
   @IsString()
-  @IsIn(VALID_AIRPORTS, { message: 'Aéroport invalide' })
-  departureAirport!: string;
+  departureAirport?: string;
 
   @IsString()
   @IsNotEmpty({ message: 'La destination est requise' })

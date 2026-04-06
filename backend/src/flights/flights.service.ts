@@ -167,10 +167,10 @@ export class FlightsService {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
     const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
 
-    if (!aeroDataBoxKey) return this.getMockLiveDetails(normalized);
+    if (!aeroDataBoxKey) return null;
 
     const staticData = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
-    if (!staticData) return this.getMockLiveDetails(normalized);
+    if (!staticData) return null;
 
     // Position live via OpenSky (gratuit, sans clé)
     const live = staticData.callSign
