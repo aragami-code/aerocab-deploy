@@ -36,27 +36,23 @@ export class AirportsService {
   }
 
   async findNearby(lat: number, lng: number, radiusKm: number = 100) {
-    // Haversine formula in SQL
+    // Haversine formula via CTE (valid PostgreSQL, no GROUP BY needed)
     return this.prisma.$queryRaw<any[]>(
       Prisma.sql`
-        SELECT *,
-          (6371 * acos(
-            LEAST(1.0,
-              cos(radians(${lat})) * cos(radians(latitude))
-              * cos(radians(longitude) - radians(${lng}))
-              + sin(radians(${lat})) * sin(radians(latitude))
-            )
-          )) AS distance_km
-        FROM airports
-        WHERE is_active = true
-        GROUP BY id
-        HAVING (6371 * acos(
-            LEAST(1.0,
-              cos(radians(${lat})) * cos(radians(latitude))
-              * cos(radians(longitude) - radians(${lng}))
-              + sin(radians(${lat})) * sin(radians(latitude))
-            )
-          )) <= ${radiusKm}
+        WITH distances AS (
+          SELECT *,
+            (6371 * acos(
+              LEAST(1.0,
+                cos(radians(${lat})) * cos(radians(latitude))
+                * cos(radians(longitude) - radians(${lng}))
+                + sin(radians(${lat})) * sin(radians(latitude))
+              )
+            )) AS distance_km
+          FROM airports
+          WHERE is_active = true
+        )
+        SELECT * FROM distances
+        WHERE distance_km <= ${radiusKm}
         ORDER BY distance_km ASC
         LIMIT 5
       `,
