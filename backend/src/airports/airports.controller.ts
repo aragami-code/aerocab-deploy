@@ -27,7 +27,7 @@ export class AirportsController {
     return this.airportsService.findNearby(
       parseFloat(lat),
       parseFloat(lng),
-      radius ? parseFloat(radius) : 100,
+      radius ? parseFloat(radius) : 1000,
     );
   }
 

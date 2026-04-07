@@ -36,9 +36,9 @@ export class AirportsService {
   }
 
   async findNearby(lat: number, lng: number, radiusKm: number = 1000) {
-    // Haversine formula with safe bounds for acos
-    const nearby = await this.prisma.$queryRaw<any[]>(
-      Prisma.sql`
+    try {
+      // Haversine formula with safe bounds for acos - using direct template literal
+      const nearby = await this.prisma.$queryRaw<any[]>`
         WITH distances AS (
           SELECT *,
             (6371 * acos(
@@ -66,14 +66,16 @@ export class AirportsService {
         WHERE distance_km <= ${radiusKm}
         ORDER BY distance_km ASC
         LIMIT 5
-      `,
-    );
+      `;
 
-    // If still nothing found, return all active airports as fallback
-    if (!nearby || nearby.length === 0) {
-      return this.findAll();
+      if (nearby && nearby.length > 0) {
+        return nearby;
+      }
+    } catch (e) {
+      console.error('[AirportsService] Nearby search failed:', e);
     }
 
-    return nearby;
+    // Ultimate fallback: return ALL airports so the list is never empty
+    return this.findAll();
   }
 }
