@@ -71,7 +71,7 @@ export class AirportsService {
     });
   }
 
-  async findNearby(lat: number, lng: number, radiusKm: number = 1000) {
+  async findNearby(lat: number, lng: number, radiusKm: number = 80) {
     try {
       // Haversine formula with safe bounds for acos - using direct template literal
       const nearby = await this.prisma.$queryRaw<any[]>`
@@ -109,37 +109,12 @@ export class AirportsService {
         return nearby;
       }
 
-      // If no airport is found within the radius, the fallback is the single closest one
-      const closest = await this.prisma.$queryRaw<any[]>`
-        WITH distances AS (
-          SELECT *,
-            (6371 * acos(
-              GREATEST(-1.0, LEAST(1.0,
-                cos(radians(${lat})) * cos(radians(latitude))
-                * cos(radians(longitude) - radians(${lng}))
-                + sin(radians(${lat})) * sin(radians(latitude))
-              ))
-            )) AS distance_km
-          FROM airports
-          WHERE is_active = true
-        )
-        SELECT 
-          id, iata_code AS "iataCode", icao_code AS "icaoCode", name, city, country, 
-          country_code AS "countryCode", latitude, longitude, 
-          is_active AS "isActive", distance_km
-        FROM distances
-        ORDER BY distance_km ASC
-        LIMIT 1
-      `;
-
-      if (closest && closest.length > 0) {
-        return closest;
-      }
+      // Aucun aéroport dans le rayon → retourne liste vide (pas de fallback global)
+      return [];
     } catch (e) {
       console.error('[AirportsService] Nearby search failed:', e);
     }
 
-    // Ultimate fallback (should never happen if there are active airports in DB)
-    return this.findAll();
+    return [];
   }
 }
