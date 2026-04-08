@@ -6,7 +6,7 @@ import { CreatePromoDto } from './dto/create-promo.dto';
 export class PromosService {
   constructor(private prisma: PrismaService) {}
 
-  async validatePromo(code: string): Promise<{ discount: number; promoId: string } | null> {
+  async validatePromo(code: string, userId?: string): Promise<{ discount: number; promoId: string } | null> {
     const promo = await this.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase() },
     });
@@ -16,14 +16,41 @@ export class PromosService {
     if (promo.usedCount >= promo.maxUses) return null;
     if (promo.expiresAt && promo.expiresAt < new Date()) return null;
 
+    if (promo.usagePerUser && userId) {
+      const usage = await this.prisma.promoUsage.findUnique({
+        where: {
+          promoCodeId_userId: {
+            promoCodeId: promo.id,
+            userId,
+          },
+        },
+      });
+      if (usage) return null;
+    }
+
     return { discount: promo.discount, promoId: promo.id };
   }
 
-  async applyPromo(code: string): Promise<void> {
-    await this.prisma.promoCode.update({
+  async applyPromo(code: string, userId?: string): Promise<void> {
+    const promo = await this.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase() },
+    });
+
+    if (!promo) return;
+
+    await this.prisma.promoCode.update({
+      where: { id: promo.id },
       data: { usedCount: { increment: 1 } },
     });
+
+    if (promo.usagePerUser && userId) {
+      await this.prisma.promoUsage.create({
+        data: {
+          promoCodeId: promo.id,
+          userId,
+        },
+      });
+    }
   }
 
   async createPromo(dto: CreatePromoDto) {
@@ -33,6 +60,7 @@ export class PromosService {
         discount: dto.discount,
         maxUses: dto.maxUses,
         expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+        usagePerUser: dto.usagePerUser ?? false,
       },
     });
   }

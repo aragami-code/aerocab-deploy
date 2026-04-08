@@ -5,13 +5,28 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { SettingsService } from '../settings/settings.service';
 import { VerifyDriverDto, VerificationAction } from './dto';
 
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private settingsService: SettingsService,
+  ) {}
+
+  // ── Tariffs ──────────────────────────────────────────
+
+  async getTariffs() {
+    return this.settingsService.getTariffs();
+  }
+
+  async setTariffs(config: any) {
+    return this.settingsService.setTariffs(config);
+  }
+
 
   // ── Driver Verification ──────────────────────────────
 
@@ -115,8 +130,18 @@ export class AdminService {
         }),
       ]);
 
-      this.logger.log(`Driver approved: ${driverProfileId}`);
+      this.logger.log(`Driver approved/reactivated: ${driverProfileId}`);
       return { message: 'Chauffeur approuve avec succes', status: 'approved' };
+    }
+
+    if (dto.action === VerificationAction.SUSPEND) {
+      await this.prisma.driverProfile.update({
+        where: { id: driverProfileId },
+        data: { status: 'suspended' },
+      });
+
+      this.logger.log(`Driver suspended: ${driverProfileId}`);
+      return { message: 'Chauffeur suspendu avec succes', status: 'suspended' };
     }
 
     if (dto.action === VerificationAction.REJECT) {
@@ -294,6 +319,45 @@ export class AdminService {
 
     return {
       data: passes,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  // ── Referrals ─────────────────────────────────────────
+
+  async getReferrals(page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+
+    const [referrals, total] = await Promise.all([
+      (this.prisma.user as any).findMany({
+        where: { referredBy: { not: null } },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          createdAt: true,
+          referrer: {
+            select: {
+              id: true,
+              name: true,
+              phone: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.user.count({ where: { referredBy: { not: null } } }),
+    ]);
+
+    return {
+      data: referrals,
       pagination: {
         total,
         page,

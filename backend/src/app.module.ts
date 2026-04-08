@@ -17,6 +17,7 @@ import { PointsModule } from './points/points.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SettingsModule } from './settings/settings.module';
 import { PaymentsModule } from './payments/payments.module';
+import { AirportsModule } from './airports/airports.module';
 import { ReportsModule } from './reports/reports.module';
 import { PromosModule } from './promos/promos.module';
 import { AuditModule } from './audit/audit.module';
@@ -43,6 +44,7 @@ import { AuditModule } from './audit/audit.module';
     NotificationsModule,
     SettingsModule,
     PaymentsModule,
+    AirportsModule,
     ReportsModule,
     PromosModule,
     AuditModule,

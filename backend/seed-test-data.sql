@@ -1,13 +1,13 @@
 -- ============================================================
--- SEED : Données de test AeroCab
+-- SEED : Données de test AeroGo 24
 -- ============================================================
 
 -- 1. Chauffeurs (users avec role driver)
 INSERT INTO users (id, phone, name, email, role, status, language, created_at, updated_at)
 VALUES
-  ('11111111-0000-0000-0000-000000000001', '+237690000011', 'Paul Mbeki',     'paul@aerocab.cm',   'driver', 'active', 'fr', NOW(), NOW()),
-  ('11111111-0000-0000-0000-000000000002', '+237690000022', 'Marie Fotso',    'marie@aerocab.cm',  'driver', 'active', 'fr', NOW(), NOW()),
-  ('11111111-0000-0000-0000-000000000003', '+237690000033', 'Samuel Nganou',  'samuel@aerocab.cm', 'driver', 'active', 'fr', NOW(), NOW())
+  ('11111111-0000-0000-0000-000000000001', '+237690000011', 'Paul Mbeki',     'paul@aerogo24.cm',   'driver', 'active', 'fr', NOW(), NOW()),
+  ('11111111-0000-0000-0000-000000000002', '+237690000022', 'Marie Fotso',    'marie@aerogo24.cm',  'driver', 'active', 'fr', NOW(), NOW()),
+  ('11111111-0000-0000-0000-000000000003', '+237690000033', 'Samuel Nganou',  'samuel@aerogo24.cm', 'driver', 'active', 'fr', NOW(), NOW())
 ON CONFLICT (phone) DO NOTHING;
 
 -- 2. Profils chauffeurs (approuvés, positionnés près de l'aéroport de Douala)

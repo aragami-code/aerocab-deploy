@@ -7,6 +7,10 @@ import { PointsService } from '../points/points.service';
 import { SettingsService } from '../settings/settings.service';
 import { PromosService } from '../promos/promos.service';
 import { RidesGateway } from './rides.gateway';
+import { PricingService } from './pricing.service';
+import { DispatchService } from './dispatch.service';
+import { ConfigService } from '@nestjs/config';
+import { FlightsService } from '../flights/flights.service';
 
 const mockPrisma = {
   booking: {
@@ -27,8 +31,11 @@ const mockPrisma = {
     findMany: jest.fn(),
   },
   flight: { findFirst: jest.fn() },
+  wallet: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+  pointsTransaction: { aggregate: jest.fn(), create: jest.fn() },
+  transaction: { create: jest.fn() },
   $queryRaw: jest.fn(),
-  $transaction: jest.fn(),
+  $transaction: jest.fn().mockImplementation((cb) => cb(mockPrisma)),
 };
 
 const mockNotifications = { sendToUser: jest.fn().mockResolvedValue(undefined) };
@@ -36,9 +43,23 @@ const mockPoints = {
   deductPoints: jest.fn().mockResolvedValue(undefined),
   addPoints: jest.fn().mockResolvedValue(undefined),
 };
-const mockSettings = { isProximityAssignmentEnabled: jest.fn().mockResolvedValue(false) };
+const mockSettings = {
+  isProximityAssignmentEnabled: jest.fn().mockResolvedValue(false),
+  getTariffs: jest.fn(),
+};
 const mockPromos = { validatePromo: jest.fn().mockResolvedValue(null) };
-const mockGateway = { server: { to: jest.fn().mockReturnValue({ emit: jest.fn() }) } };
+const mockGateway = {
+  server: { to: jest.fn().mockReturnValue({ emit: jest.fn() }) },
+  notifyNewBooking: jest.fn(),
+  notifyPassenger: jest.fn(),
+};
+const mockPricing = { calculateEstimatedPrice: jest.fn().mockImplementation((p) => Promise.resolve(p)) };
+const mockDispatch = {
+  findEligibleDrivers: jest.fn().mockResolvedValue([{ id: 'drv-1', userId: 'u-drv-1' }]),
+  findGlobalEligibleDrivers: jest.fn().mockResolvedValue([]),
+};
+const mockConfig = { get: jest.fn().mockReturnValue('mock-value') };
+const mockFlights = { searchFlight: jest.fn().mockResolvedValue(null) };
 
 describe('BookingsService', () => {
   let service: BookingsService;
@@ -53,12 +74,41 @@ describe('BookingsService', () => {
         { provide: SettingsService, useValue: mockSettings },
         { provide: PromosService, useValue: mockPromos },
         { provide: RidesGateway, useValue: mockGateway },
+        { provide: PricingService, useValue: mockPricing },
+        { provide: DispatchService, useValue: mockDispatch },
+        { provide: ConfigService, useValue: mockConfig },
+        { provide: FlightsService, useValue: mockFlights },
       ],
     }).compile();
 
     service = module.get<BookingsService>(BookingsService);
     jest.clearAllMocks();
     mockSettings.isProximityAssignmentEnabled.mockResolvedValue(false);
+    mockSettings.getTariffs.mockResolvedValue({
+      startupFee: 500,
+      basePricePerKm: 250,
+      vehicles: {
+        eco: { basePricePerKm: 250, coefficient: 1.0, minFare: 3000 },
+        standard: { basePricePerKm: 350, coefficient: 1.2, minFare: 5000 },
+      },
+      surge: {
+        nightMultiplier: 1.0,
+        rainMultiplier: 1.0,
+        rushHourMultiplier: 1.0,
+        rushHourStart: '07:00',
+        rushHourEnd: '09:00',
+        rushHourStart2: '16:00',
+        rushHourEnd2: '19:00',
+      },
+      consigne: {
+        eco: { dailyRate: 8000 },
+      },
+    });
+    mockPrisma.pointsTransaction.aggregate.mockResolvedValue({ _sum: { points: 1000000 } });
+    mockPrisma.wallet.findUnique.mockResolvedValue({ id: 'w-1', balance: 0 });
+    mockPrisma.wallet.create.mockResolvedValue({ id: 'w-1', balance: 0 });
+    mockPrisma.booking.create.mockImplementation((args) => Promise.resolve({ id: 'b-mock', ...args.data }));
+    mockPrisma.booking.update.mockImplementation((args) => Promise.resolve({ id: args.where.id, ...args.data }));
     mockNotifications.sendToUser.mockResolvedValue(undefined);
   });
 
@@ -78,20 +128,6 @@ describe('BookingsService', () => {
 
     it('should use backend price, not any client-provided price', async () => {
       mockPrisma.driverProfile.findFirst.mockResolvedValue(null);
-      mockPrisma.booking.create.mockResolvedValue({
-        id: 'b-1',
-        status: 'pending',
-        vehicleType: 'eco',
-        estimatedPrice: 5000,
-        driverEtaMinutes: 10,
-        driverProfile: null,
-        driverProfileId: null,
-        passengerId: 'user-1',
-        destination: 'Bonanjo',
-        departureAirport: 'DLA',
-        flightNumber: null,
-        createdAt: new Date(),
-      });
       mockPrisma.booking.count.mockResolvedValue(5);
 
       const result = await service.createBooking('user-1', {
@@ -101,30 +137,17 @@ describe('BookingsService', () => {
         paymentMethod: 'cash',
       } as any);
 
-      expect(result.estimatedPrice).toBe(5000); // prix backend, pas client
+      // 15km (défaut) * 250 + 500 = 4250
+      expect(result.estimatedPrice).toBe(4250); 
       expect(mockPrisma.booking.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ estimatedPrice: 5000 }),
+          data: expect.objectContaining({ estimatedPrice: 4250 }),
         }),
       );
     });
 
     it('should deduct points before creating booking if paymentMethod=points', async () => {
       mockPrisma.driverProfile.findFirst.mockResolvedValue(null);
-      mockPrisma.booking.create.mockResolvedValue({
-        id: 'b-2',
-        status: 'pending',
-        vehicleType: 'standard',
-        estimatedPrice: 7000,
-        driverEtaMinutes: 10,
-        driverProfile: null,
-        driverProfileId: null,
-        passengerId: 'user-1',
-        destination: 'Bonanjo',
-        departureAirport: 'DLA',
-        flightNumber: null,
-        createdAt: new Date(),
-      });
       mockPrisma.booking.count.mockResolvedValue(2);
 
       await service.createBooking('user-1', {
@@ -134,7 +157,39 @@ describe('BookingsService', () => {
         paymentMethod: 'points',
       } as any);
 
-      expect(mockPoints.deductPoints).toHaveBeenCalledWith('user-1', 70, expect.any(String));
+      // 15km * 350 * 1.2 + 500 = 6800 FCFA => 68 points
+      expect(mockPoints.deductPoints).toHaveBeenCalledWith('user-1', 68, expect.any(String));
+    });
+
+    it('should correctly handle DEPARTURE mode towards DLA airport', async () => {
+      mockPrisma.driverProfile.findFirst.mockResolvedValue({ id: 'drv-1', user: { id: 'u-1', name: 'Test' } });
+      mockPrisma.booking.count.mockResolvedValue(0);
+
+      // Simulation d'un trajet de ~10.4km vers DLA
+      // (4.10, 9.72) -> DLA(4.0061, 9.7197)
+      const result = await service.createBooking('user-1', {
+        vehicleType: 'eco',
+        departureAirport: 'DLA',
+        destination: 'Douala Airport',
+        pickupAddress: 'Bonaberi',
+        type: 'DEPARTURE',
+        pickupLat: 4.10,
+        pickupLng: 9.72,
+        paymentMethod: 'cash',
+      } as any);
+
+      // 10.4km * 250 + 500 = 3100. MinFare ECO = 3000.
+      expect(result.estimatedPrice).toBeGreaterThanOrEqual(3000);
+      expect(mockPrisma.booking.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: 'DEPARTURE',
+            departureAirport: 'DLA',
+            pickupLat: 4.10,
+            pickupLng: 9.72,
+          }),
+        }),
+      );
     });
   });
 

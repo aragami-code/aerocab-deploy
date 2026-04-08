@@ -156,19 +156,19 @@ export class BookingsService {
     const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
     const isDeparture = dto.type === 'DEPARTURE';
 
+    // Priorité absolue aux coordonnées réelles transmises par le mobile (Google Places)
+    // Fallback sur les constantes locales (DLA/NSI) uniquement si le GPS est manquant
     const startCoords = isDeparture
-      ? { lat: dto.pickupLat, lng: dto.pickupLng }
-      // ARRIVAL : départ = aéroport (coords hardcodées ou pickupLat/Lng transmis par le client)
-      : (airportCoords
-          ? { lat: airportCoords.lat, lng: airportCoords.lng }
-          : (dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : null));
+      ? (dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : null)
+      : (dto.pickupLat && dto.pickupLng 
+          ? { lat: dto.pickupLat, lng: dto.pickupLng } 
+          : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null));
 
     const endCoords = isDeparture
-      // DEPARTURE : destination = aéroport (coords hardcodées ou destLat/Lng transmis par le client)
-      ? (airportCoords
-          ? { lat: airportCoords.lat, lng: airportCoords.lng }
-          : (dto.destLat && dto.destLng ? { lat: dto.destLat, lng: dto.destLng } : null))
-      : { lat: dto.destLat, lng: dto.destLng };
+      ? (dto.destLat && dto.destLng 
+          ? { lat: dto.destLat, lng: dto.destLng } 
+          : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null))
+      : (dto.destLat && dto.destLng ? { lat: dto.destLat, lng: dto.destLng } : null);
 
     if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
       const R = 6371;
@@ -181,7 +181,9 @@ export class BookingsService {
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    return 15; // Défaut de sécurité si coordonnées absentes
+    throw new BadRequestException(
+      "Impossible de calculer la distance du trajet. Veuillez vérifier vos adresses de départ et de destination."
+    );
   }
 
   /** Détermine si l'heure actuelle tombe dans la plage nuit (22h-05h) */
@@ -299,12 +301,12 @@ export class BookingsService {
     let appliedPromoCode: string | null = null;
 
     if (dto.promoCode) {
-      const promo = await this.promosService.validatePromo(dto.promoCode);
+      const promo = await this.promosService.validatePromo(dto.promoCode, passengerId);
       if (promo) {
         discountAmount = Math.round(dynamicPricePoints * (promo.discount / 100));
         pointsAfterDiscount = dynamicPricePoints - discountAmount;
         appliedPromoCode = dto.promoCode.toUpperCase();
-        await this.promosService.applyPromo(dto.promoCode);
+        await this.promosService.applyPromo(dto.promoCode, passengerId);
       }
     }
 
@@ -410,7 +412,7 @@ export class BookingsService {
           passengerId,
           driverProfileId: driver?.id || null,
           flightNumber: dto.flightNumber || null,
-          departureAirport: dto.departureAirport,
+          departureAirport: dto.departureAirport && AIRPORT_COORDS[dto.departureAirport] ? dto.departureAirport : 'INTERNATIONAL',
           destination: dto.destination || 'Destination',
           destLat: cleanDestLat,
           destLng: cleanDestLng,
@@ -1227,11 +1229,12 @@ export class BookingsService {
   async estimatePrices(dto: Partial<CreateBookingDto>) {
     const distanceKm = this.computeDistanceKm(dto);
 
-    // Surge offre/demande
+    // Surge offre/demande : ne le calcule que pour les aéroports connus localement (DLA/NSI)
     let supplyDemandMultiplier = 1.0;
     try {
-      if (dto.departureAirport) {
-        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport);
+      const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null; // Cherche DLA/NSI
+      if (airportCoords) { // Si c'est un aéroport connu localement (DLA/NSI)
+        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport!); // Pass departureAirport, which is known here
         supplyDemandMultiplier = simulated / 1000;
       }
     } catch { /* ignore */ }
