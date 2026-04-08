@@ -943,8 +943,14 @@ export class BookingsService {
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
     if (booking.status !== 'pending') throw new BadRequestException('Statut incorrect');
 
-    // Cherche un autre driver disponible (en excluant celui qui refuse, même catégorie)
-    const nextDriver = await this.findBestDriver(booking.departureAirport, driverProfile.id, booking.vehicleType);
+    // Cherche un autre driver disponible autour du GPS passager (DEPARTURE) ou de l'aéroport (ARRIVAL)
+    // Fix: ne plus utiliser AIRPORT_COORDS hardcodé pour les DEPARTURE
+    const redispatchCoords = (booking.type === 'DEPARTURE' && booking.pickupLat && booking.pickupLng)
+      ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+      : (booking.type !== 'DEPARTURE' && booking.pickupLat && booking.pickupLng)
+        ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+        : undefined;
+    const nextDriver = await this.findBestDriver(booking.departureAirport, driverProfile.id, booking.vehicleType, redispatchCoords);
 
     // Réassigne à un nouveau driver ou laisse orphelin si aucun disponible
     const updated = await this.prisma.booking.update({

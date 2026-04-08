@@ -5,6 +5,7 @@ import { DispatchService } from './dispatch.service';
 import { PricingService } from './pricing.service';
 import { BookingsController } from './bookings.controller';
 import { BookingsService } from './bookings.service';
+import { BookingsScheduler } from './bookings.scheduler';
 import { RidesGateway } from './rides.gateway';
 import { PrismaModule } from '../database/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -30,7 +31,7 @@ import { FlightsModule } from '../flights/flights.module';
     }),
   ],
   controllers: [BookingsController],
-  providers: [BookingsService, RidesGateway, DispatchService, PricingService],
+  providers: [BookingsService, RidesGateway, DispatchService, PricingService, BookingsScheduler],
   exports: [BookingsService, DispatchService, PricingService, RidesGateway],
 })
 export class BookingsModule {}

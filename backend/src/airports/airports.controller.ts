@@ -27,6 +27,14 @@ export class AirportsController {
     return this.airportsService.search(q);
   }
 
+  @Get('closest')
+  findClosest(
+    @Query('lat') lat: string,
+    @Query('lng') lng: string,
+  ) {
+    return this.airportsService.findClosest(parseFloat(lat), parseFloat(lng));
+  }
+
   @Get('nearby')
   findNearby(
     @Query('lat') lat: string,
