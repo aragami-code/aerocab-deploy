@@ -301,12 +301,12 @@ export class BookingsService {
     let appliedPromoCode: string | null = null;
 
     if (dto.promoCode) {
-      const promo = await this.promosService.validatePromo(dto.promoCode);
+      const promo = await this.promosService.validatePromo(dto.promoCode, passengerId);
       if (promo) {
         discountAmount = Math.round(dynamicPricePoints * (promo.discount / 100));
         pointsAfterDiscount = dynamicPricePoints - discountAmount;
         appliedPromoCode = dto.promoCode.toUpperCase();
-        await this.promosService.applyPromo(dto.promoCode);
+        await this.promosService.applyPromo(dto.promoCode, passengerId);
       }
     }
 

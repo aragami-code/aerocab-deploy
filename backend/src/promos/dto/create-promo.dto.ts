@@ -18,4 +18,7 @@ export class CreatePromoDto {
   @IsOptional()
   @IsString()
   expiresAt?: string;
+
+  @IsOptional()
+  usagePerUser?: boolean;
 }

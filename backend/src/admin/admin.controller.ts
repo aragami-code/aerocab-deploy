@@ -106,6 +106,19 @@ export class AdminController {
     );
   }
 
+  // ── Referrals ─────────────────────────────────────────
+
+  @Get('referrals')
+  async getReferrals(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getReferrals(
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
   // ── Settings/Tariffs ─────────────────────────────────
 
   @Get('settings/tariffs')

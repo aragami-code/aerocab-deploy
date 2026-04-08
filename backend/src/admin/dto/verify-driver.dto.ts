@@ -4,6 +4,7 @@ import { VEHICLE_CATEGORIES } from '../../drivers/dto/register-driver.dto';
 export enum VerificationAction {
   APPROVE = 'approve',
   REJECT = 'reject',
+  SUSPEND = 'suspend',
 }
 
 export class VerifyDriverDto {
