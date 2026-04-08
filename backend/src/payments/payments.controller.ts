@@ -1,5 +1,7 @@
-import { Controller, Post, Get, Body, Logger, UseGuards, Request, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Logger, UseGuards, Request, Query, Headers } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { FlutterwaveService } from './flutterwave.service';
+import { StripeService } from './stripe.service';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
@@ -49,6 +51,8 @@ export class PaymentsController {
 
   constructor(
     private payments: PaymentsService,
+    private flutterwave: FlutterwaveService,
+    private stripe: StripeService,
     private prisma: PrismaService,
     private settings: SettingsService,
   ) {}
@@ -107,21 +111,33 @@ export class PaymentsController {
 
   /**
    * POST /payments/recharge
-   * Lance un paiement CinetPay pour acheter un forfait de points.
-   * Body: { packageId: 'pack_50' | 'pack_100' | 'pack_200' | 'pack_500' }
+   * Lance un paiement pour acheter des points.
+   * Body: { packageId, customAmount?, provider: 'cinetpay' | 'flutterwave' | 'stripe', currency? }
+   *
+   * provider par défaut : cinetpay (mobile money Afrique)
+   * flutterwave         : mobile money multi-pays Afrique
+   * stripe              : carte bancaire internationale
    */
   @Post('recharge')
   @UseGuards(JwtAuthGuard)
-  async recharge(@Request() req: any, @Body() body: { packageId: string; customAmount?: number }) {
+  async recharge(
+    @Request() req: any,
+    @Body() body: {
+      packageId: string;
+      customAmount?: number;
+      provider?: 'cinetpay' | 'flutterwave' | 'stripe';
+      currency?: string; // pour Stripe : 'eur', 'usd', 'gbp' ; pour Flutterwave : 'XAF', 'NGN', 'GHS'…
+    },
+  ) {
     const userId = req.user.id;
+    const provider = body.provider ?? 'cinetpay';
 
-    // Résoudre le forfait depuis l'ID ou utiliser le montant personnalisé
+    // ── Résoudre le forfait ──────────────────────────────────────────────────
     let points = 0;
     let label = '';
-    
     if (body.packageId === 'custom' && body.customAmount) {
       points = body.customAmount;
-      label = `Recharge personnalisée`;
+      label = 'Recharge personnalisée';
     } else {
       const match = body.packageId?.match(/^pack_(\d+)$/);
       if (!match) throw new Error(`Forfait inconnu: ${body.packageId}`);
@@ -133,19 +149,14 @@ export class PaymentsController {
     const tariffs = await this.settings.getTariffs();
     const amountFcfa = points * tariffs.fcfaPerPoint;
 
-    // 1. Créer ou récupérer le wallet
+    // ── Wallet ───────────────────────────────────────────────────────────────
     let wallet = await this.prisma.wallet.findUnique({ where: { userId } });
-    if (!wallet) {
-      wallet = await this.prisma.wallet.create({ data: { userId, balance: 0 } });
-    }
+    if (!wallet) wallet = await this.prisma.wallet.create({ data: { userId, balance: 0 } });
 
-    /* restriction retirée pour permettre le rechargement cumulatif */
-    /* if (wallet.balance > 0) {
-      throw new Error('Le rechargement n\'est possible que si votre solde est nul.');
-    } */
+    const userInfo = await this.prisma.user.findUnique({ where: { id: userId } });
+    const reference = `WALLET-${provider.toUpperCase()}-${Date.now()}-${userId.slice(0, 8)}`;
 
-    // 2. Créer une transaction en attente
-    const reference = `WALLET-${Date.now()}-${userId.slice(0, 8)}`;
+    // ── Transaction en attente ───────────────────────────────────────────────
     await this.prisma.transaction.create({
       data: {
         walletId: wallet.id,
@@ -153,16 +164,46 @@ export class PaymentsController {
         type: 'deposit',
         status: 'pending',
         reference,
-        metadata: { packageId: body.packageId, points },
+        metadata: { packageId: body.packageId, points, provider },
       },
     });
 
-    // 3. Initialisation CinetPay
-    const userInfo = await this.prisma.user.findUnique({ where: { id: userId } });
+    const description = `AeroGo 24 — ${label} (${points} pts)`;
+
+    // ── Redirection vers le provider ─────────────────────────────────────────
+    if (provider === 'flutterwave') {
+      const currency = body.currency?.toUpperCase() ?? 'XAF';
+      return this.flutterwave.initiate({
+        transactionId: reference,
+        amount: convertFromFcfa(amountFcfa, currency),
+        currency,
+        description,
+        customerName: userInfo?.name || 'Client',
+        customerPhone: userInfo?.phone || '',
+        customerEmail: userInfo?.email || 'client@aerogo24.com',
+      });
+    }
+
+    if (provider === 'stripe') {
+      // Stripe n'accepte pas XAF — conversion obligatoire vers EUR/USD/GBP
+      const stripeCurrency = (body.currency ?? 'eur').toLowerCase();
+      const STRIPE_RATES: Record<string, number> = { eur: 0.00152, usd: 0.00165, gbp: 0.00130, cad: 0.00224 };
+      const rate = STRIPE_RATES[stripeCurrency] ?? STRIPE_RATES['eur'];
+      const amountCents = Math.round(amountFcfa * rate * 100); // Stripe veut des centimes
+      return this.stripe.initiate({
+        transactionId: reference,
+        amountCents,
+        currency: stripeCurrency,
+        description,
+        customerEmail: userInfo?.email || '',
+      });
+    }
+
+    // Défaut : CinetPay
     return this.payments.initiate({
       transactionId: reference,
       amount: amountFcfa,
-      description: `AeroGo 24 — ${label} (${points} points)`,
+      description,
       customerName: userInfo?.name || 'Client',
       customerPhone: userInfo?.phone || '',
     });
@@ -256,6 +297,97 @@ export class PaymentsController {
     }
 
     return { received: true };
+  }
+
+  /**
+   * POST /payments/webhook/flutterwave
+   * Webhook Flutterwave — vérifie la signature et crédite le wallet.
+   */
+  @Post('webhook/flutterwave')
+  async handleFlutterwaveWebhook(
+    @Body() body: Record<string, any>,
+    @Headers('verif-hash') signature: string,
+  ) {
+    // Vérification de la signature via secret partagé (header verif-hash)
+    const secretHash = process.env.FLUTTERWAVE_WEBHOOK_HASH ?? '';
+    if (secretHash && signature !== secretHash) {
+      this.logger.warn('Flutterwave webhook: signature invalide');
+      return { received: true };
+    }
+
+    const txRef: string = body?.data?.tx_ref ?? body?.txRef ?? '';
+    const status: string = body?.data?.status ?? '';
+    const flwTxId: string = String(body?.data?.id ?? '');
+
+    this.logger.log(`Flutterwave webhook: ${txRef} status=${status}`);
+
+    if (!txRef.startsWith('WALLET-FLUTTERWAVE-')) return { received: true };
+
+    if (status === 'successful' && flwTxId) {
+      // Double-vérification via l'API Flutterwave
+      const verified = await this.flutterwave.verify(flwTxId).catch(() => 'PENDING' as const);
+      if (verified !== 'ACCEPTED') return { received: true };
+
+      await this.creditWalletFromTransaction(txRef);
+    }
+
+    return { received: true };
+  }
+
+  /**
+   * POST /payments/webhook/stripe
+   * Webhook Stripe — vérifie la signature et crédite le wallet.
+   */
+  @Post('webhook/stripe')
+  async handleStripeWebhook(
+    @Body() body: Record<string, any>,
+    @Headers('stripe-signature') signature: string,
+  ) {
+    if (!this.stripe.verifyWebhookSignature(JSON.stringify(body), signature)) {
+      this.logger.warn('Stripe webhook: signature invalide');
+      return { received: true };
+    }
+
+    const eventType: string = body?.type ?? '';
+    const sessionId: string = body?.data?.object?.id ?? '';
+    const txRef: string = body?.data?.object?.metadata?.transaction_id ?? '';
+
+    this.logger.log(`Stripe webhook: ${eventType} session=${sessionId}`);
+
+    if (eventType === 'checkout.session.completed' && txRef.startsWith('WALLET-STRIPE-')) {
+      const paymentStatus: string = body?.data?.object?.payment_status ?? '';
+      if (paymentStatus === 'paid') {
+        await this.creditWalletFromTransaction(txRef);
+      }
+    }
+
+    return { received: true };
+  }
+
+  /** Crédite le wallet en points depuis une référence de transaction pending */
+  private async creditWalletFromTransaction(reference: string): Promise<void> {
+    const tx = await this.prisma.transaction.findUnique({
+      where: { reference },
+      include: { wallet: true },
+    });
+
+    if (!tx || tx.status !== 'pending') return;
+
+    const meta = tx.metadata as any;
+    const tariffs = await this.settings.getTariffs();
+    const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
+
+    await this.prisma.$transaction([
+      this.prisma.transaction.update({
+        where: { id: tx.id },
+        data: { status: 'completed' },
+      }),
+      this.prisma.wallet.update({
+        where: { id: tx.walletId },
+        data: { balance: { increment: pointsToCredit } },
+      }),
+    ]);
+    this.logger.log(`Wallet ${tx.walletId} crédité de ${pointsToCredit} pts via ${reference}`);
   }
 
   /**
