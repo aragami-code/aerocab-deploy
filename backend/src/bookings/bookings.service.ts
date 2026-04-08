@@ -152,22 +152,40 @@ export class BookingsService {
 
   // ─── Méthodes de calcul partagées ────────────────────────────────────────
 
-  private computeDistanceKm(dto: Partial<CreateBookingDto>): number {
-    const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
+  /** Résout les coordonnées d'un aéroport : constante locale → DB → null */
+  private async resolveAirportCoords(iataCode: string | undefined): Promise<{ lat: number; lng: number } | null> {
+    if (!iataCode) return null;
+    // 1. Constante hardcodée (DLA, NSI) — lecture directe, sans I/O
+    if (AIRPORT_COORDS[iataCode]) return AIRPORT_COORDS[iataCode];
+    // 2. Fallback DB — pour tout aéroport ajouté dynamiquement
+    try {
+      const ap = await this.prisma.airport.findUnique({
+        where: { iataCode: iataCode.toUpperCase() },
+        select: { latitude: true, longitude: true },
+      });
+      if (ap?.latitude && ap?.longitude) {
+        return { lat: Number(ap.latitude), lng: Number(ap.longitude) };
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  private async computeDistanceKm(dto: Partial<CreateBookingDto>): Promise<number> {
+    const airportCoords = await this.resolveAirportCoords(dto.departureAirport);
     const isDeparture = dto.type === 'DEPARTURE';
 
     // Priorité absolue aux coordonnées réelles transmises par le mobile (Google Places)
-    // Fallback sur les constantes locales (DLA/NSI) uniquement si le GPS est manquant
+    // Fallback sur les coordonnées de l'aéroport (DB ou constante) si le GPS est manquant
     const startCoords = isDeparture
       ? (dto.pickupLat && dto.pickupLng ? { lat: dto.pickupLat, lng: dto.pickupLng } : null)
-      : (dto.pickupLat && dto.pickupLng 
-          ? { lat: dto.pickupLat, lng: dto.pickupLng } 
-          : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null));
+      : (dto.pickupLat && dto.pickupLng
+          ? { lat: dto.pickupLat, lng: dto.pickupLng }
+          : (airportCoords ?? null));
 
     const endCoords = isDeparture
-      ? (dto.destLat && dto.destLng 
-          ? { lat: dto.destLat, lng: dto.destLng } 
-          : (airportCoords ? { lat: airportCoords.lat, lng: airportCoords.lng } : null))
+      ? (dto.destLat && dto.destLng
+          ? { lat: dto.destLat, lng: dto.destLng }
+          : (airportCoords ?? null))
       : (dto.destLat && dto.destLng ? { lat: dto.destLat, lng: dto.destLng } : null);
 
     if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
@@ -256,7 +274,7 @@ export class BookingsService {
 
     // 1. Distance et prix de base
     const isDeparture = dto.type === 'DEPARTURE';
-    const distanceKm = this.computeDistanceKm(dto);
+    const distanceKm = await this.computeDistanceKm(dto);
 
     // Détecte le pays via l'aéroport pour charger les bons tarifs
     let bookingCountryCode: string | null = null;
@@ -1171,16 +1189,33 @@ export class BookingsService {
       this.logger.log(`[Wallet] Credited driver ${driverUser.userId} with ${pointsEarned} points (${booking.estimatedPrice} FCFA).`);
     }
 
-    // Cashback 1% au passager si paiement par points
-    if (booking.paymentMethod === 'points' || booking.paymentMethod === 'wallet') {
-      const cashback = Math.floor((booking.estimatedPrice as number) * 0.01);
-      if (cashback > 0) {
-        this.points.addPoints(
-          booking.passengerId,
-          cashback,
-          `Cashback 1% course (${booking.estimatedPrice} FCFA)`,
-        ).catch(() => {});
+    // Cashback passager — tous modes de paiement (taux configuré par pays)
+    try {
+      // Détecte le pays via l'aéroport pour charger le bon taux
+      let cashbackCountryCode: string | null = null;
+      if (booking.departureAirport && booking.departureAirport !== 'INTERNATIONAL') {
+        const ap = await this.prisma.airport.findUnique({
+          where: { iataCode: booking.departureAirport },
+          select: { countryCode: true },
+        });
+        cashbackCountryCode = ap?.countryCode?.toUpperCase() ?? null;
       }
+      const cashbackTariffs = await this.settingsService.getTariffsByCountry(cashbackCountryCode);
+      const cashbackRate  = cashbackTariffs.cashbackRate  ?? 0.05;
+      const cashbackPtVal = cashbackTariffs.pointValue     ?? 1;
+
+      const priceLocal    = Number(booking.estimatedPrice) || 0;
+      const cashbackPts   = Math.floor((priceLocal * cashbackRate) / cashbackPtVal);
+      if (cashbackPts > 0) {
+        await this.points.addPoints(
+          booking.passengerId,
+          cashbackPts,
+          `Cashback ${Math.round(cashbackRate * 100)}% — course ${booking.departureAirport} → ${booking.destination}`,
+        );
+        this.logger.log(`[Cashback] +${cashbackPts} pts (${cashbackRate * 100}% de ${priceLocal} / pv=${cashbackPtVal}) → passager ${booking.passengerId}`);
+      }
+    } catch (e) {
+      this.logger.warn(`[Cashback] Erreur: ${e.message}`);
     }
 
     return { id: updated.id, status: updated.status };
@@ -1258,7 +1293,7 @@ export class BookingsService {
 
   // --- ESTIMATION DES PRIX ---
   async estimatePrices(dto: Partial<CreateBookingDto> & { countryCode?: string }) {
-    const distanceKm = this.computeDistanceKm(dto);
+    const distanceKm = await this.computeDistanceKm(dto);
 
     // Détection du pays : priorité au countryCode explicite,
     // sinon on lit le countryCode de l'aéroport en DB
