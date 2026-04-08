@@ -1,12 +1,11 @@
 import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards } from '@nestjs/common';
 import { AirportsService } from './airports.service';
-import { JwtAuthGuard, RolesGuard } from '../auth/guards';
+import { RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { UserRole } from '@prisma/client';
 import { CreateAirportDto, UpdateAirportDto } from './dto/airport.dto';
 
 @Controller('airports')
-@UseGuards(JwtAuthGuard)
 export class AirportsController {
   constructor(private readonly airportsService: AirportsService) {}
 
