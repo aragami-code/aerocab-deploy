@@ -1,13 +1,11 @@
 import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, Min, Max } from 'class-validator';
 
-const VALID_VEHICLE_TYPES = ['eco', 'eco_plus', 'standard', 'confort', 'confort_plus'];
-const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money', 'mtn_momo'];
-const VALID_AIRPORTS = ['DLA', 'NSI'];
+const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money', 'mtn_momo', 'wallet'];
 
 export class CreateBookingDto {
   @IsString()
-  @IsIn(VALID_VEHICLE_TYPES, { message: 'Type de véhicule invalide' })
-  vehicleType!: string;
+  @IsNotEmpty({ message: 'Le type de véhicule est requis' })
+  vehicleType!: string; // Valeur libre — validée dynamiquement contre les tarifs DB
 
   @IsString()
   @IsIn(VALID_PAYMENT_METHODS, { message: 'Méthode de paiement invalide' })
@@ -71,11 +69,15 @@ export class CreateBookingDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(VALID_VEHICLE_TYPES, { message: 'Type de véhicule de consigne invalide' })
   consigneVehicleType?: string; // peut différer du vehicleType principal
 
   // ── Surcharges contextuelles ─────────────────────────────────────────────────
   @IsOptional()
   @IsBoolean()
   rainSurge?: boolean;    // L'utilisateur signale qu'il pleut
+
+  // ── Verrou de prix ───────────────────────────────────────────────────────────
+  @IsOptional()
+  @IsNumber()
+  expectedPriceFcfa?: number; // Prix affiché au passager — vérifié côté backend avant création
 }

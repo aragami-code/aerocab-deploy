@@ -307,6 +307,22 @@ export class BookingsService {
     const finalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
     this.logger.log(`[Surge] offre/demande=${supplyDemandMultiplier.toFixed(2)} ctx=${surgeCtx.multiplier.toFixed(2)} total=${finalSurgeMultiplier.toFixed(2)} nuit=${surgeCtx.nightSurge} pluie=${surgeCtx.rainSurge} rush=${surgeCtx.rushHourSurge}`);
 
+    // 3b. Verrou de prix : si le passager a envoyé un prix attendu, on vérifie
+    // qu'il n'a pas changé de plus de 5% depuis l'estimate affiché
+    if (dto.expectedPriceFcfa && dto.expectedPriceFcfa > 0) {
+      const diff = Math.abs(dynamicPricePoints - dto.expectedPriceFcfa) / dto.expectedPriceFcfa;
+      if (diff > 0.05) {
+        throw new BadRequestException(
+          JSON.stringify({
+            code: 'PRICE_CHANGED',
+            previousPrice: dto.expectedPriceFcfa,
+            newPrice: dynamicPricePoints,
+            message: `Le prix a changé : ${dto.expectedPriceFcfa.toLocaleString()} → ${dynamicPricePoints.toLocaleString()} FCFA. Veuillez confirmer le nouveau prix.`,
+          }),
+        );
+      }
+    }
+
     // 4. Consigne du véhicule (si demandée)
     let consigneTotal = 0;
     let consigneDailyRate = 0;
@@ -1314,9 +1330,16 @@ export class BookingsService {
       consigneDailyRates[vType] = tariffs.consigne[vType]?.dailyRate ?? 8000;
     }
 
+    // Vérifie si on utilise les tarifs par défaut (aucune config pays en DB)
+    const hasCountryConfig = countryCode
+      ? (await this.settingsService.getCountriesWithTariffs()).includes(countryCode)
+      : false;
+    const isDefaultTariff = !hasCountryConfig;
+
     return {
       distanceKm,
       countryCode,
+      isDefaultTariff,
       surgeMultiplier: totalSurgeMultiplier,
       surgeContext: {
         nightSurge:    surgeCtx.nightSurge,
