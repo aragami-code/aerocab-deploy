@@ -1316,21 +1316,12 @@ export class BookingsService {
     // Charge les tarifs du pays (fallback global → défauts)
     const tariffs = await this.settingsService.getTariffsByCountry(countryCode);
 
-    // Surge offre/demande : ne le calcule que pour les aéroports connus localement (DLA/NSI)
-    let supplyDemandMultiplier = 1.0;
-    try {
-      const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
-      if (airportCoords) {
-        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport!);
-        supplyDemandMultiplier = simulated / 1000;
-      }
-    } catch { /* ignore */ }
-
     // Surcharges contextuelles (nuit / pluie / heure de pointe) — utilise la config du pays
     const surgeCtx = await this.computeSurgeContextWithTariffs(dto as CreateBookingDto, tariffs);
-    const totalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
+    // totalSurgeMultiplier affiché dans la réponse (informatif)
+    const totalSurgeMultiplier = surgeCtx.multiplier;
 
-    // Estimation par catégorie de véhicule active (tarifs du pays)
+    // Estimation par catégorie de véhicule active — même ordre que createBooking
     const estimates: Record<string, {
       priceInFcfa: number; priceInPoints: number;
       baseFcfa: number; surgeFcfa: number;
@@ -1339,13 +1330,28 @@ export class BookingsService {
     for (const vType of Object.keys(tariffs.vehicles)) {
       if (tariffs.vehicles[vType]?.isActive === false) continue; // skip désactivés
       const basePrice = await this.computeBasePriceForVehicleWithTariffs(distanceKm, vType, tariffs);
-      const surgedPrice = Math.round(basePrice * totalSurgeMultiplier);
       const pointValue = tariffs.pointValue ?? 1;
+
+      // Étape 1 : FCFA → points (identique à createBooking)
+      let pts = Math.ceil(basePrice / pointValue);
+
+      // Étape 2 : supply/demand (identique à createBooking)
+      try {
+        const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
+        if (airportCoords) {
+          pts = await this.pricingService.calculateEstimatedPrice(pts, dto.departureAirport!);
+        }
+      } catch { /* ignore */ }
+
+      // Étape 3 : surcharges contextuelles (identique à createBooking)
+      pts = Math.round(pts * surgeCtx.multiplier);
+
+      const surgedFcfa = Math.round(pts * pointValue);
       estimates[vType] = {
-        priceInFcfa:   surgedPrice,
-        priceInPoints: Math.ceil(surgedPrice / pointValue),
+        priceInFcfa:   surgedFcfa,
+        priceInPoints: pts,
         baseFcfa:      basePrice,
-        surgeFcfa:     surgedPrice - basePrice,
+        surgeFcfa:     surgedFcfa - basePrice,
         label:         tariffs.vehicles[vType]?.label,
         maxPassengers: tariffs.vehicles[vType]?.maxPassengers,
       };
