@@ -455,7 +455,7 @@ export class BookingsService {
           passengerId,
           driverProfileId: driver?.id || null,
           flightNumber: dto.flightNumber || null,
-          departureAirport: dto.departureAirport && AIRPORT_COORDS[dto.departureAirport] ? dto.departureAirport : 'INTERNATIONAL',
+          departureAirport: dto.departureAirport?.toUpperCase() || 'INTERNATIONAL',
           destination: dto.destination || 'Destination',
           destLat: cleanDestLat,
           destLng: cleanDestLng,
@@ -511,15 +511,20 @@ export class BookingsService {
       this.points.addPoints(passengerId, 500, 'Bonus première course').catch(() => {});
     }
 
-    // Notify passenger
+    // Notify passenger — booking created, searching for a driver
     const passengerMsg = scheduledLandingMinutes !== null
-      ? `Réservation confirmée. Votre chauffeur sera là à votre atterrissage (dans ~${scheduledLandingMinutes} min).`
-      : `Votre course vers ${booking.destination} est enregistrée. Un chauffeur arrive dans ${booking.driverEtaMinutes} min.`;
+      ? `Recherche d'un chauffeur en cours. Il sera là à votre atterrissage (dans ~${scheduledLandingMinutes} min).`
+      : `Réservation reçue. Recherche d'un chauffeur vers ${booking.destination}…`;
     this.notifications.sendToUser(
       passengerId,
-      'Réservation confirmée ✅',
+      'Réservation en cours 🔍',
       passengerMsg,
     ).catch(() => {});
+
+    // Socket : notifie immédiatement la page de tracking du passager
+    this.ridesGateway.server
+      .to(`passenger:${passengerId}`)
+      .emit('booking:created', { id: booking.id, status: 'pending' });
 
     // Phase 3: Smart Broadcast Activation
     // Notify all eligible drivers (Pre-landing: All, Post-landing: Nearby)
