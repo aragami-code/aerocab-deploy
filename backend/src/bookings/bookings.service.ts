@@ -243,9 +243,9 @@ export class BookingsService {
     const basePricePerKm = vehicle?.basePricePerKm ?? tariffs.basePricePerKm ?? DEFAULT_BASE_PRICE_PER_KM;
     const coeff          = vehicle?.coefficient    ?? DEFAULT_VEHICLE_COEFFICIENTS[vehicleType] ?? 1.0;
     const minFare        = vehicle?.minFare        ?? DEFAULT_VEHICLE_MIN_PRICES[vehicleType]   ?? 3000;
-    const startupFee     = tariffs.startupFee     ?? 500;
     const distancePrice  = Math.round(distanceKm * basePricePerKm * coeff);
-    return Math.max(minFare, startupFee + distancePrice);
+    // Formule : minFare (base fixe) + distance, le km s'ajoute toujours par-dessus
+    return minFare + distancePrice;
   }
 
   /** Version de computeSurgeContext acceptant des tarifs déjà chargés */
@@ -267,9 +267,8 @@ export class BookingsService {
     const basePricePerKm = vehicle?.basePricePerKm ?? tariffs.basePricePerKm ?? DEFAULT_BASE_PRICE_PER_KM;
     const coeff          = vehicle?.coefficient    ?? DEFAULT_VEHICLE_COEFFICIENTS[vehicleType] ?? 1.0;
     const minFare        = vehicle?.minFare        ?? DEFAULT_VEHICLE_MIN_PRICES[vehicleType]   ?? 3000;
-    const startupFee     = tariffs.startupFee      ?? 500;
     const distancePrice  = Math.round(distanceKm * basePricePerKm * coeff);
-    return Promise.resolve(Math.max(minFare, startupFee + distancePrice));
+    return Promise.resolve(minFare + distancePrice);
   }
 
   // ─── Fin méthodes partagées ───────────────────────────────────────────────
@@ -1283,12 +1282,14 @@ export class BookingsService {
     const surgeCtx = await this.computeSurgeContextWithTariffs(dto as CreateBookingDto, tariffs);
     const totalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
 
-    // Estimation par catégorie de véhicule (tarifs du pays)
+    // Estimation par catégorie de véhicule active (tarifs du pays)
     const estimates: Record<string, {
       priceInFcfa: number; priceInPoints: number;
       baseFcfa: number; surgeFcfa: number;
+      label?: string; maxPassengers?: number;
     }> = {};
     for (const vType of Object.keys(tariffs.vehicles)) {
+      if (tariffs.vehicles[vType]?.isActive === false) continue; // skip désactivés
       const basePrice = await this.computeBasePriceForVehicleWithTariffs(distanceKm, vType, tariffs);
       const surgedPrice = Math.round(basePrice * totalSurgeMultiplier);
       estimates[vType] = {
@@ -1296,6 +1297,8 @@ export class BookingsService {
         priceInPoints: surgedPrice,
         baseFcfa:      basePrice,
         surgeFcfa:     surgedPrice - basePrice,
+        label:         tariffs.vehicles[vType]?.label,
+        maxPassengers: tariffs.vehicles[vType]?.maxPassengers,
       };
     }
 

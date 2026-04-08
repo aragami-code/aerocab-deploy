@@ -5,6 +5,9 @@ export interface VehicleTariff {
   basePricePerKm: number;
   minFare: number;
   coefficient: number;
+  label?: string;       // Nom affiché (ex: "Berline Confort")
+  isActive?: boolean;   // false = masqué dans l'app passager
+  maxPassengers?: number; // Capacité max (optionnel)
 }
 
 export interface VehicleConsigneTariff {
@@ -39,11 +42,11 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
   startupMinutes: 3,         // 3 premières minutes incluses dans le startupFee
   pricePerMinute: 50,        // 50 FCFA/min au-delà
   vehicles: {
-    eco:          { basePricePerKm: 250, minFare: 3000,  coefficient: 1.0 },
-    eco_plus:     { basePricePerKm: 250, minFare: 3500,  coefficient: 1.2 },
-    standard:     { basePricePerKm: 250, minFare: 5000,  coefficient: 1.4 },
-    confort:      { basePricePerKm: 250, minFare: 8000,  coefficient: 2.0 },
-    confort_plus: { basePricePerKm: 250, minFare: 12000, coefficient: 2.5 },
+    eco:          { basePricePerKm: 250, minFare: 3000,  coefficient: 1.0, label: 'Eco',          isActive: true, maxPassengers: 4 },
+    eco_plus:     { basePricePerKm: 250, minFare: 3500,  coefficient: 1.2, label: 'Eco+',         isActive: true, maxPassengers: 4 },
+    standard:     { basePricePerKm: 250, minFare: 5000,  coefficient: 1.4, label: 'Standard',     isActive: true, maxPassengers: 5 },
+    confort:      { basePricePerKm: 250, minFare: 8000,  coefficient: 2.0, label: 'Confort',      isActive: true, maxPassengers: 5 },
+    confort_plus: { basePricePerKm: 250, minFare: 12000, coefficient: 2.5, label: 'Confort Plus', isActive: true, maxPassengers: 7 },
   },
   consigne: {
     eco:          { dailyRate: 5000  },
