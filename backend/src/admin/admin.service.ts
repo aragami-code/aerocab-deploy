@@ -27,6 +27,24 @@ export class AdminService {
     return this.settingsService.setTariffs(config);
   }
 
+  async getCountriesWithTariffs() {
+    return this.settingsService.getCountriesWithTariffs();
+  }
+
+  async getTariffsByCountry(countryCode: string) {
+    return this.settingsService.getTariffsByCountry(countryCode);
+  }
+
+  async setTariffsByCountry(countryCode: string, config: any) {
+    await this.settingsService.setTariffsByCountry(countryCode, config);
+    return { success: true, countryCode: countryCode.toUpperCase() };
+  }
+
+  async deleteTariffsByCountry(countryCode: string) {
+    await this.settingsService.deleteTariffsByCountry(countryCode);
+    return { success: true, countryCode: countryCode.toUpperCase() };
+  }
+
 
   // ── Driver Verification ──────────────────────────────
 

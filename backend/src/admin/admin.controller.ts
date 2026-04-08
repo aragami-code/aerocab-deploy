@@ -119,7 +119,7 @@ export class AdminController {
     );
   }
 
-  // ── Settings/Tariffs ─────────────────────────────────
+  // ── Settings/Tariffs (global) ─────────────────────────
 
   @Get('settings/tariffs')
   async getTariffs() {
@@ -129,6 +129,31 @@ export class AdminController {
   @Patch('settings/tariffs')
   async setTariffs(@Body() body: any) {
     return this.adminService.setTariffs(body);
+  }
+
+  // ── Settings/Tariffs par pays ─────────────────────────
+
+  @Get('settings/tariffs/countries')
+  async getCountriesWithTariffs() {
+    return this.adminService.getCountriesWithTariffs();
+  }
+
+  @Get('settings/tariffs/country/:countryCode')
+  async getTariffsByCountry(@Param('countryCode') countryCode: string) {
+    return this.adminService.getTariffsByCountry(countryCode);
+  }
+
+  @Patch('settings/tariffs/country/:countryCode')
+  async setTariffsByCountry(
+    @Param('countryCode') countryCode: string,
+    @Body() body: any,
+  ) {
+    return this.adminService.setTariffsByCountry(countryCode, body);
+  }
+
+  @Patch('settings/tariffs/country/:countryCode/delete')
+  async deleteTariffsByCountry(@Param('countryCode') countryCode: string) {
+    return this.adminService.deleteTariffsByCountry(countryCode);
   }
 
 }

@@ -248,6 +248,30 @@ export class BookingsService {
     return Math.max(minFare, startupFee + distancePrice);
   }
 
+  /** Version de computeSurgeContext acceptant des tarifs déjà chargés */
+  private computeSurgeContextWithTariffs(dto: CreateBookingDto, tariffs: import('../settings/settings.service').TariffsConfig) {
+    const surge = tariffs.surge;
+    const night = this.isNightTime();
+    const rush = this.isRushHour(surge);
+    const rain = dto.rainSurge === true;
+    let multiplier = 1.0;
+    if (night) multiplier *= surge.nightMultiplier;
+    if (rain)  multiplier *= surge.rainMultiplier;
+    if (rush)  multiplier *= surge.rushHourMultiplier;
+    return Promise.resolve({ multiplier: Math.round(multiplier * 100) / 100, nightSurge: night, rainSurge: rain, rushHourSurge: rush });
+  }
+
+  /** Version de computeBasePriceForVehicle acceptant des tarifs déjà chargés */
+  private computeBasePriceForVehicleWithTariffs(distanceKm: number, vehicleType: string, tariffs: import('../settings/settings.service').TariffsConfig): Promise<number> {
+    const vehicle = tariffs.vehicles[vehicleType];
+    const basePricePerKm = vehicle?.basePricePerKm ?? tariffs.basePricePerKm ?? DEFAULT_BASE_PRICE_PER_KM;
+    const coeff          = vehicle?.coefficient    ?? DEFAULT_VEHICLE_COEFFICIENTS[vehicleType] ?? 1.0;
+    const minFare        = vehicle?.minFare        ?? DEFAULT_VEHICLE_MIN_PRICES[vehicleType]   ?? 3000;
+    const startupFee     = tariffs.startupFee      ?? 500;
+    const distancePrice  = Math.round(distanceKm * basePricePerKm * coeff);
+    return Promise.resolve(Math.max(minFare, startupFee + distancePrice));
+  }
+
   // ─── Fin méthodes partagées ───────────────────────────────────────────────
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
@@ -1226,31 +1250,46 @@ export class BookingsService {
   }
 
   // --- ESTIMATION DES PRIX ---
-  async estimatePrices(dto: Partial<CreateBookingDto>) {
+  async estimatePrices(dto: Partial<CreateBookingDto> & { countryCode?: string }) {
     const distanceKm = this.computeDistanceKm(dto);
+
+    // Détection du pays : priorité au countryCode explicite,
+    // sinon on lit le countryCode de l'aéroport en DB
+    let countryCode = dto.countryCode?.toUpperCase() ?? null;
+    if (!countryCode && dto.departureAirport) {
+      try {
+        const airport = await this.prisma.airport.findUnique({
+          where: { iataCode: dto.departureAirport.toUpperCase() },
+          select: { countryCode: true },
+        });
+        countryCode = airport?.countryCode?.toUpperCase() ?? null;
+      } catch { /* ignore */ }
+    }
+
+    // Charge les tarifs du pays (fallback global → défauts)
+    const tariffs = await this.settingsService.getTariffsByCountry(countryCode);
 
     // Surge offre/demande : ne le calcule que pour les aéroports connus localement (DLA/NSI)
     let supplyDemandMultiplier = 1.0;
     try {
-      const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null; // Cherche DLA/NSI
-      if (airportCoords) { // Si c'est un aéroport connu localement (DLA/NSI)
-        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport!); // Pass departureAirport, which is known here
+      const airportCoords = dto.departureAirport ? AIRPORT_COORDS[dto.departureAirport] : null;
+      if (airportCoords) {
+        const simulated = await this.pricingService.calculateEstimatedPrice(1000, dto.departureAirport!);
         supplyDemandMultiplier = simulated / 1000;
       }
     } catch { /* ignore */ }
 
-    // Surcharges contextuelles (nuit / pluie / heure de pointe)
-    const surgeCtx = await this.computeSurgeContext(dto as CreateBookingDto);
+    // Surcharges contextuelles (nuit / pluie / heure de pointe) — utilise la config du pays
+    const surgeCtx = await this.computeSurgeContextWithTariffs(dto as CreateBookingDto, tariffs);
     const totalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
 
-    // Estimation par catégorie de véhicule
-    const tariffs = await this.settingsService.getTariffs();
+    // Estimation par catégorie de véhicule (tarifs du pays)
     const estimates: Record<string, {
       priceInFcfa: number; priceInPoints: number;
       baseFcfa: number; surgeFcfa: number;
     }> = {};
     for (const vType of Object.keys(tariffs.vehicles)) {
-      const basePrice = await this.computeBasePriceForVehicle(distanceKm, vType);
+      const basePrice = await this.computeBasePriceForVehicleWithTariffs(distanceKm, vType, tariffs);
       const surgedPrice = Math.round(basePrice * totalSurgeMultiplier);
       estimates[vType] = {
         priceInFcfa:   surgedPrice,
@@ -1268,6 +1307,7 @@ export class BookingsService {
 
     return {
       distanceKm,
+      countryCode,
       surgeMultiplier: totalSurgeMultiplier,
       surgeContext: {
         nightSurge:    surgeCtx.nightSurge,

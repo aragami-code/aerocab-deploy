@@ -94,30 +94,73 @@ export class SettingsService {
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   }
 
-  /** Retourne la config des tarifs (DB avec fallback sur les défauts) */
+  /** Retourne la config des tarifs globaux (DB avec fallback sur les défauts) */
   async getTariffs(): Promise<TariffsConfig> {
+    return this.getTariffsByCountry(null);
+  }
+
+  /** Retourne les tarifs pour un pays donné (fallback global → défauts) */
+  async getTariffsByCountry(countryCode: string | null): Promise<TariffsConfig> {
+    // 1. Cherche tarifs spécifiques au pays
+    if (countryCode) {
+      const raw = await this.get(`tariffs_config:${countryCode.toUpperCase()}`, '');
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as TariffsConfig;
+          return this.mergeTariffs(parsed);
+        } catch { /* fallback */ }
+      }
+    }
+    // 2. Fallback : tarifs globaux
     const raw = await this.get('tariffs_config', '');
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as TariffsConfig;
-        return {
-          ...DEFAULT_TARIFFS,
-          ...parsed,
-          vehicles: { ...DEFAULT_TARIFFS.vehicles, ...(parsed.vehicles ?? {}) },
-        };
+        return this.mergeTariffs(parsed);
       } catch { /* fallback */ }
     }
+    // 3. Défauts hardcodés
     return DEFAULT_TARIFFS;
   }
 
-  /** Sauvegarde la config des tarifs */
+  private mergeTariffs(parsed: Partial<TariffsConfig>): TariffsConfig {
+    return {
+      ...DEFAULT_TARIFFS,
+      ...parsed,
+      vehicles: { ...DEFAULT_TARIFFS.vehicles, ...(parsed.vehicles ?? {}) },
+      consigne: { ...DEFAULT_TARIFFS.consigne, ...(parsed.consigne ?? {}) },
+      surge:    { ...DEFAULT_TARIFFS.surge,    ...(parsed.surge    ?? {}) },
+    };
+  }
+
+  /** Sauvegarde la config des tarifs globaux */
   async setTariffs(config: TariffsConfig): Promise<void> {
     await this.set('tariffs_config', JSON.stringify(config));
   }
 
+  /** Sauvegarde les tarifs pour un pays donné */
+  async setTariffsByCountry(countryCode: string, config: TariffsConfig): Promise<void> {
+    await this.set(`tariffs_config:${countryCode.toUpperCase()}`, JSON.stringify(config));
+  }
+
+  /** Supprime les tarifs spécifiques d'un pays (retour au global) */
+  async deleteTariffsByCountry(countryCode: string): Promise<void> {
+    await this.prisma.appSetting.deleteMany({
+      where: { key: `tariffs_config:${countryCode.toUpperCase()}` },
+    });
+  }
+
+  /** Liste tous les pays ayant une config tarifaire spécifique */
+  async getCountriesWithTariffs(): Promise<string[]> {
+    const rows = await this.prisma.appSetting.findMany({
+      where: { key: { startsWith: 'tariffs_config:' } },
+    });
+    return rows.map(r => r.key.replace('tariffs_config:', ''));
+  }
+
   /** Retourne le taux FCFA par point */
-  async getFcfaPerPoint(): Promise<number> {
-    const tariffs = await this.getTariffs();
+  async getFcfaPerPoint(countryCode?: string): Promise<number> {
+    const tariffs = await this.getTariffsByCountry(countryCode ?? null);
     return tariffs.fcfaPerPoint;
   }
 }
