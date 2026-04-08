@@ -208,24 +208,6 @@ export class BookingsService {
   }
 
   /** Calcule le multiplicateur de surcharge contextuelle */
-  private async computeSurgeContext(dto: CreateBookingDto): Promise<{
-    multiplier: number;
-    nightSurge: boolean;
-    rainSurge: boolean;
-    rushHourSurge: boolean;
-  }> {
-    const tariffs = await this.settingsService.getTariffs();
-    const surge = tariffs.surge;
-    const night = this.isNightTime();
-    const rush = this.isRushHour(surge);
-    const rain = dto.rainSurge === true;
-    let multiplier = 1.0;
-    if (night) multiplier *= surge.nightMultiplier;
-    if (rain)  multiplier *= surge.rainMultiplier;
-    if (rush)  multiplier *= surge.rushHourMultiplier;
-    return { multiplier: Math.round(multiplier * 100) / 100, nightSurge: night, rainSurge: rain, rushHourSurge: rush };
-  }
-
   /** Calcule le prix total de la consigne (FCFA) */
   private async computeConsignePrice(vehicleType: string, days: number): Promise<{ dailyRate: number; total: number }> {
     const tariffs = await this.settingsService.getTariffs();
@@ -237,17 +219,6 @@ export class BookingsService {
    *  Formule : startupFee + (distanceKm × basePricePerKm × coeff), min = minFare
    *  Le startupFee inclut les `startupMinutes` premières minutes de trajet.
    */
-  private async computeBasePriceForVehicle(distanceKm: number, vehicleType: string): Promise<number> {
-    const tariffs = await this.settingsService.getTariffs();
-    const vehicle = tariffs.vehicles[vehicleType];
-    const basePricePerKm = vehicle?.basePricePerKm ?? tariffs.basePricePerKm ?? DEFAULT_BASE_PRICE_PER_KM;
-    const coeff          = vehicle?.coefficient    ?? DEFAULT_VEHICLE_COEFFICIENTS[vehicleType] ?? 1.0;
-    const minFare        = vehicle?.minFare        ?? DEFAULT_VEHICLE_MIN_PRICES[vehicleType]   ?? 3000;
-    const distancePrice  = Math.round(distanceKm * basePricePerKm * coeff);
-    // Formule : minFare (base fixe) + distance, le km s'ajoute toujours par-dessus
-    return minFare + distancePrice;
-  }
-
   /** Version de computeSurgeContext acceptant des tarifs déjà chargés */
   private computeSurgeContextWithTariffs(dto: CreateBookingDto, tariffs: import('../settings/settings.service').TariffsConfig) {
     const surge = tariffs.surge;
@@ -286,10 +257,25 @@ export class BookingsService {
     // 1. Distance et prix de base
     const isDeparture = dto.type === 'DEPARTURE';
     const distanceKm = this.computeDistanceKm(dto);
-    const priceInFcfa = await this.computeBasePriceForVehicle(distanceKm, dto.vehicleType);
-    const finalPricePoints = priceInFcfa; // 1 FCFA = 1 point
 
-    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | Points: ${finalPricePoints}`);
+    // Détecte le pays via l'aéroport pour charger les bons tarifs
+    let bookingCountryCode: string | null = null;
+    if (dto.departureAirport) {
+      try {
+        const airport = await this.prisma.airport.findUnique({
+          where: { iataCode: dto.departureAirport.toUpperCase() },
+          select: { countryCode: true },
+        });
+        bookingCountryCode = airport?.countryCode?.toUpperCase() ?? null;
+      } catch { /* ignore */ }
+    }
+    const bookingTariffs = await this.settingsService.getTariffsByCountry(bookingCountryCode);
+    const bookingPointValue = bookingTariffs.pointValue ?? 1; // pts par unité monétaire locale
+
+    const priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distanceKm, dto.vehicleType, bookingTariffs);
+    const finalPricePoints = Math.ceil(priceInFcfa / bookingPointValue);
+
+    this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | FCFA: ${priceInFcfa} | Points: ${finalPricePoints} (pointValue=${bookingPointValue})`);
 
     // 2. Surge Pricing (offre/demande)
     let dynamicPricePoints = finalPricePoints;
@@ -302,7 +288,7 @@ export class BookingsService {
     }
 
     // 3. Surcharges contextuelles (nuit / pluie / heure de pointe)
-    const surgeCtx = await this.computeSurgeContext(dto);
+    const surgeCtx = await this.computeSurgeContextWithTariffs(dto, bookingTariffs);
     dynamicPricePoints = Math.round(dynamicPricePoints * surgeCtx.multiplier);
     const finalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
     this.logger.log(`[Surge] offre/demande=${supplyDemandMultiplier.toFixed(2)} ctx=${surgeCtx.multiplier.toFixed(2)} total=${finalSurgeMultiplier.toFixed(2)} nuit=${surgeCtx.nightSurge} pluie=${surgeCtx.rainSurge} rush=${surgeCtx.rushHourSurge}`);
@@ -1314,9 +1300,10 @@ export class BookingsService {
       if (tariffs.vehicles[vType]?.isActive === false) continue; // skip désactivés
       const basePrice = await this.computeBasePriceForVehicleWithTariffs(distanceKm, vType, tariffs);
       const surgedPrice = Math.round(basePrice * totalSurgeMultiplier);
+      const pointValue = tariffs.pointValue ?? 1;
       estimates[vType] = {
         priceInFcfa:   surgedPrice,
-        priceInPoints: surgedPrice,
+        priceInPoints: Math.ceil(surgedPrice / pointValue),
         baseFcfa:      basePrice,
         surgeFcfa:     surgedPrice - basePrice,
         label:         tariffs.vehicles[vType]?.label,
@@ -1349,6 +1336,10 @@ export class BookingsService {
       },
       estimates,
       consigneDailyRates,
+      pointValue:    tariffs.pointValue    ?? 1,
+      cashbackRate:  tariffs.cashbackRate  ?? 0.05,
+      currency:      tariffs.currency      ?? 'XAF',
+      currencySymbol: tariffs.currencySymbol ?? 'FCFA',
     };
   }
 

@@ -21,7 +21,7 @@ export class BookingsScheduler {
    * Toutes les 2 minutes : expire les bookings en `pending` sans driver
    * depuis plus de DRIVER_ASSIGNMENT_TIMEOUT_MIN minutes.
    */
-  @Cron(CronExpression.EVERY_2_MINUTES)
+  @Cron('*/2 * * * *')
   async expireUnassignedBookings() {
     const cutoff = new Date(Date.now() - DRIVER_ASSIGNMENT_TIMEOUT_MIN * 60 * 1000);
 

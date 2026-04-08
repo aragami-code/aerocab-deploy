@@ -24,15 +24,29 @@ export interface SurgeConfig {
   rushHourEnd2: string;       // ex: "19:00"
 }
 
+export interface ReferralBonus {
+  onSignup: number;      // Points offerts au parrain quand le filleul crée son compte
+  onFirstRide: number;   // Points offerts au parrain à la 1ère course du filleul
+  newUserBonus: number;  // Points offerts au nouvel utilisateur à l'inscription
+}
+
 export interface TariffsConfig {
   basePricePerKm: number;
-  fcfaPerPoint: number;
-  startupFee: number;        // Frais fixes de démarrage inclus dans chaque course (FCFA)
-  startupMinutes: number;    // Nombre de minutes incluses dans le frais de démarrage
-  pricePerMinute: number;    // FCFA/minute au-delà des minutes incluses
+  fcfaPerPoint: number;      // Ancien champ — conservé pour compatibilité
+  startupFee: number;
+  startupMinutes: number;
+  pricePerMinute: number;
+  currency?: string;
+  currencySymbol?: string;
   vehicles: Record<string, VehicleTariff>;
   consigne: Record<string, VehicleConsigneTariff>;
   surge: SurgeConfig;
+
+  // ── Système de points ─────────────────────────────────────────────────────
+  pointValue: number;         // Valeur d'1 point en monnaie locale (ex: 1 FCFA, 0.01 EUR)
+  pointRechargeRate: number;  // 1 unité de monnaie locale = X points crédités (recharge)
+  cashbackRate: number;       // % du prix de la course crédité en points après trajet (0.05 = 5%)
+  referralBonus: ReferralBonus;
 }
 
 export const DEFAULT_TARIFFS: TariffsConfig = {
@@ -41,6 +55,17 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
   startupFee: 500,           // 500 FCFA de frais fixes à chaque prise en charge
   startupMinutes: 3,         // 3 premières minutes incluses dans le startupFee
   pricePerMinute: 50,        // 50 FCFA/min au-delà
+
+  // ── Système de points (défauts Cameroun) ──────────────────────────────────
+  pointValue: 1,             // 1 pt = 1 FCFA
+  pointRechargeRate: 1,      // 1 FCFA versé = 1 pt crédité
+  cashbackRate: 0.05,        // 5 % du prix de la course remboursé en points
+  referralBonus: {
+    onSignup: 500,           // pts offerts au parrain à l'inscription du filleul
+    onFirstRide: 1000,       // pts offerts au parrain à la 1re course du filleul
+    newUserBonus: 300,       // pts offerts au nouvel utilisateur à l'inscription
+  },
+
   vehicles: {
     eco:          { basePricePerKm: 250, minFare: 3000,  coefficient: 1.0, label: 'Eco',          isActive: true, maxPassengers: 4 },
     eco_plus:     { basePricePerKm: 250, minFare: 3500,  coefficient: 1.2, label: 'Eco+',         isActive: true, maxPassengers: 4 },
@@ -130,9 +155,10 @@ export class SettingsService {
     return {
       ...DEFAULT_TARIFFS,
       ...parsed,
-      vehicles: { ...DEFAULT_TARIFFS.vehicles, ...(parsed.vehicles ?? {}) },
-      consigne: { ...DEFAULT_TARIFFS.consigne, ...(parsed.consigne ?? {}) },
-      surge:    { ...DEFAULT_TARIFFS.surge,    ...(parsed.surge    ?? {}) },
+      vehicles:      { ...DEFAULT_TARIFFS.vehicles,      ...(parsed.vehicles      ?? {}) },
+      consigne:      { ...DEFAULT_TARIFFS.consigne,      ...(parsed.consigne      ?? {}) },
+      surge:         { ...DEFAULT_TARIFFS.surge,         ...(parsed.surge         ?? {}) },
+      referralBonus: { ...DEFAULT_TARIFFS.referralBonus, ...(parsed.referralBonus ?? {}) },
     };
   }
 
