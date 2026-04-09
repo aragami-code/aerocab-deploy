@@ -1386,6 +1386,7 @@ export class BookingsService {
         multiplier:    surgeCtx.multiplier,
       },
       estimates,
+      consigneEnabled: tariffs.consigneEnabled ?? true,
       consigneDailyRates,
       pointValue:    tariffs.pointValue    ?? 1,
       cashbackRate:  tariffs.cashbackRate  ?? 0.05,

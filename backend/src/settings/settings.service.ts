@@ -38,6 +38,7 @@ export interface TariffsConfig {
   pricePerMinute: number;
   currency?: string;
   currencySymbol?: string;
+  consigneEnabled: boolean;  // true = service consigne disponible dans ce pays
   vehicles: Record<string, VehicleTariff>;
   consigne: Record<string, VehicleConsigneTariff>;
   surge: SurgeConfig;
@@ -65,6 +66,8 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
     onFirstRide: 1000,       // pts offerts au parrain à la 1re course du filleul
     newUserBonus: 300,       // pts offerts au nouvel utilisateur à l'inscription
   },
+
+  consigneEnabled: true,     // true = service consigne disponible dans ce pays
 
   vehicles: {
     eco:          { basePricePerKm: 250, minFare: 3000,  coefficient: 1.0, label: 'Eco',          isActive: true, maxPassengers: 4 },
@@ -156,6 +159,7 @@ export class SettingsService {
       ...DEFAULT_TARIFFS,
       ...parsed,
       vehicles:      { ...DEFAULT_TARIFFS.vehicles,      ...(parsed.vehicles      ?? {}) },
+      consigneEnabled: parsed.consigneEnabled ?? DEFAULT_TARIFFS.consigneEnabled,
       consigne:      { ...DEFAULT_TARIFFS.consigne,      ...(parsed.consigne      ?? {}) },
       surge:         { ...DEFAULT_TARIFFS.surge,         ...(parsed.surge         ?? {}) },
       referralBonus: { ...DEFAULT_TARIFFS.referralBonus, ...(parsed.referralBonus ?? {}) },
