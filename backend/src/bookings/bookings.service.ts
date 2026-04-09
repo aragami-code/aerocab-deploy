@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
@@ -1393,6 +1394,66 @@ export class BookingsService {
       currency:      tariffs.currency      ?? 'XAF',
       currencySymbol: tariffs.currencySymbol ?? 'FCFA',
     };
+  }
+
+  // ── Job : annulation automatique si vol annulé ────────────────────────────
+  // Toutes les 10 minutes, vérifie les bookings actifs liés à un vol
+  // Si AeroDataBox retourne status=cancelled → annule le booking + notifie
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async checkCancelledFlights() {
+    const activeBookings = await this.prisma.booking.findMany({
+      where: {
+        status: { in: ['pending', 'confirmed'] },
+        flightNumber: { not: null },
+      },
+      select: { id: true, passengerId: true, flightNumber: true },
+    });
+
+    if (!activeBookings.length) return;
+
+    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
+    if (!aeroDataBoxKey) return; // pas de clé API → skip
+
+    for (const booking of activeBookings) {
+      try {
+        const res = await fetch(
+          `https://aerodatabox.p.rapidapi.com/flights/number/${booking.flightNumber}`,
+          {
+            headers: {
+              'X-RapidAPI-Key': aeroDataBoxKey,
+              'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com',
+            },
+          },
+        );
+        if (!res.ok) continue;
+
+        const data = await res.json() as any[];
+        if (!Array.isArray(data) || !data.length) continue;
+
+        const flight = data[0];
+        const isCancelled = flight.status === 'Canceled' || flight.status === 'Cancelled';
+        if (!isCancelled) continue;
+
+        // Annule le booking + récupère le prix pour remboursement
+        const cancelled = await this.prisma.booking.update({
+          where: { id: booking.id },
+          data: { status: 'cancelled', cancelledAt: new Date() },
+          select: { estimatedPrice: true },
+        });
+
+        // Rembourse les points au passager
+        if (cancelled.estimatedPrice) {
+          await this.points.addPoints(booking.passengerId, Math.round(cancelled.estimatedPrice), 'Remboursement — vol annulé');
+        }
+
+        // Notifie le passager
+        await this.notifications.sendToUser(booking.passengerId, 'Vol annulé', `Votre vol ${booking.flightNumber} a été annulé. Votre réservation a été annulée et vos points remboursés.`);
+
+        this.logger.log(`[CancelledFlight] Booking ${booking.id} annulé — vol ${booking.flightNumber} cancelled`);
+      } catch (err) {
+        this.logger.warn(`[CancelledFlight] Erreur pour booking ${booking.id}: ${err}`);
+      }
+    }
   }
 
 }
