@@ -276,6 +276,11 @@ export class BookingsService {
     const isDeparture = dto.type === 'DEPARTURE';
     const distanceKm = await this.computeDistanceKm(dto);
 
+    // Cas 42 : Guard 80km backend (ARRIVAL/DEPARTURE)
+    if (dto.type !== 'INTERNATIONAL' && distanceKm > 80) {
+      throw new BadRequestException('DISTANCE_EXCEEDED');
+    }
+
     // Détecte le pays via l'aéroport pour charger les bons tarifs
     let bookingCountryCode: string | null = null;
     if (dto.departureAirport) {
