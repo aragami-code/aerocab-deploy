@@ -189,6 +189,16 @@ export class BookingsService {
           : (airportCoords ?? null))
       : (dto.destLat && dto.destLng ? { lat: dto.destLat, lng: dto.destLng } : null);
 
+    // Cas 26 : log si coords semblent incorrectes (0,0 ou hors Afrique)
+    const isValidCoord = (lat: number, lng: number) =>
+      Math.abs(lat) > 0.001 || Math.abs(lng) > 0.001;
+    if (startCoords && !isValidCoord(startCoords.lat, startCoords.lng)) {
+      this.logger.warn(`[Coords] startCoords invalides (0,0) pour departureAirport=${dto.departureAirport} type=${dto.type}`);
+    }
+    if (endCoords && !isValidCoord(endCoords.lat, endCoords.lng)) {
+      this.logger.warn(`[Coords] endCoords invalides (0,0) pour departureAirport=${dto.departureAirport} type=${dto.type}`);
+    }
+
     if (startCoords?.lat && startCoords?.lng && endCoords?.lat && endCoords?.lng) {
       const R = 6371;
       const dLat = (endCoords.lat - startCoords.lat) * Math.PI / 180;
@@ -205,17 +215,25 @@ export class BookingsService {
     );
   }
 
+  /** Cas 97 : heure locale Cameroun (UTC+1) pour le calcul de surge
+   *  Le serveur Render tourne en UTC — on corrige avec +1h */
+  private getLocalCameroonHourMinute(): { h: number; m: number } {
+    const now = new Date();
+    const utcMs = now.getTime();
+    const cameroonMs = utcMs + 60 * 60 * 1000; // UTC+1
+    const local = new Date(cameroonMs);
+    return { h: local.getUTCHours(), m: local.getUTCMinutes() };
+  }
+
   /** Détermine si l'heure actuelle tombe dans la plage nuit (22h-05h) */
   private isNightTime(): boolean {
-    const h = new Date().getHours();
+    const { h } = this.getLocalCameroonHourMinute();
     return h >= 22 || h < 5;
   }
 
   /** Détermine si l'heure actuelle est en heure de pointe selon la config */
   private isRushHour(surgeConfig: { rushHourStart: string; rushHourEnd: string; rushHourStart2: string; rushHourEnd2: string }): boolean {
-    const now = new Date();
-    const h = now.getHours();
-    const m = now.getMinutes();
+    const { h, m } = this.getLocalCameroonHourMinute();
     const toMinutes = (t: string) => {
       const [hh, mm] = t.split(':').map(Number);
       return hh * 60 + mm;
