@@ -14,13 +14,18 @@ export class PointsService {
     return { balance };
   }
 
-  async getHistory(userId: string) {
-    const transactions = await this.prisma.pointsTransaction.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
-    return transactions;
+  async getHistory(userId: string, page = 1, limit = 20) {
+    const skip = Math.max(0, (page - 1) * limit);
+    const [transactions, total] = await Promise.all([
+      this.prisma.pointsTransaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.pointsTransaction.count({ where: { userId } }),
+    ]);
+    return { data: transactions, total, page, limit };
   }
 
   async addPoints(userId: string, points: number, label: string) {

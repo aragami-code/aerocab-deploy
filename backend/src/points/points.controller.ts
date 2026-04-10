@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, UseGuards, Request, Query } from '@nestjs/common';
 import { PointsService } from './points.service';
 import { JwtAuthGuard } from '../auth/guards';
 
@@ -13,7 +13,7 @@ export class PointsController {
   }
 
   @Get('history')
-  getHistory(@Request() req: any) {
-    return this.pointsService.getHistory(req.user.id);
+  getHistory(@Request() req: any, @Query('page') page?: string, @Query('limit') limit?: string) {
+    return this.pointsService.getHistory(req.user.id, page ? parseInt(page) : 1, limit ? parseInt(limit) : 20);
   }
 }
