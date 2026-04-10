@@ -9,14 +9,14 @@ export class ReportsService {
   async createReport(reporterId: string, dto: CreateReportDto) {
     let reportedId = dto.reportedId;
 
-    // Si bookingId fourni, on résout le driverId depuis la réservation
+    // Si bookingId fourni, on résout le userId du chauffeur depuis la réservation
     if (!reportedId && dto.bookingId) {
       const booking = await this.prisma.booking.findUnique({
         where: { id: dto.bookingId },
-        select: { driverId: true },
+        include: { driverProfile: { select: { userId: true } } },
       });
-      if (booking?.driverId) {
-        reportedId = booking.driverId;
+      if (booking?.driverProfile?.userId) {
+        reportedId = booking.driverProfile.userId;
       }
     }
 
