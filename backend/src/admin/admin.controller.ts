@@ -156,5 +156,35 @@ export class AdminController {
     return this.adminService.deleteTariffsByCountry(countryCode);
   }
 
+  // ── Bookings ─────────────────────────────────────────
+
+  @Get('bookings')
+  async getBookings(
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getBookings(
+      status,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
+  @Patch('bookings/:id/cancel')
+  async cancelBooking(@Param('id') id: string) {
+    return this.adminService.cancelBookingAdmin(id);
+  }
+
+  // ── Driver profile update ─────────────────────────────
+
+  @Patch('drivers/:id/profile')
+  async updateDriverProfile(
+    @Param('id') id: string,
+    @Body() body: { driverType?: string; consigneEnabled?: boolean },
+  ) {
+    return this.adminService.updateDriverProfile(id, body);
+  }
+
 }
 

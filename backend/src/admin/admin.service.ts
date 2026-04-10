@@ -217,6 +217,9 @@ export class AdminService {
   // ── Stats ────────────────────────────────────────────
 
   async getStats() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     const [
       totalUsers,
       totalDrivers,
@@ -224,16 +227,25 @@ export class AdminService {
       approvedDrivers,
       activeAccessPasses,
       totalRevenue,
+      totalBookings,
+      pendingBookings,
+      activeBookings,
+      completedBookings,
+      cancelledBookings,
+      completedToday,
     ] = await Promise.all([
       this.prisma.user.count(),
       this.prisma.driverProfile.count(),
       this.prisma.driverProfile.count({ where: { status: 'pending' } }),
       this.prisma.driverProfile.count({ where: { status: 'approved' } }),
       this.prisma.accessPass.count({ where: { status: 'active' } }),
-      this.prisma.accessPass.aggregate({
-        where: { status: 'active' },
-        _sum: { amount: true },
-      }),
+      this.prisma.accessPass.aggregate({ where: { status: 'active' }, _sum: { amount: true } }),
+      this.prisma.booking.count(),
+      this.prisma.booking.count({ where: { status: 'pending' } }),
+      this.prisma.booking.count({ where: { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
+      this.prisma.booking.count({ where: { status: 'completed' } }),
+      this.prisma.booking.count({ where: { status: 'cancelled' } }),
+      this.prisma.booking.count({ where: { status: 'completed', updatedAt: { gte: today } } }),
     ]);
 
     return {
@@ -243,7 +255,61 @@ export class AdminService {
       approvedDrivers,
       activeAccessPasses,
       totalRevenue: totalRevenue._sum.amount || 0,
+      bookings: {
+        total: totalBookings,
+        pending: pendingBookings,
+        active: activeBookings,
+        completed: completedBookings,
+        cancelled: cancelledBookings,
+        completedToday,
+      },
     };
+  }
+
+  async getBookings(status?: string, page = 1, limit = 20) {
+    const where: any = {};
+    if (status) where.status = status;
+    const skip = (page - 1) * limit;
+    const [data, total] = await Promise.all([
+      this.prisma.booking.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          passenger: { select: { name: true, phone: true } },
+          driverProfile: {
+            select: {
+              driverType: true,
+              vehicleBrand: true,
+              vehicleModel: true,
+              user: { select: { name: true, phone: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.booking.count({ where }),
+    ]);
+    return { data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  async cancelBookingAdmin(bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (['completed', 'cancelled'].includes(booking.status)) {
+      throw new BadRequestException('Cette réservation ne peut plus être annulée');
+    }
+    return this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'cancelled' },
+    });
+  }
+
+  async updateDriverProfile(driverId: string, data: { driverType?: string; consigneEnabled?: boolean }) {
+    return this.prisma.driverProfile.update({
+      where: { id: driverId },
+      data,
+    });
   }
 
   // ── Users Management ─────────────────────────────────
