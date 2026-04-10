@@ -7,10 +7,27 @@ export class ReportsService {
   constructor(private prisma: PrismaService) {}
 
   async createReport(reporterId: string, dto: CreateReportDto) {
+    let reportedId = dto.reportedId;
+
+    // Si bookingId fourni, on résout le driverId depuis la réservation
+    if (!reportedId && dto.bookingId) {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: dto.bookingId },
+        select: { driverId: true },
+      });
+      if (booking?.driverId) {
+        reportedId = booking.driverId;
+      }
+    }
+
+    if (!reportedId) {
+      throw new Error('Impossible d\'identifier la personne signalée');
+    }
+
     const report = await this.prisma.report.create({
       data: {
         reporterId,
-        reportedId: dto.reportedId,
+        reportedId,
         reason: dto.reason,
         conversationId: dto.conversationId ?? null,
         status: 'open',
