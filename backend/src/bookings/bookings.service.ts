@@ -360,6 +360,21 @@ export class BookingsService {
       consigneTotal = consigne.total;
       consigneDailyRate = consigne.dailyRate;
       this.logger.log(`[Consigne] ${dto.consigneDays}j × ${consigneDailyRate} FCFA = ${consigneTotal} FCFA`);
+
+      // Verrou de prix consigne : tolérance 5%
+      if (dto.expectedConsigneFcfa && dto.expectedConsigneFcfa > 0) {
+        const diff = Math.abs(consigneTotal - dto.expectedConsigneFcfa) / dto.expectedConsigneFcfa;
+        if (diff > 0.05) {
+          throw new BadRequestException(
+            JSON.stringify({
+              code: 'CONSIGNE_PRICE_CHANGED',
+              previousPrice: dto.expectedConsigneFcfa,
+              newPrice: consigneTotal,
+              message: `Le tarif consigne a changé : ${dto.expectedConsigneFcfa.toLocaleString()} → ${consigneTotal.toLocaleString()} FCFA. Veuillez confirmer le nouveau tarif.`,
+            }),
+          );
+        }
+      }
     }
 
     // Applique le code promo si fourni (sur les points)

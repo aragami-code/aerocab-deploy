@@ -80,4 +80,8 @@ export class CreateBookingDto {
   @IsOptional()
   @IsNumber()
   expectedPriceFcfa?: number; // Prix affiché au passager — vérifié côté backend avant création
+
+  @IsOptional()
+  @IsNumber()
+  expectedConsigneFcfa?: number; // Devis consigne affiché — vérifié côté backend avant création
 }
