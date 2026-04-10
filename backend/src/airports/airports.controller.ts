@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards } from '@nestjs/common';
 import { AirportsService } from './airports.service';
-import { RolesGuard } from '../auth/guards';
+import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { UserRole } from '@prisma/client';
 import { CreateAirportDto, UpdateAirportDto } from './dto/airport.dto';
@@ -16,7 +16,7 @@ export class AirportsController {
 
   @Get('admin')
   @Roles(UserRole.admin)
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   findAllAdmin() {
     return this.airportsService.findAllAdmin();
   }
@@ -55,21 +55,21 @@ export class AirportsController {
 
   @Post()
   @Roles(UserRole.admin)
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   create(@Body() data: CreateAirportDto) {
     return this.airportsService.create(data);
   }
 
   @Patch(':id')
   @Roles(UserRole.admin)
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   update(@Param('id') id: string, @Body() data: UpdateAirportDto) {
     return this.airportsService.update(id, data);
   }
 
   @Delete(':id')
   @Roles(UserRole.admin)
-  @UseGuards(RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   remove(@Param('id') id: string) {
     return this.airportsService.remove(id);
   }
