@@ -161,7 +161,7 @@ export class FlightsService {
 
   /**
    * GET /flights/live/:flightNumber
-   * Infos statiques via AeroDataBox + position live via OpenSky
+   * Infos statiques via AeroDataBox + position live via FlightRadar24 (fallback OpenSky)
    */
   async getLiveFlightDetails(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
@@ -172,13 +172,51 @@ export class FlightsService {
     const staticData = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
     if (!staticData) return null;
 
-    // Position live via OpenSky (gratuit, sans clé)
-    const live = staticData.callSign
-      ? await this.getOpenSkyPosition(staticData.callSign)
+    // Position live via FlightRadar24
+    const fr24Token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
+    const live = fr24Token
+      ? await this.getFlightRadar24Position(normalized, fr24Token)
       : null;
 
     const { callSign, ...rest } = staticData;
     return { ...rest, live };
+  }
+
+  /**
+   * Récupère la position live d'un vol via FlightRadar24 API officielle
+   */
+  private async getFlightRadar24Position(flightNumber: string, token: string): Promise<{
+    latitude: number; longitude: number; altitude: number;
+    speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
+  } | null> {
+    try {
+      const res = await fetch(
+        `https://fr24api.flightradar24.com/api/live/flight-positions/light?flights=${flightNumber}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+          },
+        },
+      );
+      if (!res.ok) return null;
+
+      const data = await res.json() as { data?: any[] };
+      if (!data.data?.length) return null;
+
+      const f = data.data[0];
+      return {
+        latitude: f.lat,
+        longitude: f.lon,
+        altitude: f.alt ?? 0,
+        speedHorizontal: f.gspeed ?? 0,
+        direction: f.track ?? 0,
+        isGround: f.on_ground ?? false,
+        updatedAt: new Date((f.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -257,85 +295,6 @@ export class FlightsService {
    * Récupère la position live d'un vol via OpenSky Network (gratuit, sans clé)
    * callsign = code ICAO du vol, ex: "AFR946"
    */
-  private async getOpenSkyPosition(callsign: string): Promise<{
-    latitude: number; longitude: number; altitude: number;
-    speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
-  } | null> {
-    try {
-      const res = await fetch(
-        `https://opensky-network.org/api/states/all?callsign=${callsign}`,
-        { headers: { 'Accept': 'application/json' } },
-      );
-      if (!res.ok) return null;
-
-      const data = (await res.json()) as { states?: any[][] };
-      if (!data.states?.length) return null;
-
-      // OpenSky renvoie tous les vols avec ce callsign (souvent un seul)
-      // Colonnes: [icao24, callsign, origin_country, time_position, last_contact,
-      //            longitude(5), latitude(6), baro_altitude(7), on_ground(8),
-      //            velocity(9 m/s), true_track(10 °), vertical_rate(11), ...]
-      const state = data.states.find(
-        (s) => s[1]?.trim().toUpperCase() === callsign.toUpperCase(),
-      ) ?? data.states[0];
-
-      const longitude   = state[5] as number | null;
-      const latitude    = state[6] as number | null;
-      const baroAlt     = state[7] as number | null;   // mètres
-      const onGround    = state[8] as boolean;
-      const velocityMs  = state[9] as number | null;   // m/s → km/h
-      const trueTrack   = state[10] as number | null;  // degrés
-      const lastContact = state[4] as number;           // timestamp UNIX
-
-      if (latitude == null || longitude == null) return null;
-
-      return {
-        latitude,
-        longitude,
-        altitude: baroAlt ?? 0,
-        speedHorizontal: velocityMs != null ? Math.round(velocityMs * 3.6) : 0,
-        direction: trueTrack ?? 0,
-        isGround: onGround,
-        updatedAt: new Date(lastContact * 1000).toISOString(),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  private getMockLiveDetails(flightNumber: string) {
-    const prefix = flightNumber.slice(0, 2);
-    const airlines: Record<string, { name: string; iata: string }> = {
-      AF: { name: 'Air France', iata: 'AF' },
-      TK: { name: 'Turkish Airlines', iata: 'TK' },
-      ET: { name: 'Ethiopian Airlines', iata: 'ET' },
-      CM: { name: 'Camair-Co', iata: 'QC' },
-    };
-    const airline = airlines[prefix] ?? { name: 'Unknown Airline', iata: prefix };
-    const dep = new Date(); dep.setHours(dep.getHours() - 5);
-    const arr = new Date(); arr.setHours(arr.getHours() + 2);
-    return {
-      flightNumber,
-      flightIcao: null,
-      status: 'active',
-      airline: { name: airline.name, iata: airline.iata, icao: null },
-      aircraft: { type: 'B77W', icao: 'B77W', registration: 'F-GSQI' },
-      departure: {
-        airport: 'Paris Charles de Gaulle', iata: 'CDG', terminal: '2E',
-        gate: 'K45', scheduled: dep.toISOString(), actual: dep.toISOString(), delay: 0,
-      },
-      arrival: {
-        airport: 'Douala International', iata: 'DLA', terminal: 'A',
-        baggage: 'B3', scheduled: arr.toISOString(), estimated: arr.toISOString(), actual: null, delay: 0,
-      },
-      live: {
-        latitude: 10.5, longitude: 5.2, altitude: 11278,
-        speedHorizontal: 890, direction: 175, isGround: false,
-        updatedAt: new Date().toISOString(),
-      },
-    };
-  }
-
   /**
    * Mock flight data for development
    */

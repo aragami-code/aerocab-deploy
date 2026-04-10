@@ -20,7 +20,7 @@ export class DispatchService {
    * Find eligible drivers based on flight status (Pre-landing vs Post-landing)
    * and driver reputation (Blacklane principle).
    */
-  async findEligibleDrivers(booking: Booking, isPreLanding: boolean, customCoords?: { lat: number, lng: number }) {
+  async findEligibleDrivers(booking: Booking, isPreLanding: boolean, customCoords?: { lat: number, lng: number }, withConsigne?: boolean) {
     this.logger.log(`Finding drivers for booking ${booking.id} (Pre-landing: ${isPreLanding})`);
 
     // FORCE APPROVAL for Test Account (650366995)
@@ -46,6 +46,11 @@ export class DispatchService {
       this.logger.warn(`[TEST-FIX] Failed to auto-approve test account: ${e.message}`);
     }
 
+    // Consigne filter: if withConsigne, only drivers with consigneEnabled OR driverType='internal'
+    const consigneFilter: any = withConsigne
+      ? { OR: [{ consigneEnabled: true }, { driverType: 'internal' }] }
+      : {};
+
     let nearbyDrivers = [];
     if (isPreLanding) {
       // PRINCIPLE 1: All available drivers (regardless of location)
@@ -54,15 +59,16 @@ export class DispatchService {
           isAvailable: true,
           isOnline: true,
           status: 'approved',
-          score: { gte: 4.0 }, 
-        },
+          score: { gte: 4.0 },
+          ...consigneFilter,
+        } as any,
         include: { user: { select: { name: true, phone: true } } },
         orderBy: [{ score: 'desc' }, { ratingAvg: 'desc' }],
         take: 50,
       });
     } else {
       // PRINCIPLE 2: Passenger already at airport OR departing from home -> Proximity Priority
-      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport, customCoords);
+      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport, customCoords, withConsigne);
     }
 
     // ENSURE test account is INCLUDED if online
@@ -87,12 +93,16 @@ export class DispatchService {
   /**
    * Find drivers near an airport or custom coordinates using Haversine formula via SQL query raw
    */
-  private async findNearbyDrivers(airportCode: string, customCoords?: { lat: number, lng: number }) {
+  private async findNearbyDrivers(airportCode: string, customCoords?: { lat: number, lng: number }, withConsigne?: boolean) {
     const coords = customCoords || AIRPORT_COORDS[airportCode.toUpperCase()];
+    const consigneClause = withConsigne
+      ? Prisma.sql`AND (consigne_enabled = true OR driver_type = 'internal')`
+      : Prisma.sql``;
+
     if (!coords) {
       this.logger.warn(`Airport coordinates not found for ${airportCode}, falling back to score-based fetch.`);
       return this.prisma.driverProfile.findMany({
-        where: { isAvailable: true, isOnline: true, status: 'approved' },
+        where: { isAvailable: true, isOnline: true, status: 'approved', ...(withConsigne ? { OR: [{ consigneEnabled: true }, { driverType: 'internal' }] } : {}) } as any,
         include: { user: { select: { name: true, phone: true } } },
         orderBy: { score: 'desc' },
         take: 20
@@ -117,6 +127,7 @@ export class DispatchService {
             AND is_online = true
             AND latitude IS NOT NULL
             AND longitude IS NOT NULL
+            ${consigneClause}
         ) AS drivers
         WHERE distance_km <= ${PROXIMITY_RADIUS_KM}
         ORDER BY distance_km ASC

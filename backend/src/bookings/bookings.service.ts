@@ -423,7 +423,17 @@ export class BookingsService {
       { departureAirport: dto.departureAirport } as any,
       isPreLanding,
       dispatchCustomCoords,
+      dto.withConsigne,
     );
+
+    // Consigne priority: internal drivers first, then external consigne-enabled
+    if (dto.withConsigne && eligibleDrivers.length > 0) {
+      eligibleDrivers.sort((a: any, b: any) => {
+        const aInternal = a.driverType === 'internal' ? 0 : 1;
+        const bInternal = b.driverType === 'internal' ? 0 : 1;
+        return aInternal - bInternal;
+      });
+    }
 
     // FIX: 2-Phase Dispatch (Confirmation flow)
     // If no nearby drivers found, and it's not a pre-landing flight,

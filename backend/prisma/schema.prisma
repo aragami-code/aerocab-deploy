@@ -64,6 +64,8 @@ model DriverProfile {
   locationUpdatedAt DateTime?                @map("location_updated_at")
   lastActive        DateTime?                @map("last_active")
   verifiedAt        DateTime?                @map("verified_at")
+  driverType        String                   @default("external") @map("driver_type") // "internal" = flotte AeroGo, "external" = partenaire
+  consigneEnabled   Boolean                  @default(false) @map("consigne_enabled") // true = ce chauffeur accepte les demandes de consigne
   createdAt         DateTime                 @default(now()) @map("created_at")
   updatedAt         DateTime                 @updatedAt @map("updated_at")
   bookings          Booking[]
