@@ -233,14 +233,15 @@ model Rating {
 model Report {
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   reporterId     String       @map("reporter_id") @db.Uuid
-  reportedId     String       @map("reported_id") @db.Uuid
+  reportedId     String?      @map("reported_id") @db.Uuid
+  bookingId      String?      @map("booking_id") @db.Uuid
   conversationId String?      @map("conversation_id") @db.Uuid
   reason         String
   status         ReportStatus @default(open)
   resolution     String?
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
-  reported       User         @relation("ReportsReceived", fields: [reportedId], references: [id])
+  reported       User?        @relation("ReportsReceived", fields: [reportedId], references: [id])
   reporter       User         @relation("ReportsSubmitted", fields: [reporterId], references: [id])
 
   @@map("reports")

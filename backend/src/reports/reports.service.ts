@@ -20,14 +20,11 @@ export class ReportsService {
       }
     }
 
-    if (!reportedId) {
-      throw new Error('Impossible d\'identifier la personne signalée');
-    }
-
     const report = await this.prisma.report.create({
       data: {
         reporterId,
-        reportedId,
+        ...(reportedId ? { reportedId } : {}),
+        bookingId: dto.bookingId ?? null,
         reason: dto.reason,
         conversationId: dto.conversationId ?? null,
         status: 'open',
