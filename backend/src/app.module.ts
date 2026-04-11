@@ -9,7 +9,6 @@ import { UsersModule } from './users/users.module';
 import { DriversModule } from './drivers/drivers.module';
 import { AdminModule } from './admin/admin.module';
 import { FlightsModule } from './flights/flights.module';
-import { AccessModule } from './access/access.module';
 import { ChatModule } from './chat/chat.module';
 import { RatingsModule } from './ratings/ratings.module';
 import { BookingsModule } from './bookings/bookings.module';
@@ -36,7 +35,6 @@ import { AuditModule } from './audit/audit.module';
     DriversModule,
     AdminModule,
     FlightsModule,
-    AccessModule,
     ChatModule,
     RatingsModule,
     BookingsModule,

@@ -7,8 +7,6 @@ import { SettingsService } from '../settings/settings.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 
-const ACCESS_DURATION_MS = 48 * 60 * 60 * 1000;
-
 /**
  * Taux de change par rapport au FCFA (XAF).
  * 1 XAF = X <currency>
@@ -230,11 +228,9 @@ export class PaymentsController {
     }
 
     // 2. Vérifier que la transaction existe en DB
-    const txExists = transactionId.startsWith('ACCESS-')
-      ? await this.prisma.accessPass.findFirst({ where: { paymentRef: transactionId }, select: { id: true } })
-      : transactionId.startsWith('WALLET-')
-        ? await this.prisma.transaction.findUnique({ where: { reference: transactionId }, select: { id: true } })
-        : null;
+    const txExists = transactionId.startsWith('WALLET-')
+      ? await this.prisma.transaction.findUnique({ where: { reference: transactionId }, select: { id: true } })
+      : null;
 
     if (!txExists) {
       this.logger.warn(`Webhook ignoré: transaction inconnue ${transactionId}`);
@@ -248,51 +244,28 @@ export class PaymentsController {
       return 'PENDING' as const;
     });
 
-    if (verifiedStatus === 'ACCEPTED') {
-      if (transactionId.startsWith('ACCESS-')) {
-        const passId = transactionId.slice('ACCESS-'.length);
-        const now = new Date();
-        await this.prisma.accessPass
-          .updateMany({
-            where: { id: passId, status: 'pending' },
-            data: {
-              status: 'active',
-              activatedAt: now,
-              expiresAt: new Date(now.getTime() + ACCESS_DURATION_MS),
-            },
-          })
-          .catch((e) => this.logger.error('Erreur activation pass', e.message));
-        this.logger.log(`Pass ${passId} activé`);
-      } else if (transactionId.startsWith('WALLET-')) {
-        const tx = await this.prisma.transaction.findUnique({
-          where: { reference: transactionId },
-          include: { wallet: true },
-        });
+    if (verifiedStatus === 'ACCEPTED' && transactionId.startsWith('WALLET-')) {
+      const tx = await this.prisma.transaction.findUnique({
+        where: { reference: transactionId },
+        include: { wallet: true },
+      });
 
-        if (tx && tx.status === 'pending') {
-          const meta = tx.metadata as any;
-          const fcfaPerPoint = (await this.settings.getFcfaPerPoint()) || 100;
-          const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / fcfaPerPoint);
+      if (tx && tx.status === 'pending') {
+        const meta = tx.metadata as any;
+        const fcfaPerPoint = (await this.settings.getFcfaPerPoint()) || 100;
+        const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / fcfaPerPoint);
 
-          await this.prisma.$transaction([
-            this.prisma.transaction.update({
-              where: { id: tx.id },
-              data: { status: 'completed' },
-            }),
-            this.prisma.wallet.update({
-              where: { id: tx.walletId },
-              data: { balance: { increment: pointsToCredit } },
-            }),
-          ]);
-          this.logger.log(`Wallet ${tx.walletId} crédité de ${pointsToCredit} pts (${tx.amount} FCFA)`);
-        }
-      }
-    } else if (verifiedStatus === 'REFUSED') {
-      if (transactionId.startsWith('ACCESS-')) {
-        const passId = transactionId.slice('ACCESS-'.length);
-        await this.prisma.accessPass
-          .updateMany({ where: { id: passId }, data: { status: 'failed' } })
-          .catch(() => {});
+        await this.prisma.$transaction([
+          this.prisma.transaction.update({
+            where: { id: tx.id },
+            data: { status: 'completed' },
+          }),
+          this.prisma.wallet.update({
+            where: { id: tx.walletId },
+            data: { balance: { increment: pointsToCredit } },
+          }),
+        ]);
+        this.logger.log(`Wallet ${tx.walletId} crédité de ${pointsToCredit} pts (${tx.amount} FCFA)`);
       }
     }
 

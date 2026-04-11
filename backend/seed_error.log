@@ -1,0 +1,26 @@
+Seeding airports...
+PrismaClientInitializationError: 
+Invalid `prisma.airport.upsert()` invocation in
+/home/aragami/aerogo/aerocab-deploy/backend/prisma/seed-airports.ts:120:26
+
+  117 ];
+  118 
+  119 for (const airport of airports) {
+→ 120   await prisma.airport.upsert(
+error: Environment variable not found: DATABASE_URL.
+  -->  schema.prisma:7
+   | 
+ 6 |   provider = "postgresql"
+ 7 |   url      = env("DATABASE_URL")
+   | 
+
+Validation Error Count: 1
+    at ei.handleRequestError (/home/aragami/aerogo/aerocab-deploy/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/RequestHandler.ts:242:13)
+    at ei.handleAndLogRequestError (/home/aragami/aerogo/aerocab-deploy/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/RequestHandler.ts:174:12)
+    at ei.request (/home/aragami/aerogo/aerocab-deploy/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/RequestHandler.ts:143:12)
+    at async a (/home/aragami/aerogo/aerocab-deploy/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:833:24)
+    at async main (/home/aragami/aerogo/aerocab-deploy/backend/prisma/seed-airports.ts:120:5) {
+  clientVersion: '6.19.2',
+  errorCode: undefined,
+  retryable: undefined
+}

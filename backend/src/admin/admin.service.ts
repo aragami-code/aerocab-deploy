@@ -225,8 +225,6 @@ export class AdminService {
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
-      activeAccessPasses,
-      totalRevenue,
       totalBookings,
       pendingBookings,
       activeBookings,
@@ -238,8 +236,6 @@ export class AdminService {
       this.prisma.driverProfile.count(),
       this.prisma.driverProfile.count({ where: { status: 'pending' } }),
       this.prisma.driverProfile.count({ where: { status: 'approved' } }),
-      this.prisma.accessPass.count({ where: { status: 'active' } }),
-      this.prisma.accessPass.aggregate({ where: { status: 'active' }, _sum: { amount: true } }),
       this.prisma.booking.count(),
       this.prisma.booking.count({ where: { status: 'pending' } }),
       this.prisma.booking.count({ where: { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
@@ -253,8 +249,6 @@ export class AdminService {
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
-      activeAccessPasses,
-      totalRevenue: totalRevenue._sum.amount || 0,
       bookings: {
         total: totalBookings,
         pending: pendingBookings,
@@ -380,37 +374,6 @@ export class AdminService {
     };
   }
 
-  // ── Access Passes ────────────────────────────────────
-
-  async getAccessPasses(status?: string, page = 1, limit = 20) {
-    const where = status ? { status: status as any } : {};
-    const skip = (page - 1) * limit;
-
-    const [passes, total] = await Promise.all([
-      this.prisma.accessPass.findMany({
-        where,
-        include: {
-          user: {
-            select: { id: true, phone: true, name: true },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      this.prisma.accessPass.count({ where }),
-    ]);
-
-    return {
-      data: passes,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
-  }
 
   // ── Referrals ─────────────────────────────────────────
 

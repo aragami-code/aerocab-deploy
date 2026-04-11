@@ -24,7 +24,6 @@ model User {
   referredBy             String?             @map("referred_by") @db.Uuid
   referrer               User?               @relation("Referrals", fields: [referredBy], references: [id])
   referrals              User[]              @relation("Referrals")
-  accessPasses           AccessPass[]
   bookings               Booking[]
   driverConversations    Conversation[]      @relation("DriverConversations")
   passengerConversations Conversation[]      @relation("PassengerConversations")
@@ -113,25 +112,6 @@ model Flight {
   @@index([userId])
   @@index([flightNumber])
   @@map("flights")
-}
-
-model AccessPass {
-  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId        String           @map("user_id") @db.Uuid
-  amount        Int              @default(2500)
-  currency      String           @default("XAF")
-  status        AccessPassStatus @default(pending)
-  paymentRef    String?          @map("payment_ref")
-  paymentMethod String?          @map("payment_method")
-  activatedAt   DateTime?        @map("activated_at")
-  expiresAt     DateTime?        @map("expires_at")
-  createdAt     DateTime         @default(now()) @map("created_at")
-  updatedAt     DateTime         @updatedAt @map("updated_at")
-  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, status])
-  @@index([expiresAt])
-  @@map("access_passes")
 }
 
 model Booking {
@@ -408,12 +388,6 @@ enum FlightSource {
   manual
 }
 
-enum AccessPassStatus {
-  pending
-  active
-  expired
-  failed
-}
 
 enum BookingType {
   ARRIVAL        // À l'aéroport → destination

@@ -91,21 +91,6 @@ export class AdminController {
     );
   }
 
-  // ── Access Passes ────────────────────────────────────
-
-  @Get('access-passes')
-  async getAccessPasses(
-    @Query('status') status?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
-  ) {
-    return this.adminService.getAccessPasses(
-      status,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 20,
-    );
-  }
-
   // ── Referrals ─────────────────────────────────────────
 
   @Get('referrals')
