@@ -3,6 +3,15 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { CreateFlightDto } from './dto';
 
+// Mapping statuts FR24 → statuts internes
+const FR24_STATUS_MAP: Record<string, string> = {
+  'SCHEDULED':  'scheduled',
+  'EN-ROUTE':   'active',
+  'LANDED':     'landed',
+  'CANCELLED':  'cancelled',
+  'DIVERTED':   'diverted',
+};
+
 @Injectable()
 export class FlightsService {
   constructor(
@@ -11,179 +20,83 @@ export class FlightsService {
   ) {}
 
   /**
-   * Search flight info using AeroDataBox (primary) or local mock
+   * Recherche les infos d'un vol via FlightRadar24 flight-summaries
+   * Remplace AeroDataBox
    */
   async searchFlight(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
-    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
+    const token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
 
-    if (!aeroDataBoxKey) {
-      // Mock response for development if no API key is provided
-      console.warn(`[FlightsService] No AeroDataBox API key found. Returning mock data for ${normalized}.`);
+    if (!token) {
+      console.warn(`[FlightsService] Pas de FLIGHT_RADAR_TOKEN. Mock pour ${normalized}.`);
       return this.getMockFlightInfo(normalized);
     }
 
     try {
-      // We use the existing getAeroDataBoxFlight method for consistency
-      const flight = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
+      const res = await fetch(
+        `https://fr24api.flightradar24.com/api/flight-summaries/light?flights=${normalized}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+          },
+        },
+      );
 
-      if (!flight) {
+      if (!res.ok) {
+        console.error(`[FlightsService] FR24 flight-summaries erreur: ${res.status}`);
         return null;
       }
 
+      const data = await res.json() as { data?: any[] };
+      if (!data.data?.length) return null;
+
+      // Priorité : EN-ROUTE > SCHEDULED > premier résultat
+      const f = data.data.find((d: any) => d.status === 'EN-ROUTE')
+             ?? data.data.find((d: any) => d.status === 'SCHEDULED')
+             ?? data.data[0];
+
+      const arrivalAirport = (f.dest_iata ?? 'DLA').toUpperCase();
+      const scheduledArrival = f.estimated_arrival ?? f.scheduled_arrival;
+
+      if (!scheduledArrival) return null;
+
       return {
-        flightNumber: flight.flightNumber,
-        airline: flight.airline.name,
-        origin: flight.departure.airport 
-          ? `${flight.departure.airport} (${flight.departure.iata})`
-          : flight.departure.iata,
-        destination: flight.arrival.airport
-          ? `${flight.arrival.airport} (${flight.arrival.iata})`
-          : flight.arrival.iata,
-        arrivalAirport: flight.arrival.iata?.trim().toUpperCase() ?? 'DLA',
-        scheduledArrival: flight.arrival.scheduled || flight.arrival.estimated,
-        status: flight.status,
+        flightNumber: f.flight ?? normalized,
+        airline: f.airline_iata ?? null,
+        origin: f.orig_iata ?? null,
+        destination: f.dest_iata ?? null,
+        arrivalAirport,
+        scheduledArrival,
+        actualArrival: f.actual_arrival ?? null,
+        status: FR24_STATUS_MAP[f.status] ?? 'scheduled',
         source: 'api' as const,
       };
     } catch (error) {
-      console.error(`[FlightsService] Error searching flight ${normalized} via AeroDataBox:`, error);
+      console.error(`[FlightsService] Erreur searchFlight ${normalized}:`, error);
       return null;
     }
   }
 
-  /* AviationStack code commented out as requested
-  async searchFlightAviationStack(flightNumber: string) {
-    const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
-    const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
-
-    if (!apiKey) return this.getMockFlightInfo(normalized);
-
-    try {
-      const response = await fetch(
-        `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${normalized}`,
-      );
-      const data = await response.json();
-      if (!data.data || data.data.length === 0) return null;
-
-      const flight = data.data[0];
-      return {
-        flightNumber: flight.flight.iata,
-        airline: flight.airline.name,
-        origin: `${flight.departure.airport} (${flight.departure.iata})`,
-        destination: `${flight.arrival.airport} (${flight.arrival.iata})`,
-        arrivalAirport: flight.arrival.iata?.trim().toUpperCase() ?? 'DLA',
-        scheduledArrival: flight.arrival.scheduled || flight.arrival.estimated,
-        status: flight.flight_status,
-        source: 'api' as const,
-      };
-    } catch {
-      return null;
-    }
-  }
-  */
-
   /**
-   * Create a flight record for a user
-   */
-  async createFlight(userId: string, dto: CreateFlightDto) {
-    return this.prisma.flight.create({
-      data: {
-        userId,
-        flightNumber: dto.flightNumber?.replace(/\s/g, '').toUpperCase() || null,
-        airline: dto.airline || null,
-        origin: dto.origin || null,
-        destination: dto.destination || null,
-        arrivalAirport: dto.arrivalAirport,
-        scheduledArrival: new Date(dto.scheduledArrival),
-        source: dto.source || 'manual',
-      },
-    });
-  }
-
-  /**
-   * Get all flights for a user (most recent first)
-   */
-  async getUserFlights(userId: string) {
-    return this.prisma.flight.findMany({
-      where: { userId },
-      orderBy: { scheduledArrival: 'desc' },
-    });
-  }
-
-  /**
-   * Get a specific flight by ID
-   */
-  async getFlightById(flightId: string) {
-    const flight = await this.prisma.flight.findUnique({
-      where: { id: flightId },
-      include: {
-        user: {
-          select: { id: true, name: true, phone: true },
-        },
-      },
-    });
-
-    if (!flight) {
-      throw new NotFoundException('Vol non trouve');
-    }
-
-    return flight;
-  }
-
-  /**
-   * Get the active flight for a user (next upcoming)
-   */
-  async getActiveFlight(userId: string) {
-    return this.prisma.flight.findFirst({
-      where: {
-        userId,
-        scheduledArrival: { gte: new Date() },
-      },
-      orderBy: { scheduledArrival: 'asc' },
-    });
-  }
-
-  /**
-   * Delete a flight
-   */
-  async deleteFlight(userId: string, flightId: string) {
-    const flight = await this.prisma.flight.findFirst({
-      where: { id: flightId, userId },
-    });
-
-    if (!flight) {
-      throw new NotFoundException('Vol non trouve');
-    }
-
-    await this.prisma.flight.delete({ where: { id: flightId } });
-    return { message: 'Vol supprime' };
-  }
-
-  /**
-   * GET /flights/live/:flightNumber
-   * Infos statiques via AeroDataBox + position live via FlightRadar24 (fallback OpenSky)
+   * Infos complètes + position live d'un vol (pour tracking passager/driver)
    */
   async getLiveFlightDetails(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
-    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
+    const token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
+    if (!token) return null;
 
-    if (!aeroDataBoxKey) return null;
+    const [summary, live] = await Promise.all([
+      this.searchFlight(normalized),
+      this.getFlightRadar24Position(normalized, token),
+    ]);
 
-    const staticData = await this.getAeroDataBoxFlight(normalized, aeroDataBoxKey);
-    if (!staticData) return null;
-
-    // Position live via FlightRadar24
-    const fr24Token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
-    const live = fr24Token
-      ? await this.getFlightRadar24Position(normalized, fr24Token)
-      : null;
-
-    const { callSign, ...rest } = staticData;
-    return { ...rest, live };
+    if (!summary) return null;
+    return { ...summary, live };
   }
 
   /**
-   * Récupère la position live d'un vol via FlightRadar24 API officielle
+   * Position live via FR24 (latitude, longitude, altitude, vitesse, cap)
    */
   private async getFlightRadar24Position(flightNumber: string, token: string): Promise<{
     latitude: number; longitude: number; altitude: number;
@@ -206,12 +119,12 @@ export class FlightsService {
 
       const f = data.data[0];
       return {
-        latitude: f.lat,
-        longitude: f.lon,
-        altitude: f.alt ?? 0,
+        latitude:        f.lat,
+        longitude:       f.lon,
+        altitude:        f.alt ?? 0,
         speedHorizontal: f.gspeed ?? 0,
-        direction: f.track ?? 0,
-        isGround: f.on_ground ?? false,
+        direction:       f.track ?? 0,
+        isGround:        f.on_ground ?? false,
         updatedAt: new Date((f.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
       };
     } catch {
@@ -220,130 +133,77 @@ export class FlightsService {
   }
 
   /**
-   * Récupère les infos complètes d'un vol via AeroDataBox (RapidAPI)
+   * Create a flight record for a user
    */
-  private async getAeroDataBoxFlight(flightNumber: string, apiKey: string) {
-    try {
-      const res = await fetch(
-        `https://aerodatabox.p.rapidapi.com/flights/number/${flightNumber}`,
-        {
-          headers: {
-            'X-RapidAPI-Key': apiKey,
-            'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com',
-          },
-        },
-      );
-      if (!res.ok) return null;
+  async createFlight(userId: string, dto: CreateFlightDto) {
+    return this.prisma.flight.create({
+      data: {
+        userId,
+        flightNumber: dto.flightNumber?.replace(/\s/g, '').toUpperCase() || null,
+        airline:      dto.airline || null,
+        origin:       dto.origin || null,
+        destination:  dto.destination || null,
+        arrivalAirport:  dto.arrivalAirport,
+        scheduledArrival: new Date(dto.scheduledArrival),
+        source: dto.source || 'manual',
+      },
+    });
+  }
 
-      const data = await res.json() as any[];
-      if (!Array.isArray(data) || !data.length) return null;
+  async getUserFlights(userId: string) {
+    return this.prisma.flight.findMany({
+      where: { userId },
+      orderBy: { scheduledArrival: 'desc' },
+    });
+  }
 
-      // Prioriser le vol en cours, sinon scheduled
-      const f = data.find((d: any) => d.status === 'EnRoute')
-             ?? data.find((d: any) => d.status === 'Departed')
-             ?? data.find((d: any) => d.status === 'Scheduled')
-             ?? data[0];
+  async getFlightById(flightId: string) {
+    const flight = await this.prisma.flight.findUnique({
+      where: { id: flightId },
+      include: { user: { select: { id: true, name: true, phone: true } } },
+    });
+    if (!flight) throw new NotFoundException('Vol non trouvé');
+    return flight;
+  }
 
-      const statusMap: Record<string, string> = {
-        EnRoute: 'active', Departed: 'active', Arrived: 'landed',
-        Scheduled: 'scheduled', Canceled: 'cancelled', Diverted: 'diverted',
-      };
+  async getActiveFlight(userId: string) {
+    return this.prisma.flight.findFirst({
+      where: { userId, scheduledArrival: { gte: new Date() } },
+      orderBy: { scheduledArrival: 'asc' },
+    });
+  }
 
-      const toIso = (t?: string | null) => t ? new Date(t).toISOString() : null;
-
-      return {
-        flightNumber: f.number ?? flightNumber,
-        flightIcao: f.callSign ?? null,
-        callSign: f.callSign ?? null,
-        status: statusMap[f.status] ?? 'scheduled',
-        airline: {
-          name: f.airline?.name ?? null,
-          iata: f.airline?.iata ?? null,
-          icao: f.airline?.icao ?? null,
-        },
-        aircraft: {
-          type: f.aircraft?.model ?? null,
-          icao: null,
-          registration: f.aircraft?.reg ?? null,
-        },
-        departure: {
-          airport: f.departure?.airport?.name ?? null,
-          iata: f.departure?.airport?.iata ?? null,
-          terminal: f.departure?.terminal ?? null,
-          gate: f.departure?.gate ?? null,
-          scheduled: toIso(f.departure?.scheduledTime?.utc),
-          actual: toIso(f.departure?.actualTime?.utc),
-          delay: f.departure?.delay ?? 0,
-        },
-        arrival: {
-          airport: f.arrival?.airport?.name ?? null,
-          iata: f.arrival?.airport?.iata ?? null,
-          terminal: f.arrival?.terminal ?? null,
-          baggage: f.arrival?.baggageBelt ?? null,
-          scheduled: toIso(f.arrival?.scheduledTime?.utc),
-          estimated: toIso(f.arrival?.estimatedTime?.utc),
-          actual: toIso(f.arrival?.actualTime?.utc),
-          delay: f.arrival?.delay ?? 0,
-        },
-      };
-    } catch {
-      return null;
-    }
+  async deleteFlight(userId: string, flightId: string) {
+    const flight = await this.prisma.flight.findFirst({ where: { id: flightId, userId } });
+    if (!flight) throw new NotFoundException('Vol non trouvé');
+    await this.prisma.flight.delete({ where: { id: flightId } });
+    return { message: 'Vol supprimé' };
   }
 
   /**
-   * Récupère la position live d'un vol via OpenSky Network (gratuit, sans clé)
-   * callsign = code ICAO du vol, ex: "AFR946"
-   */
-  /**
-   * Mock flight data for development
+   * Mock pour développement sans token FR24
    */
   private getMockFlightInfo(flightNumber: string) {
     const airlines: Record<string, string> = {
-      AF: 'Air France',
-      TK: 'Turkish Airlines',
-      ET: 'Ethiopian Airlines',
-      CM: 'Camair-Co',
-      QC: 'Camair-Co',
-      RW: 'RwandAir',
-      KQ: 'Kenya Airways',
-      SA: 'South African Airways',
-      W3: 'Arik Air',
+      AF: 'Air France', TK: 'Turkish Airlines', ET: 'Ethiopian Airlines',
+      CM: 'Camair-Co', QC: 'Camair-Co', RW: 'RwandAir', KQ: 'Kenya Airways',
     };
-
     const prefix = flightNumber.slice(0, 2);
-    const airline = airlines[prefix] || 'Unknown Airline';
-
-    // Generate a realistic arrival time (2-12 hours from now)
     const hoursFromNow = Math.floor(Math.random() * 10) + 2;
     const arrival = new Date();
     arrival.setHours(arrival.getHours() + hoursFromNow);
     arrival.setMinutes(Math.floor(Math.random() * 4) * 15);
     arrival.setSeconds(0);
 
-    const airports = ['DLA', 'NSI'];
-    const arrivalAirport = airports[Math.floor(Math.random() * airports.length)];
-    const airportNames: Record<string, string> = {
-      DLA: 'Douala International Airport',
-      NSI: 'Yaounde Nsimalen International Airport',
-    };
-
-    const origins = [
-      'Paris Charles de Gaulle (CDG)',
-      'Istanbul (IST)',
-      'Addis Ababa (ADD)',
-      'Nairobi (NBO)',
-      'Lagos (LOS)',
-      'Casablanca (CMN)',
-    ];
-
+    const arrivalAirport = Math.random() > 0.5 ? 'DLA' : 'NSI';
     return {
       flightNumber,
-      airline,
-      origin: origins[Math.floor(Math.random() * origins.length)],
-      destination: `${airportNames[arrivalAirport]} (${arrivalAirport})`,
+      airline: airlines[prefix] ?? 'Unknown Airline',
+      origin: 'Paris Charles de Gaulle (CDG)',
+      destination: arrivalAirport === 'DLA' ? 'Douala International (DLA)' : 'Yaoundé Nsimalen (NSI)',
       arrivalAirport,
       scheduledArrival: arrival.toISOString(),
+      actualArrival: null,
       status: 'scheduled',
       source: 'api' as const,
     };

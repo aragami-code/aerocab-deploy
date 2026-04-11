@@ -17,9 +17,8 @@ export class FlightsScheduler {
   // Toutes les 10 minutes — met à jour les vols pas encore atterris
   @Cron(CronExpression.EVERY_10_MINUTES)
   async syncFlightStatuses() {
-    // On vérifie maintenant la clé AeroDataBox
-    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
-    if (!aeroDataBoxKey) return; 
+    const token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
+    if (!token) return;
 
     const now = new Date();
     const cutoff = new Date(now.getTime() + 6 * 60 * 60 * 1000); // 6h à l'avance max
@@ -32,12 +31,12 @@ export class FlightsScheduler {
         scheduledArrival: { lte: cutoff },
         source: 'api',
       },
-      take: 20, // max 20 par batch pour éviter de dépasser les quotas RapidAPI
+      take: 20, // max 20 par batch pour éviter de dépasser les quotas FR24
     });
 
     if (flights.length === 0) return;
 
-    this.logger.log(`[FlightsScheduler] Syncing ${flights.length} flights via AeroDataBox...`);
+    this.logger.log(`[FlightsScheduler] Syncing ${flights.length} flights via FlightRadar24...`);
 
     for (const flight of flights) {
       if (!flight.flightNumber) continue;
@@ -45,12 +44,11 @@ export class FlightsScheduler {
         const info = await this.flightsService.searchFlight(flight.flightNumber);
         if (!info) continue;
 
-        // Si le statut indique que l'avion est arriv (selon les rgles de FlightsService/AeroDataBox)
-        if (info.status === 'Arrived' || info.status === 'Landed') {
+        if (info.status === 'landed') {
           await this.prisma.flight.update({
             where: { id: flight.id },
-            data: { 
-              actualArrival: info.scheduledArrival ? new Date(info.scheduledArrival) : new Date(),
+            data: {
+              actualArrival: info.actualArrival ? new Date(info.actualArrival) : new Date(),
             },
           });
           this.logger.log(`[FlightsScheduler] Flight ${flight.flightNumber} marked as landed.`);
