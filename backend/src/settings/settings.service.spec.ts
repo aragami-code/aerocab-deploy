@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { SettingsService } from './settings.service';
 import { PrismaService } from '../database/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
 const mockPrisma = {
   appSetting: {
@@ -8,6 +9,12 @@ const mockPrisma = {
     findMany: jest.fn(),
     upsert: jest.fn(),
   },
+};
+
+const mockRedis = {
+  get: jest.fn().mockResolvedValue(null),
+  set: jest.fn().mockResolvedValue(undefined),
+  del: jest.fn().mockResolvedValue(undefined),
 };
 
 describe('SettingsService', () => {
@@ -18,10 +25,15 @@ describe('SettingsService', () => {
       providers: [
         SettingsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: RedisService, useValue: mockRedis },
       ],
     }).compile();
     service = module.get<SettingsService>(SettingsService);
-    jest.clearAllMocks();
+    jest.resetAllMocks();
+    // restore Redis defaults after reset
+    mockRedis.get.mockResolvedValue(null);
+    mockRedis.set.mockResolvedValue(undefined);
+    mockRedis.del.mockResolvedValue(undefined);
   });
 
   describe('isProximityAssignmentEnabled', () => {

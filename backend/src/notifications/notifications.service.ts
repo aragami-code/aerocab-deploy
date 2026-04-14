@@ -17,19 +17,32 @@ export class NotificationsService implements OnModuleInit {
       return;
     }
 
-    // Cherche le fichier service account (local ou via variable d'env)
-    const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
+    // 0.B20 — Priorité : vars individuelles → JSON complet → fichier local (à ne PAS commiter)
+    const projectId  = process.env.FIREBASE_PROJECT_ID;
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const serviceAccountEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
+    const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
 
     try {
       let credential: admin.credential.Credential;
 
-      if (serviceAccountEnv) {
-        // Render : clé en variable d'env JSON
-        const parsed = JSON.parse(serviceAccountEnv);
-        credential = admin.credential.cert(parsed);
+      if (projectId && privateKey && clientEmail) {
+        // Option 1 : 3 vars individuelles (recommandé)
+        credential = admin.credential.cert({ projectId, privateKey, clientEmail });
+      } else if (serviceAccountEnv) {
+        // Option 2 : JSON complet en une seule var
+        credential = admin.credential.cert(JSON.parse(serviceAccountEnv));
       } else if (fs.existsSync(serviceAccountPath)) {
-        // Local : fichier JSON
+        // Option 3 : fichier local — INTERDIT en production
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error(
+            '[FATAL] firebase-service-account.json détecté en production. ' +
+            'Utiliser FIREBASE_PROJECT_ID + FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL (env vars). ' +
+            'Supprimer le fichier du serveur immédiatement.',
+          );
+        }
+        this.logger.warn('[Security] firebase-service-account.json trouvé sur disque — à déplacer en env vars');
         credential = admin.credential.cert(serviceAccountPath);
       } else {
         this.logger.warn('Firebase service account non configuré — notifications désactivées');

@@ -2,12 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { Prisma } from '@prisma/client';
 import { CreateAirportDto, UpdateAirportDto } from './dto/airport.dto';
+import { RedisService } from '../redis/redis.service';
+
+const CONFIG_CACHE_KEY = 'config:cache';
 
 @Injectable()
 export class AirportsService {
   private readonly logger = new Logger(AirportsService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private redis: RedisService,
+  ) {}
 
   async findAll() {
     return this.prisma.airport.findMany({
@@ -34,7 +40,7 @@ export class AirportsService {
   }
 
   async update(id: string, data: UpdateAirportDto) {
-    return this.prisma.airport.update({
+    const result = await this.prisma.airport.update({
       where: { id },
       data: {
         ...data,
@@ -43,12 +49,14 @@ export class AirportsService {
         countryCode: data.countryCode?.toUpperCase(),
       },
     });
+    await this.redis.del(CONFIG_CACHE_KEY);
+    return result;
   }
 
   async remove(id: string) {
-    return this.prisma.airport.delete({
-      where: { id },
-    });
+    const result = await this.prisma.airport.delete({ where: { id } });
+    await this.redis.del(CONFIG_CACHE_KEY);
+    return result;
   }
 
   async findByCode(iataCode: string) {

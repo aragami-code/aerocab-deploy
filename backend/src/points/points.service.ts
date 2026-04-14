@@ -39,15 +39,50 @@ export class PointsService {
     });
   }
 
-  // Déduit des points avec vérification du solde — lève BadRequestException si insuffisant
+  // Déduit des points avec vérification du solde — lève BadRequestException si insuffisant.
+  // H2 — Le check balance et le débit sont dans la même $transaction pour éviter le double-spend :
+  // deux appels concurrents sur le même userId ne peuvent pas tous les deux passer le check
+  // puis débiter (Postgres sérialise les lectures/écritures dans la transaction).
   async deductPoints(userId: string, points: number, label: string): Promise<void> {
-    const { balance } = await this.getBalance(userId);
+    await this.prisma.$transaction(async (tx) => {
+      const result = await tx.pointsTransaction.aggregate({
+        where: { userId },
+        _sum: { points: true },
+      });
+      const balance = result._sum.points ?? 0;
+
+      if (balance < points) {
+        throw new BadRequestException(
+          `Solde de points insuffisant : ${balance} pts disponibles, ${points} pts requis`,
+        );
+      }
+
+      await tx.pointsTransaction.create({
+        data: { userId, type: 'debit', points: -points, label },
+      });
+    });
+  }
+
+  // Variante utilisable depuis l'intérieur d'une transaction existante (évite transaction imbriquée)
+  async deductPointsTx(
+    tx: Omit<import('@prisma/client').PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
+    userId: string,
+    points: number,
+    label: string,
+  ): Promise<void> {
+    const result = await tx.pointsTransaction.aggregate({
+      where: { userId },
+      _sum: { points: true },
+    });
+    const balance = result._sum.points ?? 0;
+
     if (balance < points) {
       throw new BadRequestException(
         `Solde de points insuffisant : ${balance} pts disponibles, ${points} pts requis`,
       );
     }
-    await this.prisma.pointsTransaction.create({
+
+    await tx.pointsTransaction.create({
       data: { userId, type: 'debit', points: -points, label },
     });
   }

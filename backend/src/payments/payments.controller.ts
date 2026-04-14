@@ -337,29 +337,36 @@ export class PaymentsController {
     return { received: true };
   }
 
-  /** Crédite le wallet en points depuis une référence de transaction pending */
+  /** Crédite le wallet en points depuis une référence de transaction pending.
+   *  Idempotent : l'updateMany atomique garantit qu'un seul webhook concurrent
+   *  peut passer status pending→completed (les suivants trouvent count=0 et s'arrêtent).
+   */
   private async creditWalletFromTransaction(reference: string): Promise<void> {
+    // Lecture préalable pour récupérer les métadonnées et le walletId
     const tx = await this.prisma.transaction.findUnique({
       where: { reference },
-      include: { wallet: true },
     });
-
-    if (!tx || tx.status !== 'pending') return;
+    if (!tx) return;
 
     const meta = tx.metadata as any;
     const tariffs = await this.settings.getTariffs();
     const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
 
-    await this.prisma.$transaction([
-      this.prisma.transaction.update({
-        where: { id: tx.id },
-        data: { status: 'completed' },
-      }),
-      this.prisma.wallet.update({
-        where: { id: tx.walletId },
-        data: { balance: { increment: pointsToCredit } },
-      }),
-    ]);
+    // Mise à jour atomique avec condition status=pending → garantit l'idempotence
+    // (un retry concurrent trouvera count=0 et ne créditera pas deux fois)
+    const { count } = await this.prisma.transaction.updateMany({
+      where: { id: tx.id, status: 'pending' },
+      data: { status: 'completed' },
+    });
+    if (count === 0) {
+      this.logger.warn(`Webhook duplicate ou déjà traité : ${reference}`);
+      return;
+    }
+
+    await this.prisma.wallet.update({
+      where: { id: tx.walletId },
+      data: { balance: { increment: pointsToCredit } },
+    });
     this.logger.log(`Wallet ${tx.walletId} crédité de ${pointsToCredit} pts via ${reference}`);
   }
 

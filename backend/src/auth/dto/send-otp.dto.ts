@@ -1,4 +1,4 @@
-import { IsString, Matches } from 'class-validator';
+import { IsString, IsOptional, IsIn, Matches } from 'class-validator';
 
 export class SendOtpDto {
   @IsString()
@@ -6,4 +6,9 @@ export class SendOtpDto {
     message: 'Phone must be in international format (e.g. +237612345678)',
   })
   phone!: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['fr', 'en', 'zh', 'pidgin'])
+  lang?: string;
 }

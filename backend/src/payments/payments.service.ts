@@ -1,13 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-// Nouvelle API CinetPay (Bearer auth, sans site_id)
-const CINETPAY_URL = 'https://api-checkout.cinetpay.com/v2/payment';
-const CINETPAY_CHECK_URL = 'https://api-checkout.cinetpay.com/v2/payment/check';
+// 0.B10 — URLs externalisées via env vars (avec fallback sur les URLs officielles)
 
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+
+  private get cinetpayUrl(): string {
+    return this.config.get('CINETPAY_URL', 'https://api-checkout.cinetpay.com/v2/payment');
+  }
+  private get cinetpayCheckUrl(): string {
+    return this.config.get('CINETPAY_CHECK_URL', 'https://api-checkout.cinetpay.com/v2/payment/check');
+  }
 
   constructor(private config: ConfigService) {}
 
@@ -23,7 +28,7 @@ export class PaymentsService {
     const apiKey = this.config.get<string>('CINETPAY_API_KEY');
     const siteId = this.config.get<string>('CINETPAY_SITE_ID');
     const backendUrl = this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com');
-    const appScheme = 'aerogo24-passenger';
+    const appScheme = this.config.get('PAYMENT_RETURN_SCHEME', 'aerogo24-passenger');
 
     const nameParts = (params.customerName || 'Client AeroGo 24').trim().split(' ');
     const surname = nameParts[0] || 'Client';
@@ -52,7 +57,7 @@ export class PaymentsService {
         customer_phone_number: params.customerPhone || '',
         channels: params.channels ?? 'MOBILE_MONEY',
       };
-      res = await fetch(CINETPAY_URL, {
+      res = await fetch(this.cinetpayUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -71,7 +76,7 @@ export class PaymentsService {
         customer_phone_number: params.customerPhone || '',
         channels: params.channels ?? 'MOBILE_MONEY',
       };
-      res = await fetch(CINETPAY_URL, {
+      res = await fetch(this.cinetpayUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -117,11 +122,11 @@ export class PaymentsService {
     let res: Response;
     if (siteId) {
       res = await fetch(
-        `${CINETPAY_CHECK_URL}?apikey=${apiKey}&site_id=${siteId}&transaction_id=${encodeURIComponent(transactionId)}`,
+        `${this.cinetpayCheckUrl}?apikey=${apiKey}&site_id=${siteId}&transaction_id=${encodeURIComponent(transactionId)}`,
       );
     } else {
       res = await fetch(
-        `${CINETPAY_CHECK_URL}?transaction_id=${encodeURIComponent(transactionId)}`,
+        `${this.cinetpayCheckUrl}?transaction_id=${encodeURIComponent(transactionId)}`,
         { headers: { 'Authorization': `Bearer ${apiKey}` } },
       );
     }

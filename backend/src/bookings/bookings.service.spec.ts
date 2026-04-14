@@ -11,6 +11,7 @@ import { PricingService } from './pricing.service';
 import { DispatchService } from './dispatch.service';
 import { ConfigService } from '@nestjs/config';
 import { FlightsService } from '../flights/flights.service';
+import { AuditService } from '../audit/audit.service';
 
 const mockPrisma = {
   booking: {
@@ -30,6 +31,7 @@ const mockPrisma = {
   driverPosition: {
     findMany: jest.fn(),
   },
+  airport: { findUnique: jest.fn() },
   flight: { findFirst: jest.fn() },
   wallet: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
   pointsTransaction: { aggregate: jest.fn(), create: jest.fn() },
@@ -46,6 +48,8 @@ const mockPoints = {
 const mockSettings = {
   isProximityAssignmentEnabled: jest.fn().mockResolvedValue(false),
   getTariffs: jest.fn(),
+  getTariffsByCountry: jest.fn(),
+  get: jest.fn().mockResolvedValue('80'),
 };
 const mockPromos = { validatePromo: jest.fn().mockResolvedValue(null) };
 const mockGateway = {
@@ -60,6 +64,7 @@ const mockDispatch = {
 };
 const mockConfig = { get: jest.fn().mockReturnValue('mock-value') };
 const mockFlights = { searchFlight: jest.fn().mockResolvedValue(null) };
+const mockAudit = { log: jest.fn().mockResolvedValue(undefined) };
 
 describe('BookingsService', () => {
   let service: BookingsService;
@@ -78,13 +83,14 @@ describe('BookingsService', () => {
         { provide: DispatchService, useValue: mockDispatch },
         { provide: ConfigService, useValue: mockConfig },
         { provide: FlightsService, useValue: mockFlights },
+        { provide: AuditService, useValue: mockAudit },
       ],
     }).compile();
 
     service = module.get<BookingsService>(BookingsService);
     jest.clearAllMocks();
     mockSettings.isProximityAssignmentEnabled.mockResolvedValue(false);
-    mockSettings.getTariffs.mockResolvedValue({
+    const mockTariffs = {
       startupFee: 500,
       basePricePerKm: 250,
       vehicles: {
@@ -103,7 +109,10 @@ describe('BookingsService', () => {
       consigne: {
         eco: { dailyRate: 8000 },
       },
-    });
+    };
+    mockSettings.getTariffs.mockResolvedValue(mockTariffs);
+    mockSettings.getTariffsByCountry.mockResolvedValue(mockTariffs);
+    mockPrisma.airport.findUnique.mockResolvedValue({ latitude: 4.0061, longitude: 9.7197, countryCode: 'CM' });
     mockPrisma.pointsTransaction.aggregate.mockResolvedValue({ _sum: { points: 1000000 } });
     mockPrisma.wallet.findUnique.mockResolvedValue({ id: 'w-1', balance: 0 });
     mockPrisma.wallet.create.mockResolvedValue({ id: 'w-1', balance: 0 });
@@ -134,6 +143,9 @@ describe('BookingsService', () => {
         vehicleType: 'eco',
         departureAirport: 'DLA',
         destination: 'Bonanjo',
+        // DLA(4.0061,9.7197) → Bonanjo(4.1410,9.7197) = exactly 15km due north
+        destLat: 4.1410,
+        destLng: 9.7197,
         paymentMethod: 'cash',
       } as any);
 
@@ -154,11 +166,18 @@ describe('BookingsService', () => {
         vehicleType: 'standard',
         departureAirport: 'DLA',
         destination: 'Bonanjo',
+        destLat: 4.1410,
+        destLng: 9.7197,
         paymentMethod: 'points',
       } as any);
 
-      // 15km * 350 * 1.2 + 500 = 6800 FCFA => 68 points
-      expect(mockPoints.deductPoints).toHaveBeenCalledWith('user-1', 68, expect.any(String));
+      // max(5000, 500 + 15*350*1.2) = max(5000, 6800) = 6800 FCFA (pointValue default=1)
+      // payment via prisma transaction (not PointsService.deductPoints)
+      expect(mockPrisma.pointsTransaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: 'debit', points: -6800 }),
+        }),
+      );
     });
 
     it('should correctly handle DEPARTURE mode towards DLA airport', async () => {
@@ -308,10 +327,9 @@ describe('BookingsService', () => {
   // ── completeRide ───────────────────────────────────────────────────────────
 
   describe('completeRide', () => {
-    it('should use $transaction for atomic booking + driver update', async () => {
-      mockPrisma.driverProfile.findUnique
-        .mockResolvedValueOnce({ id: 'drv-1' })
-        .mockResolvedValueOnce({ userId: 'u-drv-1' });
+    it('should use $transaction and return passenger_confirming status', async () => {
+      // Phase 5 : completeRide → status = passenger_confirming (attente confirmation passager)
+      mockPrisma.driverProfile.findUnique.mockResolvedValue({ id: 'drv-1' });
       mockPrisma.booking.findUnique.mockResolvedValue({
         id: 'b-1',
         driverProfileId: 'drv-1',
@@ -319,18 +337,18 @@ describe('BookingsService', () => {
         status: 'in_progress',
         estimatedPrice: 7000,
       });
-      mockPrisma.$transaction.mockResolvedValue([
-        { id: 'b-1', status: 'completed' },
-        { id: 'drv-1' },
-      ]);
+      // $transaction appelé avec un tableau (pas un callback) → résout silencieusement
+      mockPrisma.$transaction.mockResolvedValue([undefined, undefined]);
 
       const result = await service.completeRide('driver-user-1', 'b-1');
 
       expect(mockPrisma.$transaction).toHaveBeenCalled();
-      expect(result.status).toBe('completed');
+      expect(result.status).toBe('passenger_confirming');
     });
 
     it('should throw BadRequestException if ride is not in_progress', async () => {
+      // Réinitialiser explicitement pour éviter la queue des Once du test précédent
+      mockPrisma.driverProfile.findUnique.mockReset();
       mockPrisma.driverProfile.findUnique.mockResolvedValue({ id: 'drv-1' });
       mockPrisma.booking.findUnique.mockResolvedValue({
         id: 'b-1',
@@ -341,6 +359,20 @@ describe('BookingsService', () => {
       });
 
       await expect(service.completeRide('driver-user-1', 'b-1')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw ForbiddenException if driver does not own the booking', async () => {
+      mockPrisma.driverProfile.findUnique.mockReset();
+      mockPrisma.driverProfile.findUnique.mockResolvedValue({ id: 'drv-OTHER' });
+      mockPrisma.booking.findUnique.mockResolvedValue({
+        id: 'b-1',
+        driverProfileId: 'drv-1',
+        passengerId: 'p-1',
+        status: 'in_progress',
+        estimatedPrice: 7000,
+      });
+
+      await expect(service.completeRide('driver-user-1', 'b-1')).rejects.toThrow(ForbiddenException);
     });
   });
 

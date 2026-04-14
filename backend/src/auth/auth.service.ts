@@ -8,7 +8,9 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { SmsService } from './sms.service';
+import { OtpDeliveryService } from '../otp/otp-delivery.service';
+import { SettingsService } from '../settings/settings.service';
+import { maskPhone } from '../common/helpers';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -18,7 +20,7 @@ import {
 const OTP_TTL = OTP_EXPIRY_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_TTL = OTP_COOLDOWN_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_MAX = OTP_MAX_ATTEMPTS;
-const REFRESH_TOKEN_TTL = 90 * 24 * 60 * 60; // 90 days
+const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days
 
 @Injectable()
 export class AuthService {
@@ -29,11 +31,24 @@ export class AuthService {
     private redis: RedisService,
     private jwt: JwtService,
     private config: ConfigService,
-    private sms: SmsService,
+    private sms: OtpDeliveryService,
+    private settings: SettingsService,
   ) {}
 
-  async sendOtp(phone: string): Promise<{ message: string; expiresIn: number }> {
-    // Check rate limit
+  async sendOtp(phone: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
+    // H6 — Rate limit global : empêche le spam via milliers de numéros différents.
+    // Compteur global glissant sur 60s, seuil configurable (défaut : 500 req/min).
+    const globalKey = 'otp_global_rate';
+    const globalCount = await this.redis.incr(globalKey);
+    if (globalCount === 1) {
+      await this.redis.expire(globalKey, 60); // fenêtre 60s
+    }
+    const globalMax = parseInt(await this.redis.get('otp_global_limit') ?? '500', 10) || 500;
+    if (globalCount > globalMax) {
+      throw new BadRequestException('Service temporairement surchargé. Veuillez réessayer dans une minute.');
+    }
+
+    // Rate limit par numéro
     const rateKey = `otp_rate:${phone}`;
     const currentCount = await this.redis.get(rateKey);
     const count = currentCount ? parseInt(currentCount, 10) : 0;
@@ -45,10 +60,21 @@ export class AuthService {
       );
     }
 
-    // Generate 6-digit OTP (fixed in dev mode or when FORCE_OTP_LOG=true)
-    const isDev = this.config.get('NODE_ENV', 'development') !== 'production'
+    // Test mode: use fixed OTP if enabled via AppSetting (admin-controlled)
+    const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
+    const testOtpValue    = await this.settings.get('test_otp_value', '123456');
+    const isTestMode = testModeEnabled === 'true'
+      && this.config.get('NODE_ENV', 'development') !== 'production';
+
+    const code = isTestMode
+      ? testOtpValue
+      : Math.floor(100000 + Math.random() * 900000).toString();
+
+    const forceLog = this.config.get('NODE_ENV', 'development') !== 'production'
       || this.config.get('FORCE_OTP_LOG') === 'true';
-    const code = isDev ? '123456' : Math.floor(100000 + Math.random() * 900000).toString();
+    if (forceLog) {
+      this.logger.log(`[OTP]${isTestMode ? ' [TEST]' : ''} ${maskPhone(phone)} → ${code}`);
+    }
 
     // Store OTP in Redis
     const otpKey = `otp:${phone}`;
@@ -61,7 +87,7 @@ export class AuthService {
     }
 
     // Send SMS
-    const sent = await this.sms.sendOtp(phone, code);
+    const sent = await this.sms.sendOtp(phone, code, lang);
     if (!sent) {
       throw new BadRequestException("Echec d'envoi du SMS. Reessayez.");
     }
@@ -75,26 +101,30 @@ export class AuthService {
   }
 
   async applyReferral(userId: string, referralCode: string): Promise<{ success: boolean; message: string }> {
-    const user = await (this.prisma.user as any).findUnique({
+    const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { referredById: true },
+      select: { referredBy: true },
     });
-    if (user?.referredById) return { success: false, message: 'Vous avez déjà un parrain.' };
-    const referrer = await (this.prisma.user as any).findUnique({
+    if (user?.referredBy) return { success: false, message: 'Vous avez déjà un parrain.' };
+    const referrer = await this.prisma.user.findUnique({
       where: { referralCode: referralCode.toUpperCase() },
       select: { id: true },
     });
     if (!referrer) return { success: false, message: 'Code de parrainage invalide.' };
     if (referrer.id === userId) return { success: false, message: 'Vous ne pouvez pas utiliser votre propre code.' };
-    await (this.prisma.user as any).update({
+    await this.prisma.user.update({
       where: { id: userId },
-      data: { referredById: referrer.id },
+      data: { referredBy: referrer.id },
     });
     await Promise.all([
       this.prisma.pointsTransaction.create({ data: { userId: referrer.id, points: 500, type: 'credit', label: 'Parrainage accepté' } }),
       this.prisma.pointsTransaction.create({ data: { userId, points: 500, type: 'credit', label: 'Bonus parrainage inscription' } }),
     ]);
     return { success: true, message: '500 points offerts à vous et votre parrain !' };
+  }
+
+  async logout(userId: string): Promise<void> {
+    await this.redis.del(`refresh:${userId}`);
   }
 
   async getReferralInfo(userId: string) {
@@ -105,6 +135,35 @@ export class AuthService {
     return {
       referralCode: user?.referralCode ?? null,
       referralCount: user?.referrals?.length ?? 0,
+    };
+  }
+
+  // 3.B4 — Liste des filleuls avec statut (inscrit / 1ère course effectuée)
+  async getReferralList(userId: string): Promise<{
+    referrals: { id: string; name: string | null; status: 'registered' | 'first_ride_done'; createdAt: string }[];
+  }> {
+    const referrals = await (this.prisma.user as any).findMany({
+      where: { referredBy: userId },
+      select: {
+        id: true,
+        name: true,
+        createdAt: true,
+        bookings: {
+          where: { status: 'completed' },
+          select: { id: true },
+          take: 1,
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      referrals: referrals.map((r: any) => ({
+        id: r.id,
+        name: r.name ?? null,
+        status: (r.bookings?.length ?? 0) > 0 ? 'first_ride_done' : 'registered',
+        createdAt: r.createdAt.toISOString(),
+      })),
     };
   }
 
@@ -182,7 +241,7 @@ export class AuthService {
         },
       });
       isNewUser = true;
-      this.logger.log(`New user created: ${user.id} (${phone}) role=${role}`);
+      this.logger.log(`New user created: ${user.id} (${maskPhone(phone)}) role=${role}`);
 
       // Crédite parrain + filleul (500 pts chacun)
       if (referrer) {
@@ -198,7 +257,7 @@ export class AuthService {
         this.logger.log(`Referral bonus: ${REFERRAL_BONUS} pts → parrain ${referrer.id} + filleul ${user.id}`);
       }
     } else {
-      this.logger.log(`User logged in: ${user.id} (${phone})`);
+      this.logger.log(`User logged in: ${user.id} (${maskPhone(phone)})`);
     }
 
     // Check if user is suspended
@@ -209,7 +268,7 @@ export class AuthService {
     // Generate tokens
     const payload = { sub: user.id, role: user.role };
     const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '90d' });
+    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -248,7 +307,7 @@ export class AuthService {
       // Generate new tokens
       const newPayload = { sub: user.id, role: user.role };
       const newAccessToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
-      const newRefreshToken = this.jwt.sign(newPayload, { expiresIn: '90d' });
+      const newRefreshToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
 
       await this.redis.set(
         `refresh:${user.id}`,
@@ -266,6 +325,7 @@ export class AuthService {
     code: string,
     codeVerifier: string,
     redirectUri: string,
+    intendedRole: 'passenger' | 'driver' = 'passenger',
   ): Promise<{
     accessToken: string;
     refreshToken: string;
@@ -332,10 +392,10 @@ export class AuthService {
 
     if (!user) {
       user = await this.prisma.user.create({
-        data: { googleId, email, name, role: 'passenger' },
+        data: { googleId, email, name, role: intendedRole },
       });
       isNewUser = true;
-      this.logger.log(`New user created via Google: ${user.id} (${email})`);
+      this.logger.log(`New user created via Google: ${user.id} (${email}) role=${intendedRole}`);
     } else {
       this.logger.log(`User logged in via Google: ${user.id} (${email})`);
     }
@@ -347,7 +407,7 @@ export class AuthService {
     // Generate tokens
     const payload = { sub: user.id, role: user.role };
     const newAccessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '90d' });
+    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -407,26 +467,61 @@ export class AuthService {
       const googleUser = await userRes.json() as { sub: string; email?: string; name?: string };
       const { sub: googleId, email, name } = googleUser;
 
+      // 0.B19 — rôle déduit du schéma deepLink (aerogo24-driver:// → driver, sinon passenger)
+      const roleFromDeepLink: 'passenger' | 'driver' = deepLink.startsWith('aerogo24-driver://') ? 'driver' : 'passenger';
+
       // Find or create user
       let isNewUser = false;
       let user = await this.prisma.user.findUnique({ where: { googleId } });
       if (!user && email) user = await this.prisma.user.findFirst({ where: { email } });
       if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
-      if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: 'passenger' } }); isNewUser = true; }
+      if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: roleFromDeepLink } }); isNewUser = true; }
 
       // Generate tokens
       const payload = { sub: user.id, role: user.role };
       const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-      const refreshToken = this.jwt.sign(payload, { expiresIn: '90d' });
+      const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
       await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
-      // Redirect back to app
-      const returnUrl = `${deepLink}?accessToken=${encodeURIComponent(accessToken)}&refreshToken=${encodeURIComponent(refreshToken)}&userId=${user.id}&userName=${encodeURIComponent(user.name || '')}&userRole=${user.role}&isNewUser=${isNewUser ? '1' : '0'}`;
+      // C1 — Sécurité : ne jamais exposer les tokens dans l'URL (logs, proxies, historique).
+      // On génère un authCode éphémère (30s) stocké en Redis.
+      // L'app échange ce code via POST /auth/google/exchange.
+      const authCode = require('crypto').randomBytes(32).toString('hex');
+      await this.redis.set(
+        `google_auth_code:${authCode}`,
+        JSON.stringify({ accessToken, refreshToken, userId: user.id, userName: user.name || '', userRole: user.role, isNewUser }),
+        30, // 30 secondes
+      );
+      const returnUrl = `${deepLink}?authCode=${authCode}`;
       res.redirect(returnUrl);
     } catch (e) {
       this.logger.error('Google callback error', e);
       res.redirect(`${deepLink}?error=google_auth_failed`);
     }
+  }
+
+  /**
+   * C1 — Échange un authCode éphémère (30s) contre les vrais tokens JWT.
+   * Le code est à usage unique : supprimé dès la première utilisation.
+   */
+  async exchangeGoogleAuthCode(authCode: string) {
+    // Valide le format : exactement 64 caractères hexadécimaux (randomBytes(32).toString('hex'))
+    if (!/^[a-f0-9]{64}$/.test(authCode)) {
+      throw new BadRequestException('Code d\'authentification invalide ou expiré');
+    }
+    const raw = await this.redis.get(`google_auth_code:${authCode}`);
+    if (!raw) {
+      throw new BadRequestException('Code d\'authentification invalide ou expiré');
+    }
+    await this.redis.del(`google_auth_code:${authCode}`); // usage unique
+    return JSON.parse(raw) as {
+      accessToken: string;
+      refreshToken: string;
+      userId: string;
+      userName: string;
+      userRole: string;
+      isNewUser: boolean;
+    };
   }
 
   async getMe(userId: string) {

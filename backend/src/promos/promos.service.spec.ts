@@ -91,13 +91,21 @@ describe('PromosService', () => {
   // ── applyPromo ─────────────────────────────────────────────────────────────
 
   describe('applyPromo', () => {
-    it('should increment usedCount', async () => {
+    it('should increment usedCount by promoId (not code)', async () => {
+      mockPrisma.promoCode.findUnique.mockResolvedValue(activePromo);
       mockPrisma.promoCode.update.mockResolvedValue({ ...activePromo, usedCount: 1 });
       await service.applyPromo('PROMO50');
+      // applyPromo looks up by code first, then updates by id
       expect(mockPrisma.promoCode.update).toHaveBeenCalledWith({
-        where: { code: 'PROMO50' },
+        where: { id: 'p-1' },
         data: { usedCount: { increment: 1 } },
       });
+    });
+
+    it('should do nothing if promo does not exist', async () => {
+      mockPrisma.promoCode.findUnique.mockResolvedValue(null);
+      await service.applyPromo('UNKNOWN');
+      expect(mockPrisma.promoCode.update).not.toHaveBeenCalled();
     });
   });
 

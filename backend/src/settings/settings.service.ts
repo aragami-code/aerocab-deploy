@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { RedisService } from '../redis/redis.service';
+
+const CONFIG_CACHE_KEY = 'config:cache';
 
 export interface VehicleTariff {
   basePricePerKm: number;
@@ -47,6 +50,7 @@ export interface TariffsConfig {
   pointValue: number;         // Valeur d'1 point en monnaie locale (ex: 1 FCFA, 0.01 EUR)
   pointRechargeRate: number;  // 1 unité de monnaie locale = X points crédités (recharge)
   cashbackRate: number;       // % du prix de la course crédité en points après trajet (0.05 = 5%)
+  commissionRate: number;     // % prélevé par la plateforme sur le prix de la course (0.15 = 15%)
   referralBonus: ReferralBonus;
 }
 
@@ -61,6 +65,7 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
   pointValue: 1,             // 1 pt = 1 FCFA
   pointRechargeRate: 1,      // 1 FCFA versé = 1 pt crédité
   cashbackRate: 0.05,        // 5 % du prix de la course remboursé en points
+  commissionRate: 0.15,      // 15 % prélevé par la plateforme (chauffeur reçoit 85%)
   referralBonus: {
     onSignup: 500,           // pts offerts au parrain à l'inscription du filleul
     onFirstRide: 1000,       // pts offerts au parrain à la 1re course du filleul
@@ -96,7 +101,10 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
 
 @Injectable()
 export class SettingsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private redis: RedisService,
+  ) {}
 
   async get(key: string, defaultValue = ''): Promise<string> {
     const setting = await this.prisma.appSetting.findUnique({ where: { key } });
@@ -109,6 +117,8 @@ export class SettingsService {
       update: { value },
       create: { key, value },
     });
+    // 0.B1 — Invalider le cache /config activement
+    await this.redis.del(CONFIG_CACHE_KEY);
   }
 
   async isProximityAssignmentEnabled(): Promise<boolean> {

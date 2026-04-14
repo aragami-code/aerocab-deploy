@@ -157,6 +157,29 @@ export class DriversController {
     return this.driversService.getEarnings(userId);
   }
 
+  // ── Retraits ─────────────────────────────────────────
+
+  @Post('withdraw')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  @HttpCode(201)
+  async requestWithdrawal(
+    @CurrentUser('id') userId: string,
+    @Body() body: { amount: number; method: string; mobileNumber: string },
+  ) {
+    return this.driversService.requestWithdrawal(userId, body.amount, body.method, body.mobileNumber);
+  }
+
+  @Get('withdrawals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  async getWithdrawals(
+    @CurrentUser('id') userId: string,
+    @Query('page') page?: string,
+  ) {
+    return this.driversService.getWithdrawals(userId, page ? parseInt(page) : 1);
+  }
+
   // ── Public (for passengers) ──────────────────────────
 
   @Get('nearby')

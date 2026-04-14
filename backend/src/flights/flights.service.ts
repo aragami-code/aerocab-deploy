@@ -33,8 +33,9 @@ export class FlightsService {
     }
 
     try {
+      const fr24BaseUrl = this.config.get('FLIGHT_RADAR_API_URL', 'https://fr24api.flightradar24.com/api');
       const res = await fetch(
-        `https://fr24api.flightradar24.com/api/flight-summaries/light?flights=${normalized}`,
+        `${fr24BaseUrl}/flight-summaries/light?flights=${normalized}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -103,8 +104,9 @@ export class FlightsService {
     speedHorizontal: number; direction: number; isGround: boolean; updatedAt: string;
   } | null> {
     try {
+      const fr24BaseUrl = this.config.get('FLIGHT_RADAR_API_URL', 'https://fr24api.flightradar24.com/api');
       const res = await fetch(
-        `https://fr24api.flightradar24.com/api/live/flight-positions/light?flights=${flightNumber}`,
+        `${fr24BaseUrl}/live/flight-positions/light?flights=${flightNumber}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`,

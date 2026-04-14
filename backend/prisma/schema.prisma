@@ -36,7 +36,10 @@ model User {
   reportsReceived        Report[]            @relation("ReportsReceived")
   reportsSubmitted       Report[]            @relation("ReportsSubmitted")
   wallet                 Wallet?
+  withdrawalRequests     WithdrawalRequest[]
   promoUsages            PromoUsage[]
+  adminRoles             UserAdminRole[]
+  adminPermissions       UserPermission[]
 
   @@map("users")
 }
@@ -291,6 +294,23 @@ model Transaction {
   @@map("transactions")
 }
 
+model WithdrawalRequest {
+  id            String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String                  @map("user_id") @db.Uuid
+  amount        Float
+  currency      String                  @default("XAF")
+  method        WithdrawalMethod
+  mobileNumber  String                  @map("mobile_number")
+  status        WithdrawalStatus        @default(pending)
+  adminNote     String?                 @map("admin_note")
+  processedAt   DateTime?               @map("processed_at")
+  createdAt     DateTime                @default(now()) @map("created_at")
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("withdrawal_requests")
+}
+
 model PromoCode {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code       String    @unique @db.VarChar(20)
@@ -399,9 +419,11 @@ enum BookingStatus {
   pending
   confirmed
   in_progress
+  passenger_confirming
   completed
   cancelled
   arrived_at_airport
+  no_driver_available
 }
 
 enum ConversationStatus {
@@ -432,6 +454,88 @@ enum TransactionStatus {
   pending
   completed
   failed
+}
+
+enum WithdrawalMethod {
+  orange_money
+  mtn_momo
+  bank_transfer
+}
+
+enum WithdrawalStatus {
+  pending
+  approved
+  rejected
+  paid
+}
+
+// ── RBAC ────────────────────────────────────────────────────────────────────
+
+model Permission {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key         String           @unique
+  group       String
+  description String
+  rolePerms   RolePermission[]
+  userPerms   UserPermission[]
+
+  @@map("permissions")
+}
+
+model AdminRole {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String           @unique  // super_admin, admin, moderator, support
+  label       String
+  description String           @default("")
+  isSystem    Boolean          @default(false) @map("is_system")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  rolePerms   RolePermission[]
+  userRoles   UserAdminRole[]
+
+  @@map("admin_roles")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  role         AdminRole  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserAdminRole {
+  userId    String    @map("user_id") @db.Uuid
+  roleId    String    @map("role_id") @db.Uuid
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      AdminRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_admin_roles")
+}
+
+model UserPermission {
+  userId       String     @map("user_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  granted      Boolean    @default(true)  // true = allow override, false = deny override
+  grantedAt    DateTime   @default(now()) @map("granted_at")
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permissions")
+}
+
+model TariffSnapshot {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  countryCode String?  @map("country_code")  // null = global
+  data        Json
+  createdBy   String?  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("tariff_snapshots")
 }
 
 

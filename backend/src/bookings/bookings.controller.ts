@@ -112,6 +112,14 @@ export class BookingsController {
     return this.bookingsService.completeRide(userId, id);
   }
 
+  // 5.B2 — Passager confirme l'arrivée à destination
+  @Patch(':id/confirm')
+  @UseGuards(RolesGuard)
+  @Roles('passenger')
+  confirmRide(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.confirmRide(userId, id);
+  }
+
   // Admin
   @Get(':id/positions')
   getPositions(@Request() req: any, @Param('id') bookingId: string) {

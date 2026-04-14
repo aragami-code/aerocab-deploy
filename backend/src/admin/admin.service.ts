@@ -375,6 +375,121 @@ export class AdminService {
   }
 
 
+  // ── 6.B1 — Active bookings (real-time) ───────────────
+
+  async getActiveBookings() {
+    return this.prisma.booking.findMany({
+      where: { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] as any[] } },
+      include: {
+        passenger: { select: { name: true, phone: true } },
+        driverProfile: {
+          select: {
+            user: { select: { name: true, phone: true } },
+            vehicleBrand: true,
+            vehicleModel: true,
+            driverType: true,
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
+
+  // ── 6.B2 — Online drivers ─────────────────────────────
+
+  async getOnlineDrivers() {
+    return this.prisma.driverProfile.findMany({
+      where: { isAvailable: true, status: 'approved' as any },
+      select: {
+        id: true,
+        driverType: true,
+        vehicleBrand: true,
+        vehicleModel: true,
+        latitude: true,
+        longitude: true,
+        totalRides: true,
+        user: { select: { name: true, phone: true, avatarUrl: true } },
+      },
+    });
+  }
+
+  // ── 6.B3 — Revenue metrics ────────────────────────────
+
+  async getRevenueMetrics(period: 'day' | 'week' | 'month' = 'day') {
+    const now = new Date();
+    let startDate: Date;
+    switch (period) {
+      case 'week':  startDate = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000); break;
+      case 'month': startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); break;
+      default:
+        startDate = new Date(now);
+        startDate.setHours(0, 0, 0, 0);
+    }
+
+    const bookings = await this.prisma.booking.findMany({
+      where: { status: 'completed', completedAt: { gte: startDate } },
+      select: { estimatedPrice: true, type: true, completedAt: true },
+    });
+
+    const totalRevenue = bookings.reduce((sum, b) => sum + (b.estimatedPrice ?? 0), 0);
+    const byType = bookings.reduce<Record<string, { count: number; revenue: number }>>(
+      (acc, b) => {
+        const t = b.type ?? 'unknown';
+        if (!acc[t]) acc[t] = { count: 0, revenue: 0 };
+        acc[t].count++;
+        acc[t].revenue += b.estimatedPrice ?? 0;
+        return acc;
+      },
+      {},
+    );
+
+    return { period, from: startDate, to: now, totalRides: bookings.length, totalRevenue, byType };
+  }
+
+  // ── 6.B4 — Suspend / reactivate driver ───────────────
+
+  async suspendDriver(driverProfileId: string, action: 'suspend' | 'reactivate') {
+    const driver = await this.prisma.driverProfile.findUnique({ where: { id: driverProfileId } });
+    if (!driver) throw new NotFoundException('Profil chauffeur introuvable');
+    const newStatus = action === 'suspend' ? 'suspended' : 'approved';
+    return this.prisma.driverProfile.update({
+      where: { id: driverProfileId },
+      data: { status: newStatus as any },
+    });
+  }
+
+  // ── 6.B5 — Update user status ─────────────────────────
+
+  async updateUserStatus(userId: string, status: 'active' | 'suspended') {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+    return this.prisma.user.update({ where: { id: userId }, data: { status: status as any } });
+  }
+
+  // ── 6.B7/B8 — Tariff snapshots ────────────────────────
+
+  async getTariffSnapshots() {
+    return (this.prisma as any).tariffSnapshot.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { id: true, countryCode: true, createdAt: true, createdBy: true },
+    });
+  }
+
+  async setTariffsWithSnapshot(config: any, adminUserId?: string) {
+    const current = await this.settingsService.getTariffs();
+    await (this.prisma as any).tariffSnapshot.create({
+      data: { data: current as any, createdBy: adminUserId ?? null },
+    });
+    return this.settingsService.setTariffs(config);
+  }
+
+  async rollbackTariffs(snapshotId: string) {
+    const snapshot = await (this.prisma as any).tariffSnapshot.findUnique({ where: { id: snapshotId } });
+    if (!snapshot) throw new NotFoundException('Snapshot introuvable');
+    return this.settingsService.setTariffs(snapshot.data as any);
+  }
+
   // ── Referrals ─────────────────────────────────────────
 
   async getReferrals(page = 1, limit = 20) {
@@ -412,5 +527,138 @@ export class AdminService {
         totalPages: Math.ceil(total / limit),
       },
     };
+  }
+
+  // ── Retraits chauffeurs ──────────────────────────────────────────────────────
+
+  async getWithdrawals(status?: string, page = 1, limit = 20) {
+    const skip = Math.max(0, (page - 1) * limit);
+    const where = status ? { status: status as any } : {};
+
+    const [data, total] = await Promise.all([
+      this.prisma.withdrawalRequest.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          amount: true,
+          currency: true,
+          method: true,
+          mobileNumber: true,
+          status: true,
+          adminNote: true,
+          processedAt: true,
+          createdAt: true,
+          user: { select: { id: true, name: true, phone: true } },
+        },
+      }),
+      this.prisma.withdrawalRequest.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
+  }
+
+  async processWithdrawal(
+    id: string,
+    status: 'approved' | 'rejected' | 'paid',
+    adminId: string,
+    adminNote?: string,
+  ) {
+    const withdrawal = await this.prisma.withdrawalRequest.findUnique({ where: { id } });
+    if (!withdrawal) throw new NotFoundException('Demande de retrait introuvable');
+    if (withdrawal.status === 'paid' || withdrawal.status === 'rejected') {
+      throw new BadRequestException('Cette demande a déjà été traitée');
+    }
+    if (status === 'paid' && withdrawal.status !== 'approved') {
+      throw new BadRequestException('La demande doit être approuvée avant d\'être marquée comme payée');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      // Débit wallet uniquement quand on marque "paid"
+      if (status === 'paid') {
+        const wallet = await tx.wallet.findUnique({ where: { userId: withdrawal.userId } });
+        if (!wallet || Number(wallet.balance) < withdrawal.amount) {
+          throw new BadRequestException('Solde wallet insuffisant pour effectuer le retrait');
+        }
+        await tx.wallet.update({
+          where: { userId: withdrawal.userId },
+          data: { balance: { decrement: withdrawal.amount } },
+        });
+        await tx.transaction.create({
+          data: {
+            walletId: wallet.id,
+            amount: withdrawal.amount,
+            type: 'withdrawal',
+            status: 'completed',
+            reference: `WITHDRAW-${id}`,
+            metadata: { withdrawalRequestId: id, adminId },
+          },
+        });
+      }
+
+      return tx.withdrawalRequest.update({
+        where: { id },
+        data: { status, adminNote: adminNote ?? null, processedAt: new Date() },
+        select: {
+          id: true,
+          status: true,
+          adminNote: true,
+          processedAt: true,
+          amount: true,
+          currency: true,
+          method: true,
+          mobileNumber: true,
+          user: { select: { id: true, name: true, phone: true } },
+        },
+      });
+    });
+  }
+
+  // ── Crédit / Débit manuel de points (ADM·069) ────────────────────────────
+
+  async adjustUserPoints(
+    userId: string,
+    amount: number,
+    reason: string,
+    adminId: string,
+  ): Promise<{ balance: number }> {
+    if (!amount || amount === 0) throw new BadRequestException('Le montant ne peut pas être 0');
+    if (!reason?.trim()) throw new BadRequestException('Un motif est obligatoire');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+
+    return this.prisma.$transaction(async (tx) => {
+      // Vérifier le solde en cas de débit
+      if (amount < 0) {
+        const agg = await tx.pointsTransaction.aggregate({
+          where: { userId },
+          _sum: { points: true },
+        });
+        const currentBalance = agg._sum.points ?? 0;
+        if (currentBalance + amount < 0) {
+          throw new BadRequestException(`Solde insuffisant (${currentBalance} pts)`);
+        }
+      }
+
+      await tx.pointsTransaction.create({
+        data: {
+          userId,
+          type: amount >= 0 ? 'credit' : 'debit',
+          points: amount,
+          label: `[Admin ${adminId}] ${reason}`,
+        },
+      });
+
+      const agg = await tx.pointsTransaction.aggregate({
+        where: { userId },
+        _sum: { points: true },
+      });
+
+      this.logger.log(`[AdminPoints] ${amount >= 0 ? '+' : ''}${amount} pts → user ${userId} par admin ${adminId} : ${reason}`);
+      return { balance: agg._sum.points ?? 0 };
+    });
   }
 }

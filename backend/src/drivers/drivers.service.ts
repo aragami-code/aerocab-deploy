@@ -295,6 +295,22 @@ export class DriversService {
         });
     }
 
+    // B2 — Émettre aussi pour les courses où le chauffeur est arrivé (en attente du passager)
+    const arrivedBooking = await this.prisma.booking.findFirst({
+      where: { driverProfileId: profile.id, status: 'arrived_at_airport' },
+      select: { id: true, passengerId: true },
+    });
+    if (arrivedBooking?.passengerId) {
+      this.ridesGateway.server
+        .to(`passenger:${arrivedBooking.passengerId}`)
+        .emit('driver:position', {
+          bookingId: arrivedBooking.id,
+          latitude: dto.latitude,
+          longitude: dto.longitude,
+          timestamp: new Date().toISOString(),
+        });
+    }
+
     return { message: 'Position mise a jour' };
   }
 
@@ -408,7 +424,7 @@ export class DriversService {
     startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const [todayBookings, weekBookings, monthBookings] = await Promise.all([
+    const [todayBookings, weekBookings, monthBookings, wallet] = await Promise.all([
       this.prisma.booking.findMany({
         where: { driverProfileId: profile.id, status: 'completed', updatedAt: { gte: startOfDay } },
         select: { estimatedPrice: true },
@@ -421,6 +437,7 @@ export class DriversService {
         where: { driverProfileId: profile.id, status: 'completed', updatedAt: { gte: startOfMonth } },
         select: { estimatedPrice: true },
       }),
+      this.prisma.wallet.findUnique({ where: { userId }, select: { balance: true } }),
     ]);
 
     const sum = (list: { estimatedPrice: any }[]) =>
@@ -431,8 +448,85 @@ export class DriversService {
       thisWeek: sum(weekBookings),
       thisMonth: sum(monthBookings),
       totalRides: profile.totalRides,
+      walletBalance: Number(wallet?.balance ?? 0),
       currency: 'XAF',
     };
+  }
+
+  // ── Retraits ─────────────────────────────────────────────────────────────────
+
+  async requestWithdrawal(userId: string, amount: number, method: string, mobileNumber: string) {
+    const validMethods = ['orange_money', 'mtn_momo', 'bank_transfer'];
+    if (!validMethods.includes(method)) {
+      throw new BadRequestException('Méthode de retrait invalide. Utilisez : orange_money, mtn_momo ou bank_transfer.');
+    }
+    if (!amount || amount <= 0) {
+      throw new BadRequestException('Le montant doit être supérieur à 0.');
+    }
+    if (!mobileNumber?.trim()) {
+      throw new BadRequestException('Numéro Mobile Money requis.');
+    }
+
+    // Vérifier que le wallet existe et a un solde suffisant
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+    const balance = Number(wallet?.balance ?? 0);
+    if (balance < amount) {
+      throw new BadRequestException(
+        `Solde insuffisant : ${balance} XAF disponibles, ${amount} XAF demandés.`,
+      );
+    }
+
+    // Vérifier pas de retrait pending en cours (1 à la fois)
+    const pending = await this.prisma.withdrawalRequest.findFirst({
+      where: { userId, status: 'pending' },
+    });
+    if (pending) {
+      throw new BadRequestException('Un retrait est déjà en cours de traitement. Attendez sa validation avant d\'en soumettre un nouveau.');
+    }
+
+    return this.prisma.withdrawalRequest.create({
+      data: {
+        userId,
+        amount,
+        method: method as any,
+        mobileNumber: mobileNumber.trim(),
+        status: 'pending',
+      },
+      select: {
+        id: true,
+        amount: true,
+        currency: true,
+        method: true,
+        mobileNumber: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  async getWithdrawals(userId: string, page = 1, limit = 20) {
+    const skip = Math.max(0, (page - 1) * limit);
+    const [data, total] = await Promise.all([
+      this.prisma.withdrawalRequest.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          amount: true,
+          currency: true,
+          method: true,
+          mobileNumber: true,
+          status: true,
+          adminNote: true,
+          processedAt: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.withdrawalRequest.count({ where: { userId } }),
+    ]);
+    return { data, total, page, limit };
   }
 
   async uploadDocumentFile(userId: string, type: string, file: any) {

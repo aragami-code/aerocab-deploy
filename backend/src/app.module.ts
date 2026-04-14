@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { PrismaModule } from './database/prisma.module';
 import { RedisModule } from './redis/redis.module';
@@ -20,6 +22,7 @@ import { AirportsModule } from './airports/airports.module';
 import { ReportsModule } from './reports/reports.module';
 import { PromosModule } from './promos/promos.module';
 import { AuditModule } from './audit/audit.module';
+import { UploadsModule } from './uploads/uploads.module';
 
 @Module({
   imports: [
@@ -27,6 +30,13 @@ import { AuditModule } from './audit/audit.module';
       isGlobal: true,
       envFilePath: '../../.env',
     }),
+    // 0.B6 — Rate limiting différencié par type d'endpoint
+    ThrottlerModule.forRoot([
+      { name: 'otp',    ttl: 60000, limit: 5  },  // OTP: 5 req/min
+      { name: 'auth',   ttl: 60000, limit: 20 },  // Auth: 20 req/min
+      { name: 'admin',  ttl: 60000, limit: 60 },  // Admin: 60 req/min
+      { name: 'global', ttl: 60000, limit: 100 }, // Global: 100 req/min
+    ]),
     ScheduleModule.forRoot(),
     PrismaModule,
     RedisModule,
@@ -46,7 +56,11 @@ import { AuditModule } from './audit/audit.module';
     ReportsModule,
     PromosModule,
     AuditModule,
+    UploadsModule,
   ],
   controllers: [AppController],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
 })
 export class AppModule {}
