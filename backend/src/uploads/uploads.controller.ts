@@ -8,7 +8,6 @@ import {
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SkipThrottle } from '@nestjs/throttler';
 
@@ -23,7 +22,7 @@ const UPLOAD_DIR = '/tmp/aerogo24-uploads';
 @SkipThrottle()
 export class UploadsController {
   @Get(':filename')
-  serveFile(@Param('filename') filename: string, @Res() res: Response) {
+  serveFile(@Param('filename') filename: string, @Res() res: any) {
     // Prevent path traversal
     const safe = path.basename(filename);
     const filePath = path.join(UPLOAD_DIR, safe);
