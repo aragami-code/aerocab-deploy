@@ -25,8 +25,9 @@ services:
         generateValue: true
       - key: JWT_REFRESH_SECRET
         generateValue: true
-      - key: CORS_ORIGIN
-        value: "*"
+      - key: CORS_ORIGINS
+        value: "https://aerogo-admin.vercel.app"
+        # Ajouter d'autres origines séparées par virgule si nécessaire
       # À remplir manuellement dans le dashboard Render :
       # - key: SMS_API_KEY        (Twilio ou autre)
       # - key: AVIATIONSTACK_KEY
