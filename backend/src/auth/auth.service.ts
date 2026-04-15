@@ -63,9 +63,9 @@ export class AuthService {
     // Test mode: use fixed OTP if enabled via AppSetting (admin-controlled)
     const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
     const testOtpValue    = await this.settings.get('test_otp_value', '123456');
-    const isTestMode = testModeEnabled === 'true'
-      && (this.config.get('NODE_ENV', 'development') !== 'production'
-          || this.config.get('FORCE_TEST_OTP') === 'true');
+    // FORCE_TEST_OTP=true (env var) bypasse la restriction production — à retirer après config SMS réel
+    const isTestMode = this.config.get('FORCE_TEST_OTP') === 'true'
+      || (testModeEnabled === 'true' && this.config.get('NODE_ENV', 'development') !== 'production');
 
     const code = isTestMode
       ? testOtpValue
