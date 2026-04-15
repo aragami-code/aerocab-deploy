@@ -5,17 +5,19 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { SettingsService } from './settings/settings.service';
 
-function bootstrap_cors(): string[] {
+function bootstrap_cors(): (string | RegExp)[] {
+  const base: (string | RegExp)[] = [
+    /^https:\/\/.*\.vercel\.app$/,       // tous les déploiements Vercel
+    /^https:\/\/.*\.onrender\.com$/,     // services Render entre eux
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://localhost:19006',
+  ];
   const raw = process.env.CORS_ORIGINS;
-  if (!raw) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error(
-        '[FATAL] CORS_ORIGINS env var is required in production. Refusing to start with wildcard CORS.',
-      );
-    }
-    return ['http://localhost:3000', 'http://localhost:8080', 'http://localhost:19006'];
+  if (raw) {
+    raw.split(',').map((o) => o.trim()).forEach((o) => base.push(o));
   }
-  return raw.split(',').map((o) => o.trim());
+  return base;
 }
 
 async function bootstrap() {
