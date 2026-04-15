@@ -11,14 +11,14 @@ export class AuthController {
 
   @Post('otp/send')
   @HttpCode(200)
-  @Throttle({ otp: { ttl: 60000, limit: 5 } })
+  @SkipThrottle() // rate limit géré dans auth.service.ts (Redis)
   async sendOtp(@Body() dto: SendOtpDto) {
     return this.authService.sendOtp(dto.phone, dto.lang ?? 'fr');
   }
 
   @Post('otp/verify')
   @HttpCode(200)
-  @Throttle({ otp: { ttl: 60000, limit: 5 } })
+  @SkipThrottle() // rate limit géré dans auth.service.ts (Redis)
   async verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.authService.verifyOtp(dto.phone, dto.code, dto.intendedRole, dto.referralCode);
   }
