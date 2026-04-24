@@ -35,6 +35,7 @@ model User {
   ratingsReceived        Rating[]            @relation("RatingsReceived")
   reportsReceived        Report[]            @relation("ReportsReceived")
   reportsSubmitted       Report[]            @relation("ReportsSubmitted")
+  ticketMessages         TicketMessage[]
   wallet                 Wallet?
   withdrawalRequests     WithdrawalRequest[]
   promoUsages            PromoUsage[]
@@ -144,17 +145,27 @@ model Booking {
   pickupLng        Float?         @map("pickup_lng")
 
   // ── Consigne du véhicule ────────────────────────────────────────────────────
-  withConsigne         Boolean  @default(false) @map("with_consigne")
-  consigneDays         Int?     @map("consigne_days")
-  consigneDailyRate    Float?   @map("consigne_daily_rate")   // FCFA/jour
-  consigneVehicleType  String?  @map("consigne_vehicle_type")
-  consigneTotal        Float?   @map("consigne_total")        // Prix total consigne (FCFA)
+  withConsigne         Boolean   @default(false) @map("with_consigne")
+  consigneDays         Int?      @map("consigne_days")
+  consigneDailyRate    Float?    @map("consigne_daily_rate")    // FCFA/jour
+  consigneVehicleType  String?   @map("consigne_vehicle_type")
+  consigneTotal        Float?    @map("consigne_total")         // Devis initial (FCFA)
+  consigneStatus       String?   @map("consigne_status")        // null | "active" | "completed" | "cancelled"
+  consigneStartedAt    DateTime? @map("consigne_started_at")
+  consigneEndedAt      DateTime? @map("consigne_ended_at")
+  consigneActualDays   Int?      @map("consigne_actual_days")   // Jours réels (peut > consigneDays si retard)
+  consigneFinalTotal   Float?    @map("consigne_final_total")   // Montant final débité (FCFA)
+  consigneRating       Int?      @map("consigne_rating")        // Note globale séjour 1-5 (par le passager)
 
   // ── Surcharges dynamiques ───────────────────────────────────────────────────
   surgeMultiplier  Float  @default(1.0) @map("surge_multiplier")
   nightSurge       Boolean @default(false) @map("night_surge")    // 22h–05h
   rainSurge        Boolean @default(false) @map("rain_surge")
   rushHourSurge    Boolean @default(false) @map("rush_hour_surge")
+
+  forfaitId    String?  @map("forfait_id") @db.Uuid
+  pricingMode  String   @default("kilometrage") @map("pricing_mode")
+  forfait      Forfait? @relation(fields: [forfaitId], references: [id])
 
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
@@ -214,20 +225,35 @@ model Rating {
 }
 
 model Report {
-  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  reporterId     String       @map("reporter_id") @db.Uuid
-  reportedId     String?      @map("reported_id") @db.Uuid
-  bookingId      String?      @map("booking_id") @db.Uuid
-  conversationId String?      @map("conversation_id") @db.Uuid
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reporterId     String          @map("reporter_id") @db.Uuid
+  reportedId     String?         @map("reported_id") @db.Uuid
+  bookingId      String?         @map("booking_id") @db.Uuid
+  conversationId String?         @map("conversation_id") @db.Uuid
   reason         String
-  status         ReportStatus @default(open)
+  status         ReportStatus    @default(open)
   resolution     String?
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
-  reported       User?        @relation("ReportsReceived", fields: [reportedId], references: [id])
-  reporter       User         @relation("ReportsSubmitted", fields: [reporterId], references: [id])
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  reported       User?           @relation("ReportsReceived", fields: [reportedId], references: [id])
+  reporter       User            @relation("ReportsSubmitted", fields: [reporterId], references: [id])
+  messages       TicketMessage[]
 
   @@map("reports")
+}
+
+model TicketMessage {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reportId   String   @map("report_id") @db.Uuid
+  senderId   String   @map("sender_id") @db.Uuid
+  senderRole String   @map("sender_role")
+  message    String
+  imageUrl   String?  @map("image_url")
+  createdAt  DateTime @default(now()) @map("created_at")
+  report     Report   @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  sender     User     @relation(fields: [senderId], references: [id])
+
+  @@map("ticket_messages")
 }
 
 model PointsTransaction {
@@ -347,13 +373,43 @@ model Airport {
   city        String
   country     String
   countryCode String   @map("country_code") @db.VarChar(2)
-  latitude    Float
-  longitude   Float
+  latitude        Float
+  longitude       Float
+  detectionRadius Float    @default(3.0) @map("detection_radius")
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@map("airports")
+}
+
+model Forfait {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name            String
+  airportCode     String        @map("airport_code") @db.VarChar(3)
+  destinationName String        @map("destination_name")
+  destLat         Float         @map("dest_lat")
+  destLng         Float         @map("dest_lng")
+  destRadius      Float         @default(2.0) @map("dest_radius")
+  priceAmount     Float         @map("price_amount")
+  currency        String        @default("XAF")
+  countryCode     String        @map("country_code") @db.VarChar(2)
+  vehicleTypes    String[]      @map("vehicle_types") @default([])
+  bookingTypes    BookingType[] @map("booking_types") @default([])
+  driverPercent   Float         @default(85) @map("driver_percent")
+  companyPercent  Float         @default(15) @map("company_percent")
+  nightSurge      Float?        @map("night_surge")
+  rainSurge       Float?        @map("rain_surge")
+  rushHourSurge   Float?        @map("rush_hour_surge")
+  isActive        Boolean       @default(true) @map("is_active")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  bookings        Booking[]
+
+  @@index([airportCode, isActive])
+  @@index([countryCode, isActive])
+  @@map("forfaits")
 }
 
 model DriverPosition {
