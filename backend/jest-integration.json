@@ -1,0 +1,13 @@
+{
+  "preset": "ts-jest",
+  "testEnvironment": "node",
+  "testMatch": ["**/test/integration/**/*.integration.spec.ts"],
+  "testTimeout": 30000,
+  "maxWorkers": 1,
+  "globalSetup": "<rootDir>/test/integration/helpers/global-setup.ts",
+  "globalTeardown": "<rootDir>/test/integration/helpers/global-teardown.ts",
+  "setupFilesAfterEnv": ["<rootDir>/test/integration/helpers/env-setup.ts"],
+  "moduleNameMapper": {
+    "^src/(.*)$": "<rootDir>/src/$1"
+  }
+}
