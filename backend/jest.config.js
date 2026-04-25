@@ -11,5 +11,6 @@ module.exports = {
     },
   },
   testMatch: ['**/*.spec.ts'],
+  testPathIgnorePatterns: ['/node_modules/', '/test/integration/'],
   collectCoverageFrom: ['src/**/*.ts', '!src/**/*.spec.ts', '!src/main.ts'],
 };
