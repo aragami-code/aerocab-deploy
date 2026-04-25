@@ -23,6 +23,8 @@ import { ReportsModule } from './reports/reports.module';
 import { PromosModule } from './promos/promos.module';
 import { AuditModule } from './audit/audit.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { CleanupModule } from './cleanup/cleanup.module';
+import { ForfaitsModule } from './forfaits/forfaits.module';
 
 @Module({
   imports: [
@@ -32,10 +34,10 @@ import { UploadsModule } from './uploads/uploads.module';
     }),
     // 0.B6 — Rate limiting différencié par type d'endpoint
     ThrottlerModule.forRoot([
-      { name: 'otp',    ttl: 60000, limit: 5  },  // OTP: 5 req/min
-      { name: 'auth',   ttl: 60000, limit: 20 },  // Auth: 20 req/min
-      { name: 'admin',  ttl: 60000, limit: 60 },  // Admin: 60 req/min
-      { name: 'global', ttl: 60000, limit: 100 }, // Global: 100 req/min
+      { name: 'otp',    ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 10  : 50  },
+      { name: 'auth',   ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 120 : 200 },
+      { name: 'admin',  ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 300 : 600 },
+      { name: 'global', ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 500 : 1000 },
     ]),
     ScheduleModule.forRoot(),
     PrismaModule,
@@ -57,6 +59,8 @@ import { UploadsModule } from './uploads/uploads.module';
     PromosModule,
     AuditModule,
     UploadsModule,
+    CleanupModule,
+    ForfaitsModule,
   ],
   controllers: [AppController],
   providers: [
