@@ -5,6 +5,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RidesGateway } from './rides.gateway';
 import { SettingsService } from '../settings/settings.service';
 import { PointsService } from '../points/points.service';
+import { AuditService } from '../audit/audit.service';
+import { RedisService } from '../redis/redis.service';
+import { FlutterwaveService } from '../payments/flutterwave.service';
+import { makeTransaction } from '../../test/factories';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -18,8 +22,9 @@ const mockPrisma = {
   $transaction: jest.fn((fn: (tx: typeof mockTx) => Promise<any>) => fn(mockTx)),
   conversation: { findFirst: jest.fn(), create: jest.fn() },
   wallet: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-  transaction: { create: jest.fn() },
+  transaction: { create: jest.fn(), findMany: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
   airport: { findUnique: jest.fn() },
+  pointsTransaction: { findMany: jest.fn(), groupBy: jest.fn() },
 };
 
 const mockGateway = { server: { to: jest.fn().mockReturnValue({ emit: jest.fn() }) } };
@@ -27,8 +32,12 @@ const mockNotifications = { sendToUser: jest.fn().mockResolvedValue(undefined) }
 const mockSettings = {
   get: jest.fn().mockResolvedValue('2'),
   getTariffsByCountry: jest.fn().mockResolvedValue({ cashbackRate: 0.05, pointValue: 1 }),
+  getTariffs: jest.fn().mockResolvedValue({ pointRechargeRate: 1, fcfaPerPoint: 1 }),
 };
 const mockPoints = { addPoints: jest.fn().mockResolvedValue(undefined) };
+const mockAudit  = { log: jest.fn().mockResolvedValue(undefined) };
+const mockRedis  = { scan: jest.fn().mockResolvedValue([]), get: jest.fn(), del: jest.fn(), set: jest.fn() };
+const mockFlutterwave = { verify: jest.fn() };
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
@@ -45,6 +54,9 @@ describe('BookingsScheduler', () => {
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: SettingsService,      useValue: mockSettings      },
         { provide: PointsService,        useValue: mockPoints        },
+        { provide: AuditService,         useValue: mockAudit         },
+        { provide: RedisService,         useValue: mockRedis         },
+        { provide: FlutterwaveService,   useValue: mockFlutterwave   },
       ],
     }).compile();
 
@@ -187,6 +199,105 @@ describe('BookingsScheduler', () => {
         where: { id: 'b1' },
         data: { status: 'completed' },
       });
+    });
+  });
+
+  // ── retryStuckFlutterwaveTransactions ────────────────────────────────────────
+
+  describe('retryStuckFlutterwaveTransactions', () => {
+    /**
+     * Helper: builds a pending WALLET-FLUTTERWAVE-* transaction older than 2h.
+     */
+    const oldDate = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3 heures
+
+    it('crédite le wallet et marque completed quand Flutterwave répond ACCEPTED', async () => {
+      const tx = makeTransaction({
+        status: 'pending',
+        reference: 'WALLET-FLUTTERWAVE-ABC123',
+        amount: 5000,
+        walletId: 'wallet-1',
+        createdAt: oldDate,
+        metadata: { flwTxId: 'flw-42', points: 5000 },
+      });
+
+      mockPrisma.transaction.findMany.mockResolvedValue([tx]);
+      mockPrisma.transaction.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.wallet.update.mockResolvedValue({ id: 'wallet-1', balance: 5000 });
+      mockFlutterwave.verify.mockResolvedValue('ACCEPTED');
+
+      await scheduler.retryStuckFlutterwaveTransactions();
+
+      expect(mockFlutterwave.verify).toHaveBeenCalledWith('flw-42');
+      expect(mockPrisma.transaction.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'completed' } }),
+      );
+      expect(mockPrisma.wallet.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'wallet-1' },
+          data: { balance: { increment: 5000 } },
+        }),
+      );
+    });
+
+    it('marque la transaction failed quand Flutterwave répond REFUSED', async () => {
+      const tx = makeTransaction({
+        status: 'pending',
+        reference: 'WALLET-FLUTTERWAVE-DEF456',
+        amount: 3000,
+        walletId: 'wallet-2',
+        createdAt: oldDate,
+        metadata: { flwTxId: 'flw-99' },
+      });
+
+      mockPrisma.transaction.findMany.mockResolvedValue([tx]);
+      mockPrisma.transaction.update.mockResolvedValue({ ...tx, status: 'failed' });
+      mockFlutterwave.verify.mockResolvedValue('REFUSED');
+
+      await scheduler.retryStuckFlutterwaveTransactions();
+
+      expect(mockPrisma.transaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'failed' } }),
+      );
+      expect(mockPrisma.wallet.update).not.toHaveBeenCalled();
+    });
+
+    it('marque failed et ne contacte pas Flutterwave si flwTxId est absent', async () => {
+      const tx = makeTransaction({
+        status: 'pending',
+        reference: 'WALLET-FLUTTERWAVE-GHI789',
+        amount: 2000,
+        walletId: 'wallet-3',
+        createdAt: oldDate,
+        metadata: {},  // pas de flwTxId
+      });
+
+      mockPrisma.transaction.findMany.mockResolvedValue([tx]);
+      mockPrisma.transaction.update.mockResolvedValue({ ...tx, status: 'failed' });
+
+      await scheduler.retryStuckFlutterwaveTransactions();
+
+      expect(mockFlutterwave.verify).not.toHaveBeenCalled();
+      expect(mockPrisma.transaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'failed' } }),
+      );
+    });
+
+    it('ne traite pas les transactions récentes (moins de 2h)', async () => {
+      // findMany renvoie [] car la requête filtre createdAt <= cutoff
+      mockPrisma.transaction.findMany.mockResolvedValue([]);
+
+      await scheduler.retryStuckFlutterwaveTransactions();
+
+      expect(mockFlutterwave.verify).not.toHaveBeenCalled();
+      expect(mockPrisma.transaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('ne fait rien si aucune transaction bloquée', async () => {
+      mockPrisma.transaction.findMany.mockResolvedValue([]);
+
+      await scheduler.retryStuckFlutterwaveTransactions();
+
+      expect(mockFlutterwave.verify).not.toHaveBeenCalled();
     });
   });
 });
