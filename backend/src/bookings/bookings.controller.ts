@@ -1,9 +1,11 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request, InternalServerErrorException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles, CurrentUser } from '../auth/decorators';
 
+@SkipThrottle()
 @Controller('bookings')
 @UseGuards(JwtAuthGuard)
 export class BookingsController {
@@ -112,12 +114,77 @@ export class BookingsController {
     return this.bookingsService.completeRide(userId, id);
   }
 
+  @Patch(':id/breakdown')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  reportBreakdown(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.reportBreakdown(userId, id);
+  }
+
   // 5.B2 — Passager confirme l'arrivée à destination
   @Patch(':id/confirm')
   @UseGuards(RolesGuard)
   @Roles('passenger')
   confirmRide(@CurrentUser('id') userId: string, @Param('id') id: string) {
     return this.bookingsService.confirmRide(userId, id);
+  }
+
+  // ── Modification de destination ─────────────────────────────────────────────
+
+  @Patch(':id/destination')
+  @UseGuards(RolesGuard)
+  @Roles('passenger')
+  requestDestinationChange(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body() body: { newDestination: string; newDestLat?: number; newDestLng?: number },
+  ) {
+    return this.bookingsService.requestDestinationChange(userId, id, body.newDestination, body.newDestLat, body.newDestLng);
+  }
+
+  @Post(':id/destination/respond')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  respondDestinationChange(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('accepted') accepted: boolean,
+  ) {
+    return this.bookingsService.respondDestinationChange(userId, id, accepted);
+  }
+
+  // ── Consigne du véhicule ────────────────────────────────────────────────────
+
+  @Patch(':id/consigne/start')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  startConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.startConsigne(id, userId);
+  }
+
+  @Patch(':id/consigne/end')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  endConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.endConsigne(id, userId);
+  }
+
+  @Delete(':id/consigne')
+  @UseGuards(RolesGuard)
+  @Roles('passenger')
+  cancelConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.cancelConsigne(id, userId);
+  }
+
+  @Patch(':id/consigne/rating')
+  @UseGuards(RolesGuard)
+  @Roles('passenger')
+  rateConsigne(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('rating') rating: number,
+  ) {
+    return this.bookingsService.rateConsigne(id, userId, Number(rating));
   }
 
   // Admin

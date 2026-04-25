@@ -30,6 +30,7 @@ const DEFAULT_VEHICLE_SEATS: Record<string, number> = {
 import { FlightsService } from '../flights/flights.service';
 import { AuditService } from '../audit/audit.service';
 import { ForfaitsService } from '../forfaits/forfaits.service';
+import { Forfait } from '@prisma/client';
 
 @Injectable()
 export class BookingsService {
@@ -341,13 +342,14 @@ export class BookingsService {
     const bookingPointValue = bookingTariffs.pointValue ?? 1; // pts par unité monétaire locale
 
     // ── Forfait check ──────────────────────────────────────────────────────────
-    let activeForfait: any = null;
+    let activeForfait: Forfait | null = null;
     let pricingMode = 'kilometrage';
 
     if (dto.forfaitId) {
       // Passager a sélectionné un forfait explicitement
       activeForfait = await this.forfaitsService.findOne(dto.forfaitId).catch(() => null);
-      if (activeForfait && !activeForfait.isActive) activeForfait = null;
+      if (!activeForfait) throw new BadRequestException('FORFAIT_NOT_FOUND');
+      if (!activeForfait.isActive) throw new BadRequestException('FORFAIT_INACTIVE');
     } else if (dto.departureAirport && dto.destLat && dto.destLng) {
       // Matching automatique
       activeForfait = await this.forfaitsService.match(

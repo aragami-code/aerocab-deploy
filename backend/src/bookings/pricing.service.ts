@@ -35,7 +35,8 @@ export class PricingService {
         }
       });
 
-      if (supplyCount === 0) return basePrice * 1.5; // Scarcity fallback
+      // Pas de chauffeurs en ligne → pas de surge (aucune offre ≠ offre rare)
+      if (supplyCount === 0) return basePrice;
 
       const ratio = demandCount / supplyCount;
       let multiplier = 1.0;

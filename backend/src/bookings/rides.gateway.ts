@@ -76,6 +76,13 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.userSockets.set(userId, filtered);
       } else {
         this.userSockets.delete(userId);
+        // S221 — Plus aucun socket actif → marquer le driver offline
+        if (client.data.role === 'driver') {
+          this.prisma.driverProfile.updateMany({
+            where: { userId },
+            data: { isOnline: false, lastActive: new Date() },
+          }).catch(() => {});
+        }
       }
     }
     this.logger.log(`[Rides] Client disconnected: ${client.id}`);
@@ -96,6 +103,12 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
       `[Rides] Driver ${client.data.userId} joined room driver:${data.driverId}`,
     );
     client.emit('joined:driver', { room: `driver:${data.driverId}` });
+
+    // S221 — Marquer le driver online + mettre à jour lastActive
+    this.prisma.driverProfile.update({
+      where: { id: data.driverId },
+      data: { isOnline: true, lastActive: new Date() },
+    }).catch(() => {});
 
     // Re-envoyer le booking pending s'il en existe un (rattrapage de race condition)
     try {
