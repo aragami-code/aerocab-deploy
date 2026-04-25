@@ -84,4 +84,8 @@ export class CreateBookingDto {
   @IsOptional()
   @IsNumber()
   expectedConsigneFcfa?: number; // Devis consigne affiché — vérifié côté backend avant création
+
+  @IsOptional()
+  @IsString()
+  forfaitId?: string; // UUID du forfait sélectionné par le passager
 }

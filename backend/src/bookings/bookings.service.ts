@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException, BadRequestException, ForbiddenException, ConflictException, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
@@ -10,6 +10,7 @@ import { PromosService } from '../promos/promos.service';
 import { PricingService } from './pricing.service';
 import { DispatchService } from './dispatch.service';
 import { RidesGateway } from './rides.gateway';
+import { RedisService } from '../redis/redis.service';
 import { Prisma } from '@prisma/client';
 
 // Valeurs par défaut (écrasées par la DB via SettingsService)
@@ -28,6 +29,7 @@ const DEFAULT_VEHICLE_SEATS: Record<string, number> = {
 
 import { FlightsService } from '../flights/flights.service';
 import { AuditService } from '../audit/audit.service';
+import { ForfaitsService } from '../forfaits/forfaits.service';
 
 @Injectable()
 export class BookingsService {
@@ -45,6 +47,8 @@ export class BookingsService {
     private config: ConfigService,
     private flightsService: FlightsService,
     private audit: AuditService,
+    private redis: RedisService,
+    private readonly forfaitsService: ForfaitsService,
   ) {}
 
   /** 0.B17 — Capacité d'un type de véhicule depuis AppSetting vehicle_capacity (JSON). */
@@ -289,7 +293,21 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
-    // 0. Guard : pas de double réservation active
+    // 0a. Guard : workflow activé/désactivé par l'admin
+    const workflowKey = dto.type === 'ARRIVAL' ? 'workflow_arrival_enabled'
+      : dto.type === 'DEPARTURE' ? 'workflow_departure_enabled'
+      : 'workflow_international_enabled';
+    const workflowEnabled = await this.settingsService.get(workflowKey, 'true');
+    if (workflowEnabled === 'false') {
+      const labels: Record<string, string> = {
+        ARRIVAL: 'Arrivée aéroport',
+        DEPARTURE: 'Départ vers aéroport',
+        INTERNATIONAL: 'Réservation internationale',
+      };
+      throw new BadRequestException(`Le service "${labels[dto.type] ?? dto.type}" est indisponible pour le moment. Veuillez réessayer ultérieurement.`);
+    }
+
+    // 0b. Guard : pas de double réservation active
     const existingActive = await this.prisma.booking.findFirst({
       where: { passengerId, status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] } },
     });
@@ -322,28 +340,78 @@ export class BookingsService {
     const bookingTariffs = await this.settingsService.getTariffsByCountry(bookingCountryCode);
     const bookingPointValue = bookingTariffs.pointValue ?? 1; // pts par unité monétaire locale
 
-    const priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distanceKm, dto.vehicleType, bookingTariffs);
+    // ── Forfait check ──────────────────────────────────────────────────────────
+    let activeForfait: any = null;
+    let pricingMode = 'kilometrage';
+
+    if (dto.forfaitId) {
+      // Passager a sélectionné un forfait explicitement
+      activeForfait = await this.forfaitsService.findOne(dto.forfaitId).catch(() => null);
+      if (activeForfait && !activeForfait.isActive) activeForfait = null;
+    } else if (dto.departureAirport && dto.destLat && dto.destLng) {
+      // Matching automatique
+      activeForfait = await this.forfaitsService.match(
+        dto.departureAirport,
+        dto.destLat,
+        dto.destLng,
+        dto.vehicleType,
+        dto.type,
+      );
+    }
+
+    let priceInFcfa: number;
+    if (activeForfait) {
+      pricingMode = 'forfait';
+      priceInFcfa = this.forfaitsService.calculatePrice(activeForfait, {
+        night:    this.isNightTime(),
+        rain:     dto.rainSurge ?? false,
+        rushHour: this.isRushHour(bookingTariffs.surge),
+      });
+    } else {
+      priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distanceKm, dto.vehicleType, bookingTariffs);
+    }
+    // ── End forfait check ──────────────────────────────────────────────────────
+
     const finalPricePoints = Math.ceil(priceInFcfa / bookingPointValue);
 
     this.logger.log(`[Pricing] Distance: ${distanceKm.toFixed(2)}km | FCFA: ${priceInFcfa} | Points: ${finalPricePoints} (pointValue=${bookingPointValue})`);
 
-    // 2. Surge Pricing (offre/demande)
+    // 2. Surge Pricing (offre/demande) — skipped for forfait (price already fixed)
     let dynamicPricePoints = finalPricePoints;
     let supplyDemandMultiplier = 1.0;
-    try {
-      dynamicPricePoints = await this.pricingService.calculateEstimatedPrice(finalPricePoints, dto.departureAirport);
-      supplyDemandMultiplier = finalPricePoints > 0 ? dynamicPricePoints / finalPricePoints : 1.0;
-    } catch (err) {
-      this.logger.warn(`Surge Pricing failed, using base points: ${err.message}`);
+    let surgeCtx: { multiplier: number; nightSurge: boolean; rainSurge: boolean; rushHourSurge: boolean };
+    let finalSurgeMultiplier = 1.0;
+
+    if (!activeForfait) {
+      try {
+        dynamicPricePoints = await this.pricingService.calculateEstimatedPrice(finalPricePoints, dto.departureAirport);
+        supplyDemandMultiplier = finalPricePoints > 0 ? dynamicPricePoints / finalPricePoints : 1.0;
+      } catch (err) {
+        this.logger.warn(`Surge Pricing failed, using base points: ${err.message}`);
+      }
+
+      // 3. Surcharges contextuelles (nuit / pluie / heure de pointe)
+      surgeCtx = await this.computeSurgeContextWithTariffs(dto, bookingTariffs);
+      dynamicPricePoints = Math.round(dynamicPricePoints * surgeCtx.multiplier);
+      finalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
+      this.logger.log(`[Surge] offre/demande=${supplyDemandMultiplier.toFixed(2)} ctx=${surgeCtx.multiplier.toFixed(2)} total=${finalSurgeMultiplier.toFixed(2)} nuit=${surgeCtx.nightSurge} pluie=${surgeCtx.rainSurge} rush=${surgeCtx.rushHourSurge}`);
+
+      // 3b. Surcharge INTERNATIONAL (configurable via admin)
+      if (dto.type === 'INTERNATIONAL') {
+        const surchargeRaw = await this.settingsService.get('international_surcharge_percent', '0');
+        const surchargePercent = Math.max(0, parseFloat(surchargeRaw) || 0);
+        if (surchargePercent > 0) {
+          dynamicPricePoints = Math.round(dynamicPricePoints * (1 + surchargePercent / 100));
+          this.logger.log(`[Pricing] Surcharge INTERNATIONAL +${surchargePercent}% → ${dynamicPricePoints} pts`);
+        }
+      }
+    } else {
+      // Forfait: surges already included in calculatePrice; set neutral surge context
+      surgeCtx = { multiplier: 1.0, nightSurge: false, rainSurge: false, rushHourSurge: false };
+      this.logger.log(`[Pricing] Forfait mode — surges intégrés dans le tarif forfaitaire`);
     }
 
-    // 3. Surcharges contextuelles (nuit / pluie / heure de pointe)
-    const surgeCtx = await this.computeSurgeContextWithTariffs(dto, bookingTariffs);
-    dynamicPricePoints = Math.round(dynamicPricePoints * surgeCtx.multiplier);
-    const finalSurgeMultiplier = Math.round(supplyDemandMultiplier * surgeCtx.multiplier * 100) / 100;
-    this.logger.log(`[Surge] offre/demande=${supplyDemandMultiplier.toFixed(2)} ctx=${surgeCtx.multiplier.toFixed(2)} total=${finalSurgeMultiplier.toFixed(2)} nuit=${surgeCtx.nightSurge} pluie=${surgeCtx.rainSurge} rush=${surgeCtx.rushHourSurge}`);
-
-    // 3b. Verrou de prix : tolérance lue depuis AppSetting (0.B16)
+    // 3c. Verrou de prix : tolérance lue depuis AppSetting (0.B16)
     const toleranceRaw = await this.settingsService.get('price_change_tolerance_percent', '5');
     const priceTolerance = (parseFloat(toleranceRaw) || 5) / 100;
 
@@ -398,7 +466,7 @@ export class BookingsService {
     if (dto.promoCode) {
       const promo = await this.promosService.validatePromo(dto.promoCode, passengerId);
       if (promo) {
-        discountAmount = Math.round(dynamicPricePoints * (promo.discount / 100));
+        discountAmount = Math.min(promo.discount, dynamicPricePoints);
         pointsAfterDiscount = dynamicPricePoints - discountAmount;
         appliedPromoCode = dto.promoCode.toUpperCase();
       }
@@ -474,9 +542,14 @@ export class BookingsService {
       }
     }
 
-    // Initial driver assignment (Selection of the top one from the match for the initial record)
-    // but the broadcast will be sent to all.
-    const driver = eligibleDrivers.length > 0 ? eligibleDrivers[0] : null;
+    // S141 — Dispatch lock : claim atomique du premier driver via Redis SET NX EX.
+    // Deux bookings concurrents ne peuvent pas obtenir le même driver simultanément.
+    // TTL = 120s (fenêtre max accept/decline). Libéré dans accept/decline/cancel.
+    let driver: (typeof eligibleDrivers)[0] | null = null;
+    for (const candidate of eligibleDrivers) {
+      const acquired = await this.redis.setNx(`dispatch:lock:${candidate.id}`, 'locked', 120);
+      if (acquired) { driver = candidate; break; }
+    }
 
     // Sanity check: Coordinates (guards against NaN from client)
     const cleanDestLat = (typeof dto.destLat === 'number' && !isNaN(dto.destLat)) ? dto.destLat : null;
@@ -489,7 +562,8 @@ export class BookingsService {
     if (isDeparture && cleanPickupLat && cleanPickupLng) {
       const isRawCoords = !resolvedPickupAddress || /^-?\d+(\.\d+)?\s*[°,]/.test(resolvedPickupAddress);
       if (isRawCoords) {
-        const mapsKey = this.config.get<string>('GOOGLE_MAPS_API_KEY', '');
+        const mapsKey = await this.settingsService.get('google_maps_key')
+          || this.config.get<string>('GOOGLE_MAPS_API_KEY', '');
         if (mapsKey) {
           try {
             const geoRes = await fetch(
@@ -516,18 +590,48 @@ export class BookingsService {
     // C2 — Ordre critique : booking.create() en PREMIER, débit points en SECOND.
     // Si la création du booking échoue (contrainte DB, erreur), le rollback de la
     // transaction annule également le débit → aucun argent perdu.
-    const booking = await this.prisma.$transaction(async (tx) => {
-      // Vérification du solde AVANT de toucher quoi que ce soit
-      if (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points') {
-        const result = await tx.pointsTransaction.aggregate({
-          where: { userId: passengerId },
-          _sum: { points: true },
-        });
-        const balance = result._sum.points ?? 0;
+    // S177 — L'index partiel unique sur (passenger_id) WHERE status actif bloque les doublons
+    // au niveau DB. On attrape P2002 pour retourner une 400 lisible plutôt qu'un 500.
+    let booking: any;
+    try {
+    booking = await this.prisma.$transaction(async (tx) => {
+      // S118 — Idempotence : un passager ne peut avoir qu'un seul booking actif à la fois.
+      // Vérifié DANS la transaction pour éviter les race conditions (double-tap).
+      const existingActive = await tx.booking.findFirst({
+        where: {
+          passengerId,
+          status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] },
+        },
+        select: { id: true },
+      });
+      if (existingActive) {
+        throw new BadRequestException('Vous avez déjà une réservation en cours');
+      }
 
-        if (balance < pointsRequired) {
+      // D5 — Débit atomique wallet (protection race condition double-dépense)
+      // wallet.updateMany avec WHERE balance >= pointsRequired est une opération atomique :
+      // si deux bookings concurrents lisent le même solde, le second obtiendra count=0 et sera rejeté.
+      if (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points') {
+        // Garantir l'existence du wallet avant le débit
+        await tx.wallet.upsert({
+          where: { userId: passengerId },
+          update: {},
+          create: { userId: passengerId, balance: 0 },
+        });
+
+        const debited = await tx.wallet.updateMany({
+          where: { userId: passengerId, balance: { gte: pointsRequired } },
+          data: { balance: { decrement: pointsRequired } },
+        });
+
+        if (debited.count === 0) {
+          // Incrémente le compteur de fraude (clé expire après 24h)
+          this.redis.incr(`fraud:balance_fail:${passengerId}`)
+            .then(() => this.redis.expire(`fraud:balance_fail:${passengerId}`, 86400))
+            .catch(() => {});
+          const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
           throw new BadRequestException(
-            `Solde insuffisant : ${balance} pts disponibles (Besoin de ${pointsRequired} pts pour ${pointsAfterDiscount} FCFA)`,
+            `Solde insuffisant : ${wallet?.balance ?? 0} pts disponibles (${pointsRequired} pts requis)`,
           );
         }
       }
@@ -564,6 +668,9 @@ export class BookingsService {
           consigneDailyRate: consigneDailyRate || null,
           consigneVehicleType: dto.withConsigne ? consigneVehicleType : null,
           consigneTotal: consigneTotal || null,
+          // Forfait
+          forfaitId:   activeForfait?.id ?? null,
+          pricingMode: pricingMode,
         } as any,
         include: {
           passenger: { select: { name: true } },
@@ -575,7 +682,7 @@ export class BookingsService {
         },
       });
 
-      // 2. Débiter les points APRÈS création booking (même transaction → rollback atomique)
+      // 2. Enregistrement audit du débit (wallet.balance déjà décrémenté atomiquement ci-dessus)
       if (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points') {
         await tx.pointsTransaction.create({
           data: {
@@ -615,13 +722,23 @@ export class BookingsService {
 
       return newBooking;
     }) as any;
+    } catch (err: any) {
+      // S177 — Index unique partiel sur passenger_id : doublon concurrent → 400 propre
+      if (err?.code === 'P2002' || err?.message?.includes('booking_passenger_one_active')) {
+        if (driver) this.redis.del(`dispatch:lock:${driver.id}`).catch(() => {});
+        throw new BadRequestException('Vous avez déjà une réservation en cours');
+      }
+      if (driver) this.redis.del(`dispatch:lock:${driver.id}`).catch(() => {});
+      throw err;
+    }
 
     // Bonus for first booking — count exclut la course qui vient d'être créée
     const totalBookings = await this.prisma.booking.count({
       where: { passengerId, id: { not: booking.id } },
     });
     if (totalBookings === 0) {
-      this.points.addPoints(passengerId, 500, 'Bonus première course').catch(() => {});
+      const firstRideBonus = parseInt(await this.settingsService.get('first_ride_bonus_points', '500'), 10) || 500;
+      this.points.addPoints(passengerId, firstRideBonus, 'Bonus première course').catch(() => {});
     }
 
     // Notify passenger — booking created, searching for a driver
@@ -640,17 +757,16 @@ export class BookingsService {
       .emit('booking:created', { id: booking.id, status: 'pending' });
 
     // Phase 3: Smart Broadcast Activation
-    // Notify all eligible drivers (Pre-landing: All, Post-landing: Nearby)
+    // Notify all eligible drivers via Socket.io (online) + FCM push (all approved)
     if (eligibleDrivers.length > 0) {
       for (const d of eligibleDrivers) {
-        // Send Push Notification
         this.notifications.sendToUser(
-          d.userId, 
+          d.userId,
           'Nouvelle course disponible 🚗',
-          `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`
+          `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
+          { bookingId: booking.id, type: 'new_booking' },
         ).catch(() => {});
 
-        // Emit Socket.io
         this.ridesGateway.notifyNewBooking(d.id, {
           id: booking.id,
           passengerId: booking.passengerId,
@@ -663,7 +779,25 @@ export class BookingsService {
           isPreLanding: isPreLanding,
         });
       }
-      this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} drivers.`);
+      this.logger.log(`[Dispatch] Broadcasted booking ${booking.id} to ${eligibleDrivers.length} online drivers.`);
+    } else {
+      // Aucun chauffeur online → notifier TOUS les chauffeurs approuvés via FCM
+      // pour les réveiller (app fermée). Ils pourront se mettre en ligne et accepter.
+      const allApprovedDrivers = await this.prisma.driverProfile.findMany({
+        where: { status: 'approved', user: { fcmToken: { not: null } } },
+        select: { userId: true },
+      });
+      for (const d of allApprovedDrivers) {
+        this.notifications.sendToUser(
+          d.userId,
+          'Course en attente 🔔',
+          `Une course vers ${booking.destination} attend un chauffeur. Connectez-vous pour l'accepter.`,
+          { bookingId: booking.id, type: 'wake_up' },
+        ).catch(() => {});
+      }
+      if (allApprovedDrivers.length > 0) {
+        this.logger.log(`[Dispatch] No online drivers — FCM wake-up sent to ${allApprovedDrivers.length} approved drivers.`);
+      }
     }
 
     // H4 — setTimeout supprimé : il était non-persistant (perdu au redémarrage du serveur).
@@ -710,7 +844,14 @@ export class BookingsService {
     const booking = await this.prisma.booking.findFirst({
       where: {
         passengerId,
-        status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] },
+        OR: [
+          { status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress', 'passenger_confirming'] } },
+          {
+            status: { in: ['passenger_confirming', 'completed'] },
+            withConsigne: true,
+            OR: [{ consigneStatus: null }, { consigneStatus: 'active' }],
+          },
+        ],
       },
       include: {
         driverProfile: {
@@ -848,7 +989,7 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Réservation introuvable');
 
     // M8 — Fenêtre d'annulation étendue à arrived_at_airport, avec pénalité.
-    // - pending / confirmed   → remboursement 100% (driver n'a pas encore bougé)
+    // - pending / confirmed   → remboursement 100% ou 50% selon règle 48h
     // - arrived_at_airport    → remboursement 50% (driver a fait le déplacement)
     // - in_progress et au-delà → annulation interdite
     const cancellableStatuses = ['pending', 'confirmed', 'arrived_at_airport'];
@@ -856,9 +997,25 @@ export class BookingsService {
       throw new BadRequestException('Cette réservation ne peut plus être annulée');
     }
 
-    const isLateCancel = booking.status === 'arrived_at_airport';
+    // S465 — Règle 48h : pénalité si annulation < 48h avant le vol (INTERNATIONAL/DEPARTURE)
+    // Le calcul est en durée UTC (timestamps), l'affichage côté client se fait en WAT.
+    let isLateCancelBy48h = false;
+    if (booking.flightNumber && booking.type !== 'ARRIVAL') {
+      const flight = await this.prisma.flight.findFirst({
+        where: { flightNumber: booking.flightNumber, userId: passengerId },
+        select: { scheduledArrival: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (flight?.scheduledArrival) {
+        const hoursUntilFlight = (flight.scheduledArrival.getTime() - Date.now()) / (1000 * 60 * 60);
+        isLateCancelBy48h = hoursUntilFlight < 48;
+      }
+    }
+
+    const isLateCancel = booking.status === 'arrived_at_airport' || isLateCancelBy48h;
     const price = Number(booking.estimatedPrice) || 0;
-    const refundRate = isLateCancel ? 0.5 : 1.0;
+    const lateCancelRate = parseFloat(await this.settingsService.get('late_cancel_refund_rate', '0.5')) || 0.5;
+    const refundRate = isLateCancel ? lateCancelRate : 1.0;
     const pointsToRefund = Math.ceil(price * refundRate);
     const penaltyPoints  = Math.floor(price * (1 - refundRate));
 
@@ -871,19 +1028,24 @@ export class BookingsService {
 
       const isPointsPayment = booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points';
 
-      // Remboursement passager (100% ou 50%)
+      // Remboursement passager (100% ou 50%) — wallet + audit
       if (isPointsPayment && pointsToRefund > 0) {
         await tx.pointsTransaction.create({
           data: {
             userId: passengerId,
             type: 'credit',
             points: pointsToRefund,
-            label: `Remboursement ${isLateCancel ? '50%' : '100%'} annulation course ${bookingId.slice(0, 8)}`,
+            label: `Remboursement ${isLateCancel ? '50%' : '100%'} annulation course ${bookingId.slice(0, 8)}${isLateCancelBy48h ? ' (< 48h avant vol)' : ''}`,
           },
+        });
+        await tx.wallet.upsert({
+          where: { userId: passengerId },
+          update: { balance: { increment: pointsToRefund } },
+          create: { userId: passengerId, balance: pointsToRefund },
         });
       }
 
-      // M8 — Compensation pénalité au chauffeur (50% si late cancel)
+      // M8 — Compensation pénalité au chauffeur (50% si late cancel) — wallet + audit
       if (isLateCancel && isPointsPayment && penaltyPoints > 0 && booking.driverProfile?.userId) {
         await tx.pointsTransaction.create({
           data: {
@@ -893,6 +1055,11 @@ export class BookingsService {
             label: `Compensation annulation tardive course ${bookingId.slice(0, 8)}`,
           },
         });
+        await tx.wallet.upsert({
+          where: { userId: booking.driverProfile.userId },
+          update: { balance: { increment: penaltyPoints } },
+          create: { userId: booking.driverProfile.userId, balance: penaltyPoints },
+        });
       }
 
       return updated;
@@ -900,6 +1067,11 @@ export class BookingsService {
 
     // Notifier le chauffeur
     if (booking.driverProfile) {
+      // S141 — Libère le dispatch lock si le booking était encore pending
+      if (booking.status === 'pending') {
+        this.redis.del(`dispatch:lock:${booking.driverProfile.id}`).catch(() => {});
+      }
+
       this.ridesGateway.server
         .to(`driver:${booking.driverProfile.id}`)
         .emit('booking:cancelled', { bookingId, reason: 'passenger_cancelled', isLateCancel });
@@ -1145,12 +1317,33 @@ export class BookingsService {
       });
 
       if (!booking) throw new NotFoundException('Réservation non trouvée');
-      if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+      // S141 — Un booking sans driver assigné (driverProfileId=null) est "open" :
+      // n'importe quel driver qui a reçu le broadcast peut l'accepter en premier.
+      if (booking.driverProfileId !== null && booking.driverProfileId !== driverProfile.id) {
+        throw new ForbiddenException('Accès refusé');
+      }
 
-      // UPDATE conditionnel : ne passe à 'confirmed' que si encore en 'pending'
+      // S141 — Empêche un driver déjà actif sur une course d'en accepter une deuxième.
+      const driverAlreadyActive = await tx.booking.findFirst({
+        where: {
+          driverProfileId: driverProfile.id,
+          status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] },
+        },
+        select: { id: true },
+      });
+      if (driverAlreadyActive) {
+        throw new BadRequestException('Vous avez déjà une course active en cours');
+      }
+
+      // UPDATE conditionnel : atomique — le premier driver à écrire gagne (TOCTOU safe).
+      // Accepte le booking s'il est encore pending ET (assigné à ce driver OU non assigné).
       const result = await tx.booking.updateMany({
-        where: { id: bookingId, driverProfileId: driverProfile.id, status: 'pending' },
-        data: { status: 'confirmed' },
+        where: {
+          id: bookingId,
+          status: 'pending',
+          OR: [{ driverProfileId: driverProfile.id }, { driverProfileId: null }],
+        },
+        data: { status: 'confirmed', driverProfileId: driverProfile.id },
       });
 
       if (result.count === 0) {
@@ -1160,7 +1353,10 @@ export class BookingsService {
       return { passengerId: booking.passengerId };
     });
 
-    this.ridesGateway.server.to(`passenger:${passengerId}`).emit('booking:accepted', { id: bookingId });
+    // S141 — Libère le dispatch lock : driver accepté, la course est confirmée.
+    this.redis.del(`dispatch:lock:${driverProfile.id}`).catch(() => {});
+
+    this.ridesGateway.server.to(`passenger:${passengerId}`).emit('booking:accepted', { id: bookingId, status: 'confirmed' });
     this.notifications.sendToUser(passengerId, 'Chauffeur en route 🚗', 'Votre chauffeur a accepté la course et arrive.').catch(() => {});
 
     this.audit.log({ action: 'booking.accepted', entity: 'booking', entityId: bookingId, userId: driverUserId, meta: { driverProfileId: driverProfile.id } }).catch(() => {});
@@ -1176,6 +1372,9 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Réservation non trouvée');
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
     if (booking.status !== 'pending') throw new BadRequestException('Statut incorrect');
+
+    // S141 — Libère le dispatch lock : driver disponible pour d'autres courses.
+    this.redis.del(`dispatch:lock:${driverProfile.id}`).catch(() => {});
 
     // Cherche un autre driver disponible autour du GPS passager (DEPARTURE) ou de l'aéroport (ARRIVAL)
     // Fix: ne plus utiliser AIRPORT_COORDS hardcodé pour les DEPARTURE
@@ -1216,10 +1415,30 @@ export class BookingsService {
 
       return { id: bookingId, status: 'pending' };
     } else {
-      // Aucun chauffeur disponible — terminer la recherche
-      await this.prisma.booking.update({
-        where: { id: bookingId },
-        data: { driverProfileId: null, status: 'no_driver_available' },
+      // Aucun chauffeur disponible — remboursement + fin de recherche
+      const price = Number(booking.estimatedPrice) || 0;
+      const isPoints = booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points';
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.booking.update({
+          where: { id: bookingId },
+          data: { driverProfileId: null, status: 'no_driver_available' },
+        });
+        if (isPoints && price > 0) {
+          await tx.pointsTransaction.create({
+            data: {
+              userId: booking.passengerId,
+              type: 'credit',
+              points: price,
+              label: `Remboursement aucun chauffeur — course ${bookingId.slice(0, 8)}`,
+            },
+          });
+          await tx.wallet.upsert({
+            where: { userId: booking.passengerId },
+            update: { balance: { increment: price } },
+            create: { userId: booking.passengerId, balance: price },
+          });
+        }
       });
 
       this.ridesGateway.notifyPassenger(booking.passengerId, 'booking_status_changed', { id: bookingId, status: 'no_driver_available' });
@@ -1230,6 +1449,152 @@ export class BookingsService {
     }
   }
 
+  // ── D2 : Panne chauffeur ────────────────────────────────────────────────────
+  async reportBreakdown(driverUserId: string, bookingId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({
+      where: { userId: driverUserId },
+      include: { user: { select: { id: true } } },
+    });
+    if (!driverProfile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
+    if (!['confirmed', 'arrived_at_airport', 'in_progress'].includes(booking.status)) {
+      throw new BadRequestException('La course n\'est pas active');
+    }
+
+    // Notifier immédiatement le passager — panne signalée
+    this.ridesGateway.notifyPassenger(booking.passengerId, 'driver_breakdown', {
+      bookingId,
+      searching: true,
+    });
+
+    // Alerte admin en temps réel
+    this.notifications.sendToAdmins(
+      'Panne chauffeur 🚨',
+      `Chauffeur en panne — booking ${bookingId.slice(0, 8)} — recherche remplaçant en cours.`,
+      { bookingId, type: 'driver_breakdown' },
+    ).catch(() => {});
+
+    // Libérer le chauffeur en panne
+    await this.prisma.driverProfile.update({
+      where: { id: driverProfile.id },
+      data: { isAvailable: true },
+    });
+
+    // Tenter de trouver un remplaçant
+    const redispatchCoords = (booking.pickupLat && booking.pickupLng)
+      ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+      : undefined;
+    const nextDriver = await this.findBestDriver(
+      booking.departureAirport,
+      driverProfile.id,
+      booking.vehicleType,
+      redispatchCoords,
+    );
+
+    if (nextDriver) {
+      // Réassigner sans modifier le prix ni le statut du passager
+      await this.prisma.booking.update({
+        where: { id: bookingId },
+        data: { driverProfileId: nextDriver.id, status: 'pending' },
+      });
+
+      this.ridesGateway.server.to(`driver:${nextDriver.id}`).emit('booking:new_request', {
+        id: booking.id,
+        passengerId: booking.passengerId,
+        flightNumber: booking.flightNumber,
+        destination: booking.destination,
+        vehicleType: booking.vehicleType,
+        estimatedPrice: booking.estimatedPrice,
+        departureAirport: booking.departureAirport,
+        seats: await this.getVehicleSeats(booking.vehicleType),
+      });
+      this.notifications.sendToUser(
+        nextDriver.user.id,
+        'Remplacement urgence 🚗',
+        `Prise en charge urgente vers ${booking.destination}`,
+      ).catch(() => {});
+
+      this.ridesGateway.notifyPassenger(booking.passengerId, 'driver_breakdown', {
+        bookingId,
+        searching: false,
+        replaced: true,
+      });
+      this.notifications.sendToUser(
+        booking.passengerId,
+        'Chauffeur remplacé 🔄',
+        'Votre chauffeur a signalé une panne. Un nouveau chauffeur a été trouvé.',
+      ).catch(() => {});
+
+      this.audit.log({
+        action: 'booking.driver_breakdown',
+        entity: 'booking',
+        entityId: bookingId,
+        userId: driverUserId,
+        meta: { replacedBy: nextDriver.id, status: 'reassigned' },
+      }).catch(() => {});
+
+      return { bookingId, replaced: true, status: 'pending' };
+    }
+
+    // Aucun remplaçant — remboursement 100% et annulation
+    const price = Number(booking.estimatedPrice) || 0;
+    const isPoints = booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points';
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: bookingId },
+        data: { status: 'cancelled', cancelledAt: new Date() },
+      });
+      if (isPoints && price > 0) {
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'credit',
+            points: price,
+            label: `Remboursement 100% — panne chauffeur`,
+          },
+        });
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { increment: price } },
+          create: { userId: booking.passengerId, balance: price },
+        });
+      }
+    });
+
+    this.ridesGateway.notifyPassenger(booking.passengerId, 'driver_breakdown', {
+      bookingId,
+      searching: false,
+      replaced: false,
+      cancelled: true,
+    });
+    this.ridesGateway.notifyPassenger(booking.passengerId, 'booking_status_changed', {
+      id: bookingId,
+      status: 'cancelled',
+      reason: 'driver_breakdown',
+    });
+    this.notifications.sendToUser(
+      booking.passengerId,
+      'Course annulée — panne chauffeur',
+      isPoints && price > 0
+        ? `Votre chauffeur a eu une panne. Aucun remplaçant disponible. ${price} pts remboursés.`
+        : 'Votre chauffeur a eu une panne. Aucun remplaçant disponible. Course annulée.',
+    ).catch(() => {});
+
+    this.audit.log({
+      action: 'booking.driver_breakdown',
+      entity: 'booking',
+      entityId: bookingId,
+      userId: driverUserId,
+      meta: { status: 'cancelled_no_replacement', refund: price },
+    }).catch(() => {});
+
+    return { bookingId, replaced: false, status: 'cancelled' };
+  }
+
   async getDriverActiveRide(driverUserId: string) {
     const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
     if (!driverProfile) return { booking: null };
@@ -1237,7 +1602,14 @@ export class BookingsService {
     const booking = await this.prisma.booking.findFirst({
       where: {
         driverProfileId: driverProfile.id,
-        status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] },
+        OR: [
+          { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } },
+          {
+            status: { in: ['passenger_confirming', 'completed'] },
+            withConsigne: true,
+            OR: [{ consigneStatus: null }, { consigneStatus: 'active' }],
+          },
+        ],
       },
       include: { passenger: { select: { id: true, name: true, phone: true } } },
       orderBy: { createdAt: 'desc' },
@@ -1304,6 +1676,12 @@ export class BookingsService {
         shareTripEnabled: booking.shareTripEnabled,
         type: booking.type,
         pickupAddress: (booking as any).pickupAddress ?? null,
+        withConsigne: booking.withConsigne,
+        consigneDays: booking.consigneDays,
+        consigneDailyRate: booking.consigneDailyRate,
+        consigneTotal: booking.consigneTotal,
+        consigneStatus: (booking as any).consigneStatus ?? null,
+        consigneStartedAt: (booking as any).consigneStartedAt ?? null,
       },
     };
   }
@@ -1343,6 +1721,21 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Réservation non trouvée');
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
     if (booking.status !== 'arrived_at_airport') throw new BadRequestException('Statut incorrect');
+
+    // D5 — Vérification solde au démarrage (fenêtre longue entre réservation et prise en charge)
+    if (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') {
+      const wallet = await this.prisma.wallet.findUnique({ where: { userId: booking.passengerId } });
+      if (!wallet || wallet.balance < 0) {
+        this.audit.log({
+          action: 'fraud.negative_balance_at_start',
+          entity: 'booking',
+          entityId: bookingId,
+          userId: driverUserId,
+          meta: { passengerId: booking.passengerId, balance: wallet?.balance ?? null },
+        }).catch(() => {});
+        this.logger.warn(`[D5] Wallet négatif au démarrage — bookingId=${bookingId} passengerId=${booking.passengerId} balance=${wallet?.balance}`);
+      }
+    }
 
     const updated = await this.prisma.booking.update({
       where: { id: bookingId },
@@ -1400,6 +1793,8 @@ export class BookingsService {
     });
     if (!booking) throw new NotFoundException('Réservation non trouvée');
     if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    // Idempotent : déjà complétée par le scheduler → retourner succès sans erreur
+    if ((booking.status as string) === 'completed') return { id: bookingId, status: 'completed' };
     if ((booking.status as string) !== 'passenger_confirming') throw new BadRequestException('Statut incorrect');
     return this.finalizeRide(booking as any);
   }
@@ -1434,11 +1829,18 @@ export class BookingsService {
     this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroGo 24 !').catch(() => {});
 
     // Versement wallet chauffeur (après déduction commission plateforme)
+    // Le chauffeur est payé sur le PRIX PLEIN (avant promo) — la plateforme absorbe les remises.
     if (booking.driverProfile?.userId && booking.paymentMethod !== 'cash') {
       const rideTariffs = await this.settingsService.getTariffs();
-      const commissionRate = rideTariffs.commissionRate ?? 0.15;
-      const grossAmount = Number(booking.estimatedPrice);
-      const pointsEarned = Math.floor(grossAmount * (1 - commissionRate));
+      const commissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+      const grossAmount = Number(booking.estimatedPrice) + Number(booking.discountAmount ?? 0);
+      // Forfait: use forfait's driverPercent if the booking was priced as forfait
+      let driverEarningsPct = 1 - commissionRate;
+      if (booking.forfaitId) {
+        const forfait = await this.forfaitsService.findOne(booking.forfaitId).catch(() => null);
+        if (forfait?.driverPercent != null) driverEarningsPct = forfait.driverPercent / 100;
+      }
+      const pointsEarned = Math.floor(grossAmount * driverEarningsPct);
       let driverWallet = await this.prisma.wallet.findUnique({ where: { userId: booking.driverProfile.userId } });
       if (!driverWallet) {
         driverWallet = await this.prisma.wallet.create({ data: { userId: booking.driverProfile.userId, balance: 0 } });
@@ -1488,9 +1890,7 @@ export class BookingsService {
     }
 
     // M7 — Bonus parrainage au premier trajet complété du filleul.
-    // Protection race condition : on tente de créer une Transaction de référence unique
-    // REFERRAL-FIRST-RIDE-{passengerId}. Si deux courses terminent simultanément, la
-    // contrainte @unique sur Transaction.reference garantit qu'une seule réussit.
+    // PAR·049 : queue Redis pour retry en cas de crash après marqueur créé.
     try {
       const passenger = await this.prisma.user.findUnique({
         where: { id: booking.passengerId },
@@ -1504,10 +1904,13 @@ export class BookingsService {
           const tariffs = await this.settingsService.getTariffs();
           const onFirstRideBonus = tariffs.referralBonus?.onFirstRide ?? 1000;
           if (onFirstRideBonus > 0) {
-            // Idempotence : on crée d'abord un marqueur Wallet Transaction avec une
-            // reference unique. Si deux appels concurrents arrivent, le second échoue
-            // sur la contrainte @unique avant d'appeler addPoints.
             const idempotencyRef = `REFERRAL-FIRST-RIDE-${booking.passengerId}`;
+            // PAR·049 — Enqueue avant la transaction pour retry si crash entre marqueur et addPoints
+            await this.redis.set(
+              `referral:pending:${booking.passengerId}`,
+              JSON.stringify({ referrerId: passenger.referredBy, bonus: onFirstRideBonus, bookingId: booking.id }),
+              86400,
+            ).catch(() => {});
             const referrerWallet = await this.prisma.wallet.findUnique({ where: { userId: passenger.referredBy } });
             if (referrerWallet) {
               await this.prisma.transaction.create({
@@ -1519,20 +1922,276 @@ export class BookingsService {
               onFirstRideBonus,
               `Bonus parrainage — 1ère course de votre filleul`,
             );
+            // Succès — retirer de la queue retry
+            await this.redis.del(`referral:pending:${booking.passengerId}`).catch(() => {});
             this.logger.log(`[Referral] +${onFirstRideBonus} pts → parrain ${passenger.referredBy} (1ère course filleul ${booking.passengerId})`);
           }
         }
       }
     } catch (e: any) {
       // P2002 = unique constraint violation → bonus déjà crédité (race condition gagnée par l'autre appel)
-      if (e?.code !== 'P2002') {
+      if (e?.code === 'P2002') {
+        await this.redis.del(`referral:pending:${booking.passengerId}`).catch(() => {});
+      } else {
         this.logger.warn(`[Referral] Erreur bonus premier trajet: ${e.message}`);
+      }
+    }
+
+    // WAL·031 — Fidélité Nth course (+X pts toutes les N courses complétées)
+    try {
+      const completedCount = await this.prisma.booking.count({
+        where: { passengerId: booking.passengerId, status: 'completed' },
+      });
+      const nRaw = await this.settingsService.get('loyalty_bonus_every_n_rides', '10');
+      const n = parseInt(nRaw, 10) || 10;
+      if (completedCount > 0 && completedCount % n === 0) {
+        const bonusRaw = await this.settingsService.get('loyalty_bonus_points', '500');
+        const bonus = parseInt(bonusRaw, 10) || 500;
+        const ref = `LOYALTY-RIDE-${completedCount}-${booking.passengerId}`;
+        const passengerWallet = await this.prisma.wallet.findUnique({ where: { userId: booking.passengerId } });
+        if (passengerWallet) {
+          await this.prisma.transaction.create({
+            data: { walletId: passengerWallet.id, amount: bonus, type: 'deposit', status: 'completed', reference: ref },
+          });
+        }
+        await this.points.addPoints(booking.passengerId, bonus, `Fidélité — ${completedCount}ème course`);
+        this.logger.log(`[Loyalty] +${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
+      }
+    } catch (e: any) {
+      if (e?.code !== 'P2002') {
+        this.logger.warn(`[Loyalty] Erreur fidélité: ${e.message}`);
       }
     }
 
     this.audit.log({ action: 'booking.completed', entity: 'booking', entityId: booking.id, userId: booking.passengerId, meta: { finalPrice: booking.estimatedPrice, paymentMethod: booking.paymentMethod } }).catch(() => {});
 
     return { id: booking.id, status: 'completed' };
+  }
+
+  // ── Consigne du véhicule — lifecycle ───────────────────────────────────────
+  // C-D10 : Groupe nécessitant 2 véhicules → 2 bookings indépendants, chacun avec sa propre consigne.
+  // Chaque booking est autonome : pas de consigne "partagée". Le passager crée 2 réservations distinctes.
+
+  async startConsigne(bookingId: string, driverUserId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new ForbiddenException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, driverProfileId: true, withConsigne: true,
+        consigneDays: true, consigneDailyRate: true, consigneVehicleType: true,
+        consigneTotal: true, consigneStatus: true, status: true, paymentMethod: true,
+      },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Cette réservation ne vous appartient pas');
+    if (!booking.withConsigne) throw new BadRequestException('Cette réservation n\'inclut pas de consigne');
+    if (!['passenger_confirming', 'completed'].includes(booking.status as string))
+      throw new BadRequestException('La course doit être terminée pour démarrer la consigne');
+
+    if ((booking.consigneStatus as string) === 'active') return { id: bookingId, consigneStatus: 'active' };
+    if (['completed', 'cancelled'].includes(booking.consigneStatus as string))
+      throw new BadRequestException(`Consigne déjà ${booking.consigneStatus}`);
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { consigneStatus: 'active', consigneStartedAt: new Date() },
+    });
+
+    this.notifications.sendToUser(
+      booking.passengerId,
+      'Consigne démarrée 🚗',
+      `Votre véhicule est maintenant en consigne pour ${booking.consigneDays} jour(s). Nous vous notifierons à la restitution.`,
+    ).catch(() => {});
+
+    this.audit.log({
+      action: 'consigne.started', entity: 'booking', entityId: bookingId,
+      userId: driverUserId, meta: { consigneDays: booking.consigneDays, dailyRate: booking.consigneDailyRate },
+    }).catch(() => {});
+
+    return { id: bookingId, consigneStatus: 'active' };
+  }
+
+  async endConsigne(bookingId: string, driverUserId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new ForbiddenException('Profil chauffeur introuvable');
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, driverProfileId: true, withConsigne: true,
+        consigneDays: true, consigneDailyRate: true, consigneVehicleType: true,
+        consigneTotal: true, consigneStatus: true, consigneStartedAt: true, paymentMethod: true,
+      },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Cette réservation ne vous appartient pas');
+    if ((booking.consigneStatus as string) !== 'active') throw new BadRequestException('La consigne n\'est pas active');
+
+    const startedAt = booking.consigneStartedAt ?? new Date();
+    const hoursElapsed = (Date.now() - startedAt.getTime()) / (1000 * 60 * 60);
+    const actualDays = Math.max(1, Math.ceil(hoursElapsed));
+    const dailyRate = Number(booking.consigneDailyRate) || 0;
+    const finalTotal = actualDays * dailyRate;
+    const now = new Date();
+
+    const rideTariffs = await this.settingsService.getTariffs();
+    const commissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+    const driverEarnings = Math.floor(finalTotal * (1 - commissionRate));
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: bookingId },
+        data: {
+          consigneStatus: 'completed',
+          consigneEndedAt: now,
+          consigneActualDays: actualDays,
+          consigneFinalTotal: finalTotal,
+        },
+      });
+
+      // Débit passager (wallet uniquement — la consigne n'est pas payée en cash)
+      if (finalTotal > 0 && booking.paymentMethod !== 'cash') {
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { decrement: finalTotal } },
+          create: { userId: booking.passengerId, balance: -finalTotal },
+        });
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'debit',
+            points: Math.ceil(finalTotal),
+            label: `Consigne véhicule — ${actualDays}j × ${dailyRate.toLocaleString()} FCFA`,
+          },
+        });
+      }
+
+      // Crédit chauffeur
+      if (driverEarnings > 0 && booking.paymentMethod !== 'cash') {
+        await tx.wallet.upsert({
+          where: { userId: driverUserId },
+          update: { balance: { increment: driverEarnings } },
+          create: { userId: driverUserId, balance: driverEarnings },
+        });
+        await tx.transaction.create({
+          data: {
+            walletId: (await tx.wallet.findUnique({ where: { userId: driverUserId } }))!.id,
+            amount: driverEarnings,
+            type: 'deposit',
+            status: 'completed',
+            reference: `CONSIGNE-EARN-${bookingId}`,
+            metadata: { bookingId, actualDays, dailyRate, finalTotal, commissionRate },
+          },
+        });
+      }
+    });
+
+    const extraDays = actualDays - (booking.consigneDays ?? 0);
+    const passengerMsg = extraDays > 0
+      ? `Consigne terminée (${actualDays}j, dont ${extraDays}j de retard). ${finalTotal.toLocaleString()} FCFA débités.`
+      : `Consigne terminée. ${finalTotal.toLocaleString()} FCFA débités. Merci d'avoir utilisé AeroGo !`;
+
+    this.notifications.sendToUser(booking.passengerId, 'Consigne terminée ✅', passengerMsg).catch(() => {});
+
+    this.audit.log({
+      action: 'consigne.ended', entity: 'booking', entityId: bookingId,
+      userId: driverUserId, meta: { actualDays, dailyRate, finalTotal, commissionRate, driverEarnings },
+    }).catch(() => {});
+
+    return { id: bookingId, consigneStatus: 'completed', actualDays, finalTotal };
+  }
+
+  async cancelConsigne(bookingId: string, passengerId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, driverProfileId: true, withConsigne: true,
+        consigneStatus: true, consigneStartedAt: true, consigneDailyRate: true,
+        consigneDays: true, paymentMethod: true, driverProfile: { select: { userId: true } },
+      },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    if (!booking.withConsigne) throw new BadRequestException('Pas de consigne sur cette réservation');
+    if (['completed', 'cancelled'].includes(booking.consigneStatus as string))
+      throw new BadRequestException(`Consigne déjà ${booking.consigneStatus}`);
+
+    let refundMsg = 'Consigne annulée. Aucun frais facturé.';
+
+    if ((booking.consigneStatus as string) === 'active' && booking.consigneStartedAt) {
+      // Charge les jours déjà utilisés
+      const hoursElapsed = (Date.now() - booking.consigneStartedAt.getTime()) / (1000 * 60 * 60);
+      const daysUsed = Math.max(1, Math.ceil(hoursElapsed));
+      const dailyRate = Number(booking.consigneDailyRate) || 0;
+      const chargeAmount = daysUsed * dailyRate;
+
+      if (chargeAmount > 0 && booking.paymentMethod !== 'cash') {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { consigneStatus: 'cancelled', consigneEndedAt: new Date(), consigneActualDays: daysUsed, consigneFinalTotal: chargeAmount },
+          });
+          await tx.wallet.upsert({
+            where: { userId: passengerId },
+            update: { balance: { decrement: chargeAmount } },
+            create: { userId: passengerId, balance: -chargeAmount },
+          });
+          await tx.pointsTransaction.create({
+            data: { userId: passengerId, type: 'debit', points: Math.ceil(chargeAmount), label: `Consigne annulée — ${daysUsed}j × ${dailyRate.toLocaleString()} FCFA` },
+          });
+        });
+        refundMsg = `Consigne annulée. ${chargeAmount.toLocaleString()} FCFA facturés pour ${daysUsed} jour(s) déjà écoulé(s).`;
+      } else {
+        await this.prisma.booking.update({
+          where: { id: bookingId },
+          data: { consigneStatus: 'cancelled', consigneEndedAt: new Date(), consigneActualDays: daysUsed },
+        });
+      }
+    } else {
+      await this.prisma.booking.update({ where: { id: bookingId }, data: { consigneStatus: 'cancelled' } });
+    }
+
+    if (booking.driverProfile?.userId) {
+      this.notifications.sendToUser(
+        booking.driverProfile.userId,
+        'Consigne annulée',
+        'Le passager a annulé la consigne.',
+      ).catch(() => {});
+    }
+
+    this.audit.log({ action: 'consigne.cancelled', entity: 'booking', entityId: bookingId, userId: passengerId }).catch(() => {});
+
+    return { id: bookingId, consigneStatus: 'cancelled', message: refundMsg };
+  }
+
+  async rateConsigne(bookingId: string, passengerId: string, rating: number) {
+    if (rating < 1 || rating > 5 || !Number.isInteger(rating))
+      throw new BadRequestException('La note doit être un entier entre 1 et 5');
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { id: true, passengerId: true, withConsigne: true, consigneStatus: true, consigneRating: true },
+    });
+
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    if (!booking.withConsigne) throw new BadRequestException('Pas de consigne sur cette réservation');
+    if ((booking.consigneStatus as string) !== 'completed') throw new BadRequestException('La consigne n\'est pas encore terminée');
+    if (booking.consigneRating !== null) throw new ConflictException('Cette consigne a déjà été notée');
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { consigneRating: rating },
+    });
+
+    this.audit.log({ action: 'consigne.rated', entity: 'booking', entityId: bookingId, userId: passengerId, meta: { rating } }).catch(() => {});
+
+    return { id: bookingId, consigneRating: rating };
   }
 
   async getBookingPositions(userId: string, bookingId: string) {
@@ -1757,6 +2416,187 @@ export class BookingsService {
         this.logger.warn(`[CancelledFlight] Erreur pour booking ${booking.id}: ${err}`);
       }
     }
+  }
+
+  // ─── Modification de destination en cours de course ────────────────────────
+
+  async requestDestinationChange(
+    passengerId: string,
+    bookingId: string,
+    newDestination: string,
+    newDestLat?: number,
+    newDestLng?: number,
+  ) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { driverProfile: { include: { user: { select: { id: true, fcmToken: true } } } } },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    if (!['confirmed', 'in_progress'].includes(booking.status)) {
+      throw new BadRequestException('Modification de destination impossible dans cet état.');
+    }
+    if (!booking.driverProfile) {
+      throw new BadRequestException('Aucun chauffeur assigné.');
+    }
+
+    // Recalcul du prix avec la nouvelle destination
+    let newPrice = booking.estimatedPrice;
+    if (newDestLat && newDestLng && booking.pickupLat && booking.pickupLng) {
+      const R = 6371;
+      const startLat = Number(booking.pickupLat);
+      const startLng = Number(booking.pickupLng);
+      const dLat = (newDestLat - startLat) * Math.PI / 180;
+      const dLon = (newDestLng - startLng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(startLat * Math.PI / 180) * Math.cos(newDestLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      // Charge les tarifs pour recalculer
+      const tariffs = await this.settingsService.getTariffs();
+      const priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distKm, booking.vehicleType, tariffs);
+      const pointValue = tariffs.pointValue ?? 1;
+      newPrice = Math.ceil(priceInFcfa / pointValue);
+    }
+
+    const priceDiff = newPrice - booking.estimatedPrice;
+
+    // Vérifier que le passager a les points si le prix augmente
+    if (priceDiff > 0) {
+      const wallet = await this.prisma.wallet.findUnique({ where: { userId: passengerId } });
+      if (!wallet || wallet.balance < priceDiff) {
+        throw new BadRequestException('Solde insuffisant pour couvrir la différence de prix.');
+      }
+    }
+
+    // Stocker en Redis (TTL 75s — le client a 60s pour répondre, +15s de marge)
+    const redisKey = `dest_change:${bookingId}`;
+    await this.redis.set(redisKey, JSON.stringify({
+      passengerId,
+      driverId: booking.driverProfile.userId,
+      driverProfileId: booking.driverProfileId,
+      newDestination,
+      newDestLat,
+      newDestLng,
+      oldDestination: booking.destination,
+      oldPrice: booking.estimatedPrice,
+      newPrice,
+      priceDiff,
+    }), 75);
+
+    // Notifier le chauffeur via WebSocket
+    this.ridesGateway.server.to(`driver:${booking.driverProfileId}`).emit('booking:destination_change_request', {
+      bookingId,
+      oldDestination: booking.destination,
+      newDestination,
+      oldPrice: booking.estimatedPrice,
+      newPrice,
+      priceDiff,
+    });
+
+    // Notifier le chauffeur via FCM si hors app
+    if (booking.driverProfile.user.fcmToken) {
+      this.notifications.sendToUser(
+        booking.driverProfile.userId,
+        'Modification de destination 📍',
+        `Le passager souhaite changer la destination : ${newDestination}`,
+        { bookingId, type: 'destination_change' },
+      ).catch(() => {});
+    }
+
+    this.logger.log(`[DestChange] Booking ${bookingId} — demande passager: "${newDestination}" prix ${booking.estimatedPrice}→${newPrice} pts`);
+    return { status: 'pending', newPrice, priceDiff, oldPrice: booking.estimatedPrice };
+  }
+
+  async respondDestinationChange(driverId: string, bookingId: string, accepted: boolean) {
+    const redisKey = `dest_change:${bookingId}`;
+    const raw = await this.redis.get(redisKey);
+    if (!raw) throw new BadRequestException('La demande a expiré ou n\'existe pas.');
+
+    const data = JSON.parse(raw) as {
+      passengerId: string;
+      driverId: string;
+      driverProfileId: string;
+      newDestination: string;
+      newDestLat?: number;
+      newDestLng?: number;
+      oldDestination: string;
+      oldPrice: number;
+      newPrice: number;
+      priceDiff: number;
+    };
+
+    if (data.driverId !== driverId) throw new ForbiddenException('Accès refusé');
+
+    await this.redis.del(redisKey);
+
+    if (!accepted) {
+      // Notifier le passager du refus
+      this.ridesGateway.notifyPassenger(data.passengerId, 'booking:destination_change_response', {
+        bookingId, accepted: false,
+        oldDestination: data.oldDestination,
+      });
+      return { accepted: false };
+    }
+
+    // Accepté : ajuster le solde et mettre à jour la réservation
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+
+    await this.prisma.$transaction(async (tx) => {
+      // Débit ou remboursement de la différence
+      if (data.priceDiff > 0) {
+        await tx.wallet.update({
+          where: { userId: data.passengerId },
+          data: { balance: { decrement: data.priceDiff } },
+        });
+        await tx.pointsTransaction.create({
+          data: {
+            userId: data.passengerId,
+            points: -data.priceDiff,
+            type: 'debit',
+            label: `Supplément destination: ${data.newDestination}`,
+          },
+        });
+      } else if (data.priceDiff < 0) {
+        const refund = Math.abs(data.priceDiff);
+        await tx.wallet.upsert({
+          where: { userId: data.passengerId },
+          create: { userId: data.passengerId, balance: refund },
+          update: { balance: { increment: refund } },
+        });
+        await tx.pointsTransaction.create({
+          data: {
+            userId: data.passengerId,
+            points: refund,
+            type: 'credit',
+            label: `Remboursement destination: ${data.newDestination}`,
+          },
+        });
+      }
+
+      // Mettre à jour la réservation
+      await tx.booking.update({
+        where: { id: bookingId },
+        data: {
+          destination: data.newDestination,
+          estimatedPrice: data.newPrice,
+          ...(data.newDestLat ? { destLat: data.newDestLat } : {}),
+          ...(data.newDestLng ? { destLng: data.newDestLng } : {}),
+        },
+      });
+    });
+
+    // Notifier le passager de l'acceptation
+    this.ridesGateway.notifyPassenger(data.passengerId, 'booking:destination_change_response', {
+      bookingId, accepted: true,
+      newDestination: data.newDestination,
+      newPrice: data.newPrice,
+      priceDiff: data.priceDiff,
+    });
+
+    this.logger.log(`[DestChange] Booking ${bookingId} accepté par chauffeur — "${data.newDestination}" ${data.priceDiff > 0 ? '+' : ''}${data.priceDiff} pts`);
+    return { accepted: true, newDestination: data.newDestination, newPrice: data.newPrice };
   }
 
 }
