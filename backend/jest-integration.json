@@ -1,5 +1,6 @@
 {
   "preset": "ts-jest",
+  "rootDir": ".",
   "testEnvironment": "node",
   "testMatch": ["**/test/integration/**/*.integration.spec.ts"],
   "testTimeout": 30000,
@@ -9,5 +10,10 @@
   "setupFilesAfterEnv": ["<rootDir>/test/integration/helpers/env-setup.ts"],
   "moduleNameMapper": {
     "^src/(.*)$": "<rootDir>/src/$1"
+  },
+  "globals": {
+    "ts-jest": {
+      "tsconfig": "./tsconfig.test.json"
+    }
   }
 }
