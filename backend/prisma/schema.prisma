@@ -164,7 +164,7 @@ model Booking {
   rushHourSurge    Boolean @default(false) @map("rush_hour_surge")
 
   forfaitId    String?  @map("forfait_id") @db.Uuid
-  pricingMode  String   @default("kilometrage") @map("pricing_mode")
+  pricingMode  PricingMode @default(kilometrage) @map("pricing_mode")
   forfait      Forfait? @relation(fields: [forfaitId], references: [id])
 
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
@@ -398,9 +398,9 @@ model Forfait {
   bookingTypes    BookingType[] @map("booking_types") @default([])
   driverPercent   Float         @default(85) @map("driver_percent")
   companyPercent  Float         @default(15) @map("company_percent")
-  nightSurge      Float?        @map("night_surge")
-  rainSurge       Float?        @map("rain_surge")
-  rushHourSurge   Float?        @map("rush_hour_surge")
+  nightSurgeRate    Float?        @map("night_surge_rate")
+  rainSurgeRate     Float?        @map("rain_surge_rate")
+  rushHourSurgeRate Float?        @map("rush_hour_surge_rate")
   isActive        Boolean       @default(true) @map("is_active")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -469,6 +469,11 @@ enum BookingType {
   ARRIVAL        // À l'aéroport → destination
   DEPARTURE      // Lieu quelconque → aéroport
   INTERNATIONAL  // Hors du pays, réservation à l'avance (vol arrivée → destination)
+}
+
+enum PricingMode {
+  kilometrage
+  forfait
 }
 
 enum BookingStatus {

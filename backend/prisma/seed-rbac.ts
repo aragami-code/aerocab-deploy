@@ -68,6 +68,17 @@ const PERMISSIONS: Array<{ key: string; group: string; description: string }> = 
   { key: 'edit_role',                 group: 'roles',      description: 'Modifier le label / description d\'un rôle' },
   { key: 'delete_role',               group: 'roles',      description: 'Supprimer un rôle non-système' },
   { key: 'assign_permissions_to_role',group: 'roles',      description: 'Modifier la matrice permissions d\'un rôle' },
+  // features (1)
+  { key: 'manage_feature_flags',      group: 'features',   description: 'Activer / désactiver les fonctionnalités passager et chauffeur' },
+  // financial (1)
+  { key: 'manage_financial_settings', group: 'settings',   description: 'Modifier commission, cashback, bonus (paramètres financiers)' },
+  // withdrawals (2)
+  { key: 'view_withdrawals',          group: 'withdrawals',description: 'Voir les demandes de retrait chauffeurs' },
+  { key: 'manage_withdrawals',        group: 'withdrawals',description: 'Approuver / Rejeter les demandes de retrait' },
+  // data (1)
+  { key: 'export_data',               group: 'data',       description: 'Télécharger les exports CSV (courses, utilisateurs, retraits)' },
+  // bookings+ (1)
+  { key: 'force_complete_booking',    group: 'bookings',   description: 'Forcer la complétion d\'une course bloquée' },
 ];
 
 // ── Matrice rôles / permissions ───────────────────────────────────────────────
@@ -78,14 +89,17 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_stats',
     'view_drivers','view_driver_documents','verify_driver','suspend_driver','edit_driver_profile',
     'view_users','suspend_user','delete_user','adjust_points',
-    'view_bookings','view_active_bookings','cancel_booking',
+    'view_bookings','view_active_bookings','cancel_booking','force_complete_booking',
     'view_tariffs','edit_tariffs','rollback_tariffs',
     'view_airports','create_airport','edit_airport',
     'view_promos','create_promo','edit_promo','delete_promo',
     'view_reports','handle_report',
     'view_referrals',
     'view_audit_logs',
-    'view_settings','edit_settings','manage_otp_templates','test_otp_provider',
+    'view_settings','edit_settings','manage_otp_templates','test_otp_provider','manage_financial_settings',
+    'view_withdrawals','manage_withdrawals',
+    'export_data',
+    'manage_feature_flags',
     'view_roles',
   ],
   moderator: [
@@ -96,6 +110,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_promos',
     'view_reports','handle_report',
     'view_referrals',
+    'view_withdrawals',
   ],
   support: [
     'view_stats',
@@ -105,6 +120,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_promos',
     'view_reports',
     'view_referrals',
+    'view_withdrawals',
   ],
 };
 
@@ -159,7 +175,7 @@ async function main() {
     console.log(`  ✓ ${roleName} → ${permKeys.length} permissions`);
   }
 
-  console.log('\n✅ RBAC seedé : 45 permissions, 4 rôles système.');
+  console.log('\n✅ RBAC seedé : 51 permissions, 4 rôles système.');
 }
 
 main()

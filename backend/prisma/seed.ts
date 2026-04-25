@@ -45,9 +45,28 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'otp_cooldown_minutes',           value: '10',     description: 'Délai de refroidissement après trop d\'essais (min)' },
   { key: 'jwt_expiry_days',                value: '30',     description: 'Durée de validité du JWT (jours)' },
 
+  // ─── Intégrations externes ───────────────────────────────────────────────
+  { key: 'google_maps_key',           value: 'AIzaSyBjA53emT-qNJLICKLz13W5RRBU55KZqzM', description: 'Clé Google Maps API (Directions, Geocoding)' },
+  // Twilio
+  { key: 'twilio_account_sid',        value: '', description: 'Twilio Account SID (ex: ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)' },
+  { key: 'twilio_auth_token',         value: '', description: 'Twilio Auth Token' },
+  { key: 'twilio_phone_number',       value: '', description: 'Numéro expéditeur Twilio au format E.164 (ex: +12015551234)' },
+  // Orange Cameroun
+  { key: 'orange_cm_client_id',       value: '', description: 'Orange CM Client ID (portail developer.orange.com)' },
+  { key: 'orange_cm_client_secret',   value: '', description: 'Orange CM Client Secret' },
+  { key: 'orange_cm_sender_address',  value: '', description: 'Adresse expéditeur Orange CM (ex: tel:+237XXXXXXXXX)' },
+  // Africa's Talking
+  { key: 'at_api_key',               value: '', description: "Africa's Talking API Key" },
+  { key: 'at_username',              value: 'sandbox', description: "Africa's Talking username (sandbox ou nom de compte)" },
+  { key: 'at_sender_id',             value: '', description: "Africa's Talking Sender ID (optionnel)" },
+  // SendGrid
+  { key: 'sendgrid_api_key',         value: '', description: 'SendGrid API Key (SG.xxxxxxxx)' },
+  { key: 'sendgrid_from_email',      value: 'noreply@aerogo24.com', description: 'Adresse expéditeur SendGrid' },
+
   // ─── Mode Test OTP ───────────────────────────────────────────────────────
-  { key: 'test_mode_enabled',              value: 'false',  description: 'Active le mode test OTP (désactiver en production)' },
-  { key: 'test_otp_value',                 value: '123456', description: 'Valeur OTP fixe en mode test' },
+  { key: 'test_mode_enabled',              value: 'true',   description: 'Active le mode test OTP — désactiver en production via admin dashboard' },
+  { key: 'test_otp_value',                 value: '000000', description: 'Code OTP fixe utilisé en mode test (4–8 chiffres)' },
+  { key: 'otp_log_enabled',               value: 'false',  description: 'Log OTP en clair dans les logs serveur (auto-activé en mode test)' },
 
   // ─── Routage SMS / Canal OTP ──────────────────────────────────────────────
   { key: 'otp_channel',                    value: 'sms',    description: 'Canal d\'envoi OTP : sms | email | both' },
