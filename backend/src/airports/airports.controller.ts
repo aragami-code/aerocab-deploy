@@ -1,12 +1,10 @@
 import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
 import { AirportsService } from './airports.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { UserRole } from '@prisma/client';
 import { CreateAirportDto, UpdateAirportDto } from './dto/airport.dto';
 
-@SkipThrottle()
 @Controller('airports')
 export class AirportsController {
   constructor(private readonly airportsService: AirportsService) {}
@@ -59,6 +57,9 @@ export class AirportsController {
     const lngNum = parseFloat(lng);
     if (isNaN(latNum) || isNaN(lngNum)) {
       throw new BadRequestException('lat et lng requis et doivent être des nombres');
+    }
+    if (latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+      throw new BadRequestException('Coordonnées hors limites WGS-84');
     }
     const airport = await this.airportsService.detectByCoords(latNum, lngNum);
     return airport ?? { detected: false };
