@@ -130,6 +130,9 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
           vehicleType: pending.vehicleType,
           estimatedPrice: pending.estimatedPrice,
           departureAirport: pending.departureAirport,
+          type: pending.type,
+          pickupAddress: pending.pickupAddress,
+          pricingMode: (pending as any).pricingMode ?? 'kilometrage',
           seats: seats[pending.vehicleType] ?? 4,
         });
         this.logger.log(`[Rides] Re-sent pending booking ${pending.id} to driver ${data.driverId}`);

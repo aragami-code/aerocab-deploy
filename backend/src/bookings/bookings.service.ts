@@ -778,6 +778,9 @@ export class BookingsService {
           vehicleType: booking.vehicleType,
           estimatedPrice: booking.estimatedPrice,
           departureAirport: booking.departureAirport,
+          type: booking.type,
+          pickupAddress: booking.pickupAddress,
+          pricingMode: (booking as any).pricingMode ?? 'kilometrage',
           isPreLanding: isPreLanding,
         });
       }
