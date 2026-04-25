@@ -68,9 +68,11 @@ export class ForfaitsService {
   }
 
   async update(id: string, dto: UpdateForfaitDto) {
-    await this.findOne(id);
-    if (dto.driverPercent !== undefined && dto.companyPercent !== undefined) {
-      if (dto.driverPercent + dto.companyPercent !== 100) {
+    const existing = await this.findOne(id);
+    if (dto.driverPercent !== undefined || dto.companyPercent !== undefined) {
+      const newDriver  = dto.driverPercent  ?? existing.driverPercent;
+      const newCompany = dto.companyPercent ?? existing.companyPercent;
+      if (newDriver + newCompany !== 100) {
         throw new BadRequestException('driverPercent + companyPercent doit être égal à 100');
       }
     }
@@ -127,9 +129,9 @@ export class ForfaitsService {
     surges: { night: boolean; rain: boolean; rushHour: boolean },
   ): number {
     let price = forfait.priceAmount;
-    if (surges.night    && forfait.nightSurgeRate)    price *= forfait.nightSurgeRate;
-    if (surges.rain     && forfait.rainSurgeRate)     price *= forfait.rainSurgeRate;
-    if (surges.rushHour && forfait.rushHourSurgeRate) price *= forfait.rushHourSurgeRate;
+    if (surges.night    && forfait.nightSurgeRate    !== null) price *= forfait.nightSurgeRate!;
+    if (surges.rain     && forfait.rainSurgeRate     !== null) price *= forfait.rainSurgeRate!;
+    if (surges.rushHour && forfait.rushHourSurgeRate !== null) price *= forfait.rushHourSurgeRate!;
     return Math.round(price);
   }
 
