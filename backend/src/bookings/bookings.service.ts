@@ -1837,7 +1837,9 @@ export class BookingsService {
     // Le chauffeur est payé sur le PRIX PLEIN (avant promo) — la plateforme absorbe les remises.
     if (booking.driverProfile?.userId && booking.paymentMethod !== 'cash') {
       const rideTariffs = await this.settingsService.getTariffs();
-      const commissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+      const globalCommissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+      const vehicleCommissionRate = rideTariffs.vehicles?.[booking.vehicleType]?.commissionRate;
+      const commissionRate = vehicleCommissionRate ?? globalCommissionRate;
       const grossAmount = Number(booking.estimatedPrice) + Number(booking.discountAmount ?? 0);
       // Forfait: use forfait's driverPercent if the booking was priced as forfait
       let driverEarningsPct = 1 - commissionRate;
@@ -2029,6 +2031,7 @@ export class BookingsService {
         id: true, passengerId: true, driverProfileId: true, withConsigne: true,
         consigneDays: true, consigneDailyRate: true, consigneVehicleType: true,
         consigneTotal: true, consigneStatus: true, consigneStartedAt: true, paymentMethod: true,
+        vehicleType: true,
       },
     });
 
@@ -2044,7 +2047,9 @@ export class BookingsService {
     const now = new Date();
 
     const rideTariffs = await this.settingsService.getTariffs();
-    const commissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+    const globalCommissionRate = parseFloat(await this.settingsService.get('commission_rate', '0.15')) || rideTariffs.commissionRate || 0.15;
+    const vehicleCommissionRate = rideTariffs.vehicles?.[booking.vehicleType]?.commissionRate;
+    const commissionRate = vehicleCommissionRate ?? globalCommissionRate;
     const driverEarnings = Math.floor(finalTotal * (1 - commissionRate));
 
     await this.prisma.$transaction(async (tx) => {

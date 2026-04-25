@@ -7,6 +7,7 @@ import { SettingsService } from '../settings/settings.service';
 import { PointsService } from '../points/points.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../redis/redis.service';
+import { FlutterwaveService } from '../payments/flutterwave.service';
 
 @Injectable()
 export class BookingsScheduler {
@@ -20,6 +21,7 @@ export class BookingsScheduler {
     private points: PointsService,
     private audit: AuditService,
     private redis: RedisService,
+    private flutterwave: FlutterwaveService,
   ) {}
 
   /**
@@ -624,5 +626,58 @@ export class BookingsScheduler {
     }
 
     this.logger.log(`[WAL·076] ${toExpire.length} wallet(s) expirés (total: ${toExpire.reduce((s, b) => s + (b._sum.points ?? 0), 0)} pts)`);
+  }
+
+  /**
+   * Toutes les 2 heures : retry des transactions Flutterwave bloquées en `pending`
+   * depuis plus de 2h (webhook manqué côté Flutterwave).
+   */
+  @Cron('0 */2 * * *')
+  async retryStuckFlutterwaveTransactions() {
+    const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const stuckTxs = await this.prisma.transaction.findMany({
+      where: {
+        status: 'pending',
+        reference: { startsWith: 'WALLET-FLUTTERWAVE-' },
+        createdAt: { lte: cutoff },
+      },
+      select: { id: true, reference: true, walletId: true, amount: true, metadata: true },
+    });
+    if (stuckTxs.length === 0) return;
+    this.logger.log(`[FLW-RETRY] ${stuckTxs.length} transaction(s) Flutterwave en pending depuis >2h`);
+
+    for (const tx of stuckTxs) {
+      try {
+        const meta = tx.metadata as Record<string, unknown> | null;
+        const flwTxId = meta?.flwTxId as string | undefined;
+        if (!flwTxId) {
+          await this.prisma.transaction.update({ where: { id: tx.id }, data: { status: 'failed' } });
+          this.logger.warn(`[FLW-RETRY] ${tx.reference} — pas de flwTxId, marqué failed`);
+          continue;
+        }
+        const verified = await this.flutterwave.verify(flwTxId).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') {
+          const { count } = await this.prisma.transaction.updateMany({
+            where: { id: tx.id, status: 'pending' },
+            data: { status: 'completed' },
+          });
+          if (count > 0) {
+            const tariffs = await this.settingsService.getTariffs();
+            const pointsToCredit = (meta?.points as number | undefined) ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
+            await this.prisma.wallet.update({
+              where: { id: tx.walletId },
+              data: { balance: { increment: pointsToCredit } },
+            });
+            this.logger.log(`[FLW-RETRY] Wallet ${tx.walletId} crédité ${pointsToCredit} pts (retry ${tx.reference})`);
+          }
+        } else if (verified === 'REFUSED') {
+          await this.prisma.transaction.update({ where: { id: tx.id }, data: { status: 'failed' } });
+          this.logger.warn(`[FLW-RETRY] ${tx.reference} marqué failed (statut Flutterwave: ${verified})`);
+        }
+        // Si PENDING → on réessaiera au prochain cycle
+      } catch (err: any) {
+        this.logger.error(`[FLW-RETRY] Erreur pour ${tx.reference}: ${err?.message}`);
+      }
+    }
   }
 }
