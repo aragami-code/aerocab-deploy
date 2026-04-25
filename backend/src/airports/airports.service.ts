@@ -126,6 +126,30 @@ export class AirportsService {
     return [];
   }
 
+  async detectByCoords(lat: number, lng: number): Promise<any | null> {
+    const airports = await this.prisma.airport.findMany({
+      where: { isActive: true },
+      select: { id: true, iataCode: true, name: true, city: true, countryCode: true, latitude: true, longitude: true, detectionRadius: true },
+    });
+
+    for (const airport of airports) {
+      const R = 6371;
+      const dLat = ((airport.latitude - lat) * Math.PI) / 180;
+      const dLng = ((airport.longitude - lng) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos((lat * Math.PI) / 180) *
+          Math.cos((airport.latitude * Math.PI) / 180) *
+          Math.sin(dLng / 2) ** 2;
+      const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      if (distKm <= airport.detectionRadius) {
+        return airport;
+      }
+    }
+    return null;
+  }
+
   /**
    * Retourne l'aéroport actif le plus proche des coordonnées données,
    * sans contrainte de rayon — utilisé comme suggestion quand aucun

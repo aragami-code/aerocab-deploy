@@ -1,10 +1,12 @@
-import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { AirportsService } from './airports.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { UserRole } from '@prisma/client';
 import { CreateAirportDto, UpdateAirportDto } from './dto/airport.dto';
 
+@SkipThrottle()
 @Controller('airports')
 export class AirportsController {
   constructor(private readonly airportsService: AirportsService) {}
@@ -46,6 +48,20 @@ export class AirportsController {
       parseFloat(lng),
       radius ? parseFloat(radius) : 80,
     );
+  }
+
+  @Get('detect')
+  async detect(
+    @Query('lat') lat: string,
+    @Query('lng') lng: string,
+  ) {
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    if (isNaN(latNum) || isNaN(lngNum)) {
+      throw new BadRequestException('lat et lng requis et doivent être des nombres');
+    }
+    const airport = await this.airportsService.detectByCoords(latNum, lngNum);
+    return airport ?? { detected: false };
   }
 
   @Get(':code')
