@@ -110,6 +110,6 @@ describe('BotService', () => {
     mockPrisma.pointsTransaction.aggregate.mockResolvedValue({ _sum: { points: 0 } });
     mockFetch.mockResolvedValueOnce({ ok: false, text: async () => 'Unauthorized' });
 
-    await expect(service.chat('u-1', 'Bonjour', [])).rejects.toThrow('Claude API error');
+    await expect(service.chat('u-1', 'Bonjour', [])).rejects.toThrow(ServiceUnavailableException);
   });
 });

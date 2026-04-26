@@ -10,8 +10,8 @@ export class BotService {
   private readonly logger = new Logger(BotService.name);
 
   constructor(
-    private prisma: PrismaService,
-    private settings: SettingsService,
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
   ) {}
 
   async chat(userId: string, message: string, history: ChatHistoryItemDto[]): Promise<{ reply: string }> {
@@ -20,17 +20,20 @@ export class BotService {
       throw new ServiceUnavailableException('Le bot assistant est désactivé.');
     }
 
-    const apiKey    = await this.settings.get('bot_claude_api_key', '');
-    const model     = await this.settings.get('bot_model', 'claude-haiku-4-5-20251001');
-    const maxTokens = parseInt(await this.settings.get('bot_max_tokens', '500'), 10) || 500;
-    const basePrompt = await this.settings.get('bot_system_prompt', 'Tu es l\'assistant AeroCab. Réponds en français.');
+    const [apiKey, model, rawMaxTokens, basePrompt] = await Promise.all([
+      this.settings.get('bot_claude_api_key', ''),
+      this.settings.get('bot_model', 'claude-haiku-4-5-20251001'),
+      this.settings.get('bot_max_tokens', '500'),
+      this.settings.get('bot_system_prompt', 'Tu es l\'assistant AeroCab. Réponds en français.'),
+    ]);
+    const maxTokens = parseInt(rawMaxTokens, 10) || 500;
 
     if (!apiKey) {
       throw new ServiceUnavailableException('Le bot assistant n\'est pas configuré.');
     }
 
     const [user, activeBooking, wallet, pointsAgg] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { name: true, phone: true, referralCode: true } }),
+      this.prisma.user.findUnique({ where: { id: userId }, select: { name: true, referralCode: true } }),
       this.prisma.booking.findFirst({
         where: { passengerId: userId, status: { in: ['pending', 'confirmed', 'in_progress'] } },
         select: { id: true, status: true, destination: true, estimatedPrice: true },
@@ -46,7 +49,6 @@ export class BotService {
     const contextBlock = [
       `\n\n--- Contexte utilisateur ---`,
       `Nom : ${user?.name ?? 'Inconnu'}`,
-      `Téléphone : ${user?.phone ?? 'Non renseigné'}`,
       `Code parrainage : ${user?.referralCode ?? 'Aucun'}`,
       `Solde wallet : ${walletBalance} XAF`,
       `Points : ${points}`,
@@ -76,7 +78,7 @@ export class BotService {
     if (!res.ok) {
       const text = await res.text();
       this.logger.error(`Claude API error: ${text}`);
-      throw new Error('Claude API error');
+      throw new ServiceUnavailableException('Le service bot est temporairement indisponible.');
     }
 
     const data = await res.json() as { content?: Array<{ type: string; text: string }> };
