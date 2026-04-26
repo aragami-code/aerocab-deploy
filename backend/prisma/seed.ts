@@ -47,6 +47,31 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
 
   // ─── Intégrations externes ───────────────────────────────────────────────
   { key: 'google_maps_key',           value: 'AIzaSyBjA53emT-qNJLICKLz13W5RRBU55KZqzM', description: 'Clé Google Maps API (Directions, Geocoding)' },
+  // Flutterwave
+  { key: 'payment_flutterwave_secret_key',   value: '', description: 'Flutterwave Secret Key (FLWSECK_TEST-...)' },
+  { key: 'payment_flutterwave_webhook_hash', value: '', description: 'Flutterwave Webhook Hash (Secret Hash configuré dans le dashboard)' },
+  // CinetPay
+  { key: 'payment_cinetpay_api_key',  value: '', description: 'CinetPay API Key' },
+  { key: 'payment_cinetpay_site_id',  value: '', description: 'CinetPay Site ID' },
+  // NotchPay
+  { key: 'payment_notchpay_public_key',    value: '', description: 'NotchPay Public Key (pk.xxx)' },
+  { key: 'payment_notchpay_private_key',   value: '', description: 'NotchPay Private Key (sk.xxx)' },
+  { key: 'payment_notchpay_webhook_secret',value: '', description: 'NotchPay Webhook Secret' },
+  // Stripe
+  { key: 'payment_stripe_secret_key',      value: '', description: 'Stripe Secret Key (sk_test_... ou sk_live_...)' },
+  { key: 'payment_stripe_webhook_secret',  value: '', description: 'Stripe Webhook Secret (whsec_...)' },
+  // M-Pesa
+  { key: 'payment_mpesa_consumer_key',     value: '', description: 'M-Pesa Consumer Key (portail developer.safaricom.co.ke)' },
+  { key: 'payment_mpesa_consumer_secret',  value: '', description: 'M-Pesa Consumer Secret' },
+  { key: 'payment_mpesa_shortcode',        value: '', description: 'M-Pesa Business Shortcode (Paybill ou Till number)' },
+  { key: 'payment_mpesa_passkey',          value: '', description: 'M-Pesa Lipa na M-Pesa Online Passkey' },
+  // PayPal
+  { key: 'payment_paypal_client_id',       value: '', description: 'PayPal Client ID (sandbox ou live)' },
+  { key: 'payment_paypal_client_secret',   value: '', description: 'PayPal Client Secret' },
+  { key: 'payment_paypal_webhook_id',      value: '', description: 'PayPal Webhook ID (configuré dans le portail developer.paypal.com)' },
+  // Wave
+  { key: 'payment_wave_api_key',           value: '', description: 'Wave API Key (wave_sn_prod_... ou wave_sn_test_...)' },
+  { key: 'payment_wave_webhook_secret',    value: '', description: 'Wave Webhook Secret' },
   // Twilio
   { key: 'twilio_account_sid',        value: '', description: 'Twilio Account SID (ex: ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)' },
   { key: 'twilio_auth_token',         value: '', description: 'Twilio Auth Token' },
@@ -77,6 +102,32 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'otp_email_subject',              value: 'Votre code AeroGo 24', description: 'Sujet email OTP' },
   { key: 'otp_template_fr',               value: 'Votre code de vérification AeroGo 24 est {{code}}. Valable {{expiry}} min.', description: 'Template SMS/email OTP en français' },
   { key: 'otp_template_en',               value: 'Your AeroGo 24 verification code is {{code}}. Valid for {{expiry}} min.', description: 'Template SMS/email OTP en anglais' },
+
+  // ─── Sécurité paiements ───────────────────────────────────────────────────
+  { key: 'payment_max_recharge_amount',    value: '500000', description: 'Montant max de recharge par transaction (XAF)' },
+  { key: 'withdrawal_min_amount',          value: '1000',   description: 'Montant minimum de retrait chauffeur (XAF)' },
+  { key: 'withdrawal_max_amount',          value: '100000', description: 'Montant maximum de retrait par demande (XAF)' },
+  { key: 'withdrawal_max_daily_amount',    value: '200000', description: 'Plafond journalier cumulé de retrait chauffeur (XAF)' },
+  { key: 'withdrawal_carence_hours',       value: '24',     description: 'Délai minimum (heures) entre une recharge et un retrait' },
+
+  // ─── URL du backend (utilisée pour les callbacks/webhooks de paiement) ──────
+  { key: 'backend_url', value: 'https://aerocab-api.onrender.com', description: 'URL publique du backend pour les webhooks de paiement (ex: https://aerocab-api.onrender.com)' },
+
+  // ─── Fournisseurs de paiement (activation par provider) ──────────────────
+  { key: 'payment_cinetpay_enabled',       value: 'true',   description: 'Activer CinetPay comme fournisseur de paiement' },
+  { key: 'payment_flutterwave_enabled',    value: 'true',   description: 'Activer Flutterwave comme fournisseur de paiement' },
+  { key: 'payment_stripe_enabled',         value: 'true',   description: 'Activer Stripe comme fournisseur de paiement' },
+  { key: 'payment_notchpay_enabled',       value: 'false',  description: 'Activer NotchPay comme fournisseur de paiement' },
+  { key: 'payment_mpesa_enabled',          value: 'false',  description: 'Activer M-Pesa comme fournisseur de paiement' },
+  { key: 'payment_paypal_enabled',         value: 'false',  description: 'Activer PayPal comme fournisseur de paiement' },
+  { key: 'payment_wave_enabled',           value: 'false',  description: 'Activer Wave comme fournisseur de paiement' },
+
+  // ── Bot Assistant ────────────────────────────────────────────────────────────
+  { key: 'bot_enabled',        value: 'false', description: 'Activer le bot assistant IA (true/false)' },
+  { key: 'bot_claude_api_key', value: '',       description: 'Clé API Anthropic (sk-ant-...)' },
+  { key: 'bot_model',          value: 'claude-haiku-4-5-20251001', description: 'Modèle Claude à utiliser' },
+  { key: 'bot_max_tokens',     value: '500',    description: 'Nombre max de tokens dans la réponse du bot' },
+  { key: 'bot_system_prompt',  value: 'Tu es l\'assistant AeroCab. Réponds en français, de façon concise et amicale. Si tu ne sais pas, propose de contacter le support.', description: 'System prompt du bot (personnalisable sans redéploiement)' },
 ];
 
 async function main() {
