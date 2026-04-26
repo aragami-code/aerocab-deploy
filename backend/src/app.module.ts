@@ -25,6 +25,7 @@ import { AuditModule } from './audit/audit.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { CleanupModule } from './cleanup/cleanup.module';
 import { ForfaitsModule } from './forfaits/forfaits.module';
+import { BotModule } from './bot/bot.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { ForfaitsModule } from './forfaits/forfaits.module';
     UploadsModule,
     CleanupModule,
     ForfaitsModule,
+    BotModule,
   ],
   controllers: [AppController],
   providers: [
