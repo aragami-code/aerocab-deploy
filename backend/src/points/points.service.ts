@@ -1,48 +1,74 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { PointsSource } from '@prisma/client';
+
+export interface PointsBreakdown {
+  total: number;
+  recharge: number;
+  referral: number;
+  loyalty: number;
+  bonus: number;
+  cashback: number;
+  refund: number;
+}
 
 @Injectable()
 export class PointsService {
   constructor(private prisma: PrismaService) {}
 
-  async getBalance(userId: string): Promise<{ balance: number }> {
-    const result = await this.prisma.pointsTransaction.aggregate({
+  async getBalance(userId: string): Promise<{ balance: number; breakdown: PointsBreakdown }> {
+    const rows = await this.prisma.pointsTransaction.groupBy({
+      by: ['source'],
       where: { userId },
       _sum: { points: true },
     });
-    const balance = result._sum.points ?? 0;
-    return { balance };
+
+    const map: Record<string, number> = {};
+    for (const r of rows) {
+      map[r.source] = r._sum.points ?? 0;
+    }
+
+    const breakdown: PointsBreakdown = {
+      total: 0,
+      recharge: map['recharge'] ?? 0,
+      referral: map['referral'] ?? 0,
+      loyalty:  map['loyalty']  ?? 0,
+      bonus:    map['bonus']    ?? 0,
+      cashback: map['cashback'] ?? 0,
+      refund:   map['refund']   ?? 0,
+    };
+    breakdown.total = rows.reduce((acc, r) => acc + (r._sum.points ?? 0), 0);
+
+    return { balance: breakdown.total, breakdown };
   }
 
-  async getHistory(userId: string, page = 1, limit = 20) {
+  async getHistory(userId: string, page = 1, limit = 20, source?: PointsSource) {
     const skip = Math.max(0, (page - 1) * limit);
+    const where = source ? { userId, source } : { userId };
     const [transactions, total] = await Promise.all([
       this.prisma.pointsTransaction.findMany({
-        where: { userId },
+        where,
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
       }),
-      this.prisma.pointsTransaction.count({ where: { userId } }),
+      this.prisma.pointsTransaction.count({ where }),
     ]);
     return { data: transactions, total, page, limit };
   }
 
-  async addPoints(userId: string, points: number, label: string) {
+  async addPoints(userId: string, points: number, label: string, source: PointsSource = 'bonus' as PointsSource) {
     return this.prisma.pointsTransaction.create({
       data: {
         userId,
         type: points >= 0 ? 'credit' : 'debit',
+        source,
         points,
         label,
       },
     });
   }
 
-  // Déduit des points avec vérification du solde — lève BadRequestException si insuffisant.
-  // H2 — Le check balance et le débit sont dans la même $transaction pour éviter le double-spend :
-  // deux appels concurrents sur le même userId ne peuvent pas tous les deux passer le check
-  // puis débiter (Postgres sérialise les lectures/écritures dans la transaction).
   async deductPoints(userId: string, points: number, label: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const result = await tx.pointsTransaction.aggregate({
@@ -58,12 +84,11 @@ export class PointsService {
       }
 
       await tx.pointsTransaction.create({
-        data: { userId, type: 'debit', points: -points, label },
+        data: { userId, type: 'debit', source: 'payment' as PointsSource, points: -points, label },
       });
     });
   }
 
-  // Variante utilisable depuis l'intérieur d'une transaction existante (évite transaction imbriquée)
   async deductPointsTx(
     tx: Omit<import('@prisma/client').PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
     userId: string,
@@ -83,7 +108,7 @@ export class PointsService {
     }
 
     await tx.pointsTransaction.create({
-      data: { userId, type: 'debit', points: -points, label },
+      data: { userId, type: 'debit', source: 'payment' as PointsSource, points: -points, label },
     });
   }
 }
