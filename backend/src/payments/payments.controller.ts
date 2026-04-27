@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Logger, UseGuards, Request, Query, Headers, Req, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Body, Logger, UseGuards, Request, Query, Headers, Req, BadRequestException } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { FlutterwaveService } from './flutterwave.service';
@@ -112,6 +112,110 @@ export class PaymentsController {
       fcfaPerPoint,
       currency: targetCurrency,
       symbol: CURRENCY_SYMBOLS[targetCurrency] ?? targetCurrency,
+    };
+  }
+
+  /**
+   * GET /payments/methods
+   * Retourne les méthodes de paiement disponibles selon le pays de l'utilisateur (via préfixe téléphonique).
+   */
+  @Get('methods')
+  @UseGuards(JwtAuthGuard)
+  async getPaymentMethods(@Request() req: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { phone: true },
+    });
+
+    const PHONE_PREFIX_MAP: Record<string, string> = {
+      '+237': 'CM', '+221': 'SN', '+225': 'CI', '+242': 'CG',
+      '+241': 'GA', '+236': 'CF', '+235': 'TD', '+240': 'GQ',
+      '+254': 'KE', '+255': 'TZ', '+256': 'UG', '+234': 'NG',
+      '+233': 'GH', '+212': 'MA', '+216': 'TN', '+213': 'DZ',
+    };
+
+    let countryCode = 'CM';
+    if (user?.phone) {
+      for (const [prefix, code] of Object.entries(PHONE_PREFIX_MAP)) {
+        if (user.phone.startsWith(prefix)) { countryCode = code; break; }
+      }
+    }
+
+    const country = await this.prisma.country.findUnique({
+      where: { code: countryCode },
+      select: { paymentMethods: true },
+    });
+
+    const DEFAULT_METHODS = [
+      { id: 'orange_money', label: 'Orange Money', icon: 'orange_money' },
+      { id: 'mtn_momo',     label: 'MTN MoMo',     icon: 'mtn_momo' },
+      { id: 'card',         label: 'Carte bancaire', icon: 'card' },
+    ];
+
+    const methods = Array.isArray(country?.paymentMethods) && (country.paymentMethods as any[]).length
+      ? country.paymentMethods as any[]
+      : DEFAULT_METHODS;
+
+    return { methods, countryCode };
+  }
+
+  /**
+   * GET /payments/default-payment-method
+   * Retourne la méthode de paiement par défaut de l'utilisateur.
+   */
+  @Get('default-payment-method')
+  @UseGuards(JwtAuthGuard)
+  async getDefaultPaymentMethod(@Request() req: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { defaultPaymentMethod: true },
+    });
+    return { defaultPaymentMethod: user?.defaultPaymentMethod ?? null };
+  }
+
+  /**
+   * PATCH /payments/default-payment-method
+   * Définit la méthode de paiement par défaut de l'utilisateur.
+   */
+  @Patch('default-payment-method')
+  @UseGuards(JwtAuthGuard)
+  async setDefaultPaymentMethod(
+    @Request() req: any,
+    @Body() body: { method: string },
+  ) {
+    if (!body.method) throw new BadRequestException('method requis');
+    await this.prisma.user.update({
+      where: { id: req.user.id },
+      data: { defaultPaymentMethod: body.method },
+    });
+    return { defaultPaymentMethod: body.method };
+  }
+
+  /**
+   * GET /payments/spending?month=2026-04
+   * Retourne le total dépensé et le nombre de trajets pour un mois donné.
+   */
+  @Get('spending')
+  @UseGuards(JwtAuthGuard)
+  async getMonthlySpending(@Request() req: any, @Query('month') month?: string) {
+    const target = month ? new Date(`${month}-01`) : new Date();
+    const startOfMonth = new Date(target.getFullYear(), target.getMonth(), 1);
+    const endOfMonth   = new Date(target.getFullYear(), target.getMonth() + 1, 0, 23, 59, 59);
+
+    const result = await this.prisma.booking.aggregate({
+      where: {
+        passengerId: req.user.id,
+        status: 'completed',
+        createdAt: { gte: startOfMonth, lte: endOfMonth },
+      },
+      _sum: { estimatedPrice: true },
+      _count: { id: true },
+    });
+
+    return {
+      totalFcfa: result._sum.estimatedPrice ?? 0,
+      tripCount: result._count.id ?? 0,
+      month: `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}`,
     };
   }
 
