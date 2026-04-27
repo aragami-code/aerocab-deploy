@@ -57,7 +57,12 @@ export class PointsService {
     return { data: transactions, total, page, limit };
   }
 
-  async addPoints(userId: string, points: number, label: string, source: PointsSource = 'bonus' as PointsSource) {
+  async addPoints(userId: string, points: number, label: string, source: PointsSource = 'bonus') {
+    // Validation: non-debit sources must have positive points
+    if (source !== 'payment' && source !== 'refund' && points <= 0) {
+      throw new BadRequestException('addPoints requires positive points for non-debit sources');
+    }
+
     return this.prisma.pointsTransaction.create({
       data: {
         userId,
@@ -84,7 +89,7 @@ export class PointsService {
       }
 
       await tx.pointsTransaction.create({
-        data: { userId, type: 'debit', source: 'payment' as PointsSource, points: -points, label },
+        data: { userId, type: 'debit', source: 'payment', points: -points, label },
       });
     });
   }
@@ -108,7 +113,7 @@ export class PointsService {
     }
 
     await tx.pointsTransaction.create({
-      data: { userId, type: 'debit', source: 'payment' as PointsSource, points: -points, label },
+      data: { userId, type: 'debit', source: 'payment', points: -points, label },
     });
   }
 }
