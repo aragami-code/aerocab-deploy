@@ -692,6 +692,7 @@ export class BookingsService {
             type: 'debit',
             points: -pointsRequired,
             label: `Réservation course ${dto.flightNumber || 'URBAN'} (${pointsAfterDiscount} FCFA)`,
+            source: 'payment',
           },
         });
       }
@@ -718,6 +719,7 @@ export class BookingsService {
             type: 'credit',
             points: earnedPoints,
             label: `Fidélité — ${newBooking.departureAirport} → ${newBooking.destination}`,
+            source: 'loyalty',
           },
         });
       }
@@ -1041,6 +1043,7 @@ export class BookingsService {
             type: 'credit',
             points: pointsToRefund,
             label: `Remboursement ${isLateCancel ? '50%' : '100%'} annulation course ${bookingId.slice(0, 8)}${isLateCancelBy48h ? ' (< 48h avant vol)' : ''}`,
+            source: 'refund',
           },
         });
         await tx.wallet.upsert({
@@ -1058,6 +1061,7 @@ export class BookingsService {
             type: 'credit',
             points: penaltyPoints,
             label: `Compensation annulation tardive course ${bookingId.slice(0, 8)}`,
+            source: 'refund',
           },
         });
         await tx.wallet.upsert({
@@ -1436,6 +1440,7 @@ export class BookingsService {
               type: 'credit',
               points: price,
               label: `Remboursement aucun chauffeur — course ${bookingId.slice(0, 8)}`,
+              source: 'refund',
             },
           });
           await tx.wallet.upsert({
@@ -1560,6 +1565,7 @@ export class BookingsService {
             type: 'credit',
             points: price,
             label: `Remboursement 100% — panne chauffeur`,
+            source: 'refund',
           },
         });
         await tx.wallet.upsert({
@@ -2095,6 +2101,7 @@ export class BookingsService {
             type: 'debit',
             points: Math.ceil(finalTotal),
             label: `Consigne véhicule — ${actualDays}j × tarif variable`,
+            source: 'payment',
           },
         });
       }
@@ -2168,7 +2175,7 @@ export class BookingsService {
             create: { userId: passengerId, balance: -chargeAmount },
           });
           await tx.pointsTransaction.create({
-            data: { userId: passengerId, type: 'debit', points: Math.ceil(chargeAmount), label: `Consigne annulée — ${daysUsed}j × ${dailyRate.toLocaleString()} FCFA` },
+            data: { userId: passengerId, type: 'debit', points: Math.ceil(chargeAmount), label: `Consigne annulée — ${daysUsed}j × ${dailyRate.toLocaleString()} FCFA`, source: 'payment' },
           });
         });
         refundMsg = `Consigne annulée. ${chargeAmount.toLocaleString()} FCFA facturés pour ${daysUsed} jour(s) déjà écoulé(s).`;
@@ -2582,6 +2589,7 @@ export class BookingsService {
             points: -data.priceDiff,
             type: 'debit',
             label: `Supplément destination: ${data.newDestination}`,
+            source: 'payment',
           },
         });
       } else if (data.priceDiff < 0) {
@@ -2597,6 +2605,7 @@ export class BookingsService {
             points: refund,
             type: 'credit',
             label: `Remboursement destination: ${data.newDestination}`,
+            source: 'refund',
           },
         });
       }
