@@ -16,6 +16,7 @@ model User {
   status                 UserStatus          @default(active)
   avatarUrl              String?             @map("avatar_url")
   language               String              @default("fr")
+  defaultPaymentMethod   String?             @map("default_payment_method")
   fcmToken               String?             @map("fcm_token")
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @updatedAt @map("updated_at")
@@ -74,6 +75,7 @@ model DriverProfile {
   bookings          Booking[]
   documents         DriverDocument[]
   positions         DriverPosition[]
+  consigneDays      ConsigneDay[]
   user              User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([isAvailable, latitude, longitude])
@@ -156,6 +158,10 @@ model Booking {
   consigneActualDays   Int?      @map("consigne_actual_days")   // Jours réels (peut > consigneDays si retard)
   consigneFinalTotal   Float?    @map("consigne_final_total")   // Montant final débité (FCFA)
   consigneRating       Int?      @map("consigne_rating")        // Note globale séjour 1-5 (par le passager)
+  consigneMode         String?   @map("consigne_mode")           // "full_day" | "on_demand"
+  consigneEndDate      DateTime? @map("consigne_end_date")       // date retour passager
+  consigneSuspended    Boolean   @default(false) @map("consigne_suspended") // facturation suspendue
+  consigneDays_rel     ConsigneDay[]
 
   // ── Surcharges dynamiques ───────────────────────────────────────────────────
   surgeMultiplier  Float  @default(1.0) @map("surge_multiplier")
@@ -257,15 +263,17 @@ model TicketMessage {
 }
 
 model PointsTransaction {
-  id        String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId    String                @map("user_id") @db.Uuid
+  id        String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String               @map("user_id") @db.Uuid
   type      PointsTransactionType
+  source    PointsSource         @default(bonus)
   points    Int
   label     String
-  createdAt DateTime              @default(now()) @map("created_at")
-  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime             @default(now()) @map("created_at")
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([userId, source])
   @@map("points_transactions")
 }
 
@@ -327,11 +335,12 @@ model WithdrawalRequest {
   currency      String                  @default("XAF")
   method        WithdrawalMethod
   mobileNumber  String                  @map("mobile_number")
-  status        WithdrawalStatus        @default(pending)
-  adminNote     String?                 @map("admin_note")
-  processedAt   DateTime?               @map("processed_at")
-  createdAt     DateTime                @default(now()) @map("created_at")
-  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status              WithdrawalStatus        @default(pending)
+  adminNote           String?                 @map("admin_note")
+  processedAt         DateTime?               @map("processed_at")
+  disbursementStatus  String?                 @map("disbursement_status")
+  createdAt           DateTime                @default(now()) @map("created_at")
+  user                User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
   @@map("withdrawal_requests")
@@ -504,6 +513,16 @@ enum PointsTransactionType {
   debit
 }
 
+enum PointsSource {
+  recharge
+  referral
+  loyalty
+  bonus
+  cashback
+  refund
+  payment
+}
+
 enum TransactionType {
   deposit
   withdrawal
@@ -616,4 +635,25 @@ model AuditLog {
   @@index([adminId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+model ConsigneDay {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId       String    @map("booking_id") @db.Uuid
+  driverProfileId String    @map("driver_profile_id") @db.Uuid
+  date            DateTime  @map("date") @db.Date
+  mode            String    @map("mode")                   // "full_day" | "on_demand"
+  dailyRate       Float     @map("daily_rate")
+  hasCourse       Boolean   @default(false) @map("has_course")
+  billed          Boolean   @default(false) @map("billed")
+  billedAmount    Float?    @map("billed_amount")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id])
+
+  @@unique([bookingId, date])
+  @@index([bookingId])
+  @@map("consigne_days")
 }
