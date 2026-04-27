@@ -740,7 +740,7 @@ export class BookingsService {
     });
     if (totalBookings === 0) {
       const firstRideBonus = parseInt(await this.settingsService.get('first_ride_bonus_points', '500'), 10) || 500;
-      this.points.addPoints(passengerId, firstRideBonus, 'Bonus première course').catch(() => {});
+      this.points.addPoints(passengerId, firstRideBonus, 'Bonus première course', 'bonus').catch(() => {});
     }
 
     // Notify passenger — booking created, searching for a driver
@@ -1749,6 +1749,17 @@ export class BookingsService {
 
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: updated.id, status: 'in_progress' });
     this.audit.log({ action: 'booking.started', entity: 'booking', entityId: bookingId, userId: driverUserId }).catch(() => {});
+
+    // Marquer la journée consigne comme utilisée si consigne active
+    if (booking.withConsigne && (booking.consigneStatus as string) === 'active') {
+      const todayDate = new Date();
+      todayDate.setHours(0, 0, 0, 0);
+      this.prisma.consigneDay.updateMany({
+        where: { bookingId: booking.id, date: todayDate },
+        data: { hasCourse: true },
+      }).catch(() => {});
+    }
+
     return { id: updated.id, status: updated.status };
   }
 
@@ -1889,6 +1900,7 @@ export class BookingsService {
           booking.passengerId,
           cashbackPts,
           `Cashback ${Math.round(cashbackRate * 100)}% — course ${booking.departureAirport} → ${booking.destination}`,
+          'cashback',
         );
         this.logger.log(`[Cashback] +${cashbackPts} pts → passager ${booking.passengerId}`);
       }
@@ -1928,6 +1940,7 @@ export class BookingsService {
               passenger.referredBy,
               onFirstRideBonus,
               `Bonus parrainage — 1ère course de votre filleul`,
+              'referral',
             );
             // Succès — retirer de la queue retry
             await this.redis.del(`referral:pending:${booking.passengerId}`).catch(() => {});
@@ -1961,7 +1974,7 @@ export class BookingsService {
             data: { walletId: passengerWallet.id, amount: bonus, type: 'deposit', status: 'completed', reference: ref },
           });
         }
-        await this.points.addPoints(booking.passengerId, bonus, `Fidélité — ${completedCount}ème course`);
+        await this.points.addPoints(booking.passengerId, bonus, `Fidélité — ${completedCount}ème course`, 'loyalty');
         this.logger.log(`[Loyalty] +${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
       }
     } catch (e: any) {
@@ -2029,9 +2042,7 @@ export class BookingsService {
       where: { id: bookingId },
       select: {
         id: true, passengerId: true, driverProfileId: true, withConsigne: true,
-        consigneDays: true, consigneDailyRate: true, consigneVehicleType: true,
-        consigneTotal: true, consigneStatus: true, consigneStartedAt: true, paymentMethod: true,
-        vehicleType: true,
+        consigneStatus: true, vehicleType: true, paymentMethod: true,
       },
     });
 
@@ -2039,11 +2050,13 @@ export class BookingsService {
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Cette réservation ne vous appartient pas');
     if ((booking.consigneStatus as string) !== 'active') throw new BadRequestException('La consigne n\'est pas active');
 
-    const startedAt = booking.consigneStartedAt ?? new Date();
-    const hoursElapsed = (Date.now() - startedAt.getTime()) / (1000 * 60 * 60);
-    const actualDays = Math.max(1, Math.ceil(hoursElapsed));
-    const dailyRate = Number(booking.consigneDailyRate) || 0;
-    const finalTotal = actualDays * dailyRate;
+    // Jours effectivement utilisés (hasCourse = true, non encore facturés)
+    const usedDays = await this.prisma.consigneDay.findMany({
+      where: { bookingId, hasCourse: true, billed: false },
+    });
+
+    const finalTotal = usedDays.reduce((sum, d) => sum + d.dailyRate, 0);
+    const actualDays = usedDays.length;
     const now = new Date();
 
     const rideTariffs = await this.settingsService.getTariffs();
@@ -2053,6 +2066,13 @@ export class BookingsService {
     const driverEarnings = Math.floor(finalTotal * (1 - commissionRate));
 
     await this.prisma.$transaction(async (tx) => {
+      if (usedDays.length > 0) {
+        await tx.consigneDay.updateMany({
+          where: { bookingId, hasCourse: true, billed: false },
+          data: { billed: true },
+        });
+      }
+
       await tx.booking.update({
         where: { id: bookingId },
         data: {
@@ -2063,7 +2083,6 @@ export class BookingsService {
         },
       });
 
-      // Débit passager (wallet uniquement — la consigne n'est pas payée en cash)
       if (finalTotal > 0 && booking.paymentMethod !== 'cash') {
         await tx.wallet.upsert({
           where: { userId: booking.passengerId },
@@ -2075,12 +2094,11 @@ export class BookingsService {
             userId: booking.passengerId,
             type: 'debit',
             points: Math.ceil(finalTotal),
-            label: `Consigne véhicule — ${actualDays}j × ${dailyRate.toLocaleString()} FCFA`,
+            label: `Consigne véhicule — ${actualDays}j × tarif variable`,
           },
         });
       }
 
-      // Crédit chauffeur
       if (driverEarnings > 0 && booking.paymentMethod !== 'cash') {
         await tx.wallet.upsert({
           where: { userId: driverUserId },
@@ -2094,25 +2112,23 @@ export class BookingsService {
             type: 'deposit',
             status: 'completed',
             reference: `CONSIGNE-EARN-${bookingId}`,
-            metadata: { bookingId, actualDays, dailyRate, finalTotal, commissionRate },
+            metadata: { bookingId, actualDays, finalTotal, commissionRate },
           },
         });
       }
     });
 
-    const extraDays = actualDays - (booking.consigneDays ?? 0);
-    const passengerMsg = extraDays > 0
-      ? `Consigne terminée (${actualDays}j, dont ${extraDays}j de retard). ${finalTotal.toLocaleString()} FCFA débités.`
-      : `Consigne terminée. ${finalTotal.toLocaleString()} FCFA débités. Merci d'avoir utilisé AeroGo !`;
-
-    this.notifications.sendToUser(booking.passengerId, 'Consigne terminée ✅', passengerMsg).catch(() => {});
+    this.notifications.sendToUser(
+      booking.passengerId, 'Consigne terminée ✅',
+      `${actualDays} jour(s) utilisé(s). ${finalTotal.toLocaleString()} FCFA débités.`,
+    ).catch(() => {});
 
     this.audit.log({
       action: 'consigne.ended', entity: 'booking', entityId: bookingId,
-      userId: driverUserId, meta: { actualDays, dailyRate, finalTotal, commissionRate, driverEarnings },
+      userId: driverUserId, meta: { actualDays, finalTotal, commissionRate, driverEarnings },
     }).catch(() => {});
 
-    return { id: bookingId, consigneStatus: 'completed', actualDays, finalTotal };
+    return { bookingId, consigneStatus: 'completed', actualDays, finalTotal };
   }
 
   async cancelConsigne(bookingId: string, passengerId: string) {
@@ -2415,7 +2431,7 @@ export class BookingsService {
 
         // Rembourse les points au passager
         if (cancelled.estimatedPrice) {
-          await this.points.addPoints(booking.passengerId, Math.round(cancelled.estimatedPrice), 'Remboursement — vol annulé');
+          await this.points.addPoints(booking.passengerId, Math.round(cancelled.estimatedPrice), 'Remboursement — vol annulé', 'refund');
         }
 
         // Notifie le passager
@@ -2609,4 +2625,182 @@ export class BookingsService {
     return { accepted: true, newDestination: data.newDestination, newPrice: data.newPrice };
   }
 
+  async activateConsigneDay(
+    bookingId: string,
+    passengerId: string,
+    mode: 'full_day' | 'on_demand',
+  ): Promise<{ consigneDayId: string; date: string; mode: string; dailyRate: number }> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, withConsigne: true, consigneStatus: true,
+        consigneDailyRate: true, driverProfileId: true,
+      },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    if (!booking.withConsigne) throw new BadRequestException('Pas de consigne sur cette réservation');
+    if ((booking.consigneStatus as string) !== 'active') throw new BadRequestException('La consigne n\'est pas active');
+    if (!booking.driverProfileId) throw new BadRequestException('Aucun chauffeur assigné à la consigne');
+
+    // Check suspension and end date via raw fields
+    const fullBooking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { consigneSuspended: true, consigneEndDate: true } as any,
+    }) as any;
+    if (fullBooking?.consigneSuspended) throw new BadRequestException('La consigne est suspendue — aucun chauffeur disponible');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (fullBooking?.consigneEndDate && today > fullBooking.consigneEndDate) {
+      throw new BadRequestException('La période de consigne est terminée');
+    }
+
+    const existing = await this.prisma.consigneDay.findUnique({
+      where: { bookingId_date: { bookingId, date: today } },
+    });
+    if (existing) return {
+      consigneDayId: existing.id,
+      date: today.toISOString().split('T')[0],
+      mode: existing.mode,
+      dailyRate: existing.dailyRate,
+    };
+
+    const dailyRate = Number(booking.consigneDailyRate) || 0;
+    const day = await this.prisma.consigneDay.create({
+      data: { bookingId, driverProfileId: booking.driverProfileId, date: today, mode, dailyRate },
+    });
+
+    return { consigneDayId: day.id, date: today.toISOString().split('T')[0], mode, dailyRate };
+  }
+
+  async requestConsigneReassignment(bookingId: string): Promise<void> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, withConsigne: true, consigneStatus: true,
+        consigneDailyRate: true, driverProfileId: true, destination: true,
+      },
+    });
+    if (!booking || !booking.withConsigne || (booking.consigneStatus as string) !== 'active') return;
+
+    const extFields = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { consigneMode: true, consigneEndDate: true } as any,
+    }) as any;
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { consigneSuspended: true } as any,
+    });
+
+    this.notifications.sendToUser(
+      booking.passengerId,
+      'Chauffeur consigne indisponible',
+      'Votre chauffeur a mis fin à sa disponibilité consigne. Nous cherchons un remplaçant.',
+    ).catch(() => {});
+
+    const eligibleDrivers = await this.prisma.driverProfile.findMany({
+      where: {
+        consigneEnabled: true,
+        isAvailable: true,
+        isOnline: true,
+        status: 'approved',
+        id: { not: booking.driverProfileId ?? undefined },
+      },
+      select: { id: true, userId: true },
+      take: 10,
+    });
+
+    if (eligibleDrivers.length === 0) {
+      this.notifications.sendToUser(
+        booking.passengerId,
+        'Aucun chauffeur disponible',
+        'Aucun chauffeur consigne disponible pour le moment. Vous serez notifié dès qu\'un chauffeur accepte.',
+      ).catch(() => {});
+      return;
+    }
+
+    const remainingDays = extFields?.consigneEndDate
+      ? Math.max(0, Math.ceil((extFields.consigneEndDate.getTime() - Date.now()) / 86400000))
+      : 0;
+
+    for (const driver of eligibleDrivers) {
+      this.ridesGateway.notifyConsigneRequest(driver.userId, {
+        bookingId,
+        passengerId: booking.passengerId,
+        remainingDays,
+        dailyRate: Number(booking.consigneDailyRate) || 0,
+        consigneMode: extFields?.consigneMode ?? 'on_demand',
+        destination: booking.destination,
+      });
+    }
+  }
+
+  async acceptConsigneRequest(bookingId: string, driverUserId: string): Promise<{ bookingId: string; assigned: boolean }> {
+    const driverProfile = await this.prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    if (!driverProfile) throw new ForbiddenException('Profil chauffeur introuvable');
+
+    const acquired = await this.redis.setNx(`consigne:lock:${bookingId}`, driverUserId, 60);
+    if (!acquired) return { bookingId, assigned: false };
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { passengerId: true, withConsigne: true, consigneStatus: true },
+    });
+    const isSuspended = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { consigneSuspended: true } as any,
+    }) as any;
+
+    if (!booking || !isSuspended?.consigneSuspended) {
+      await this.redis.del(`consigne:lock:${bookingId}`);
+      return { bookingId, assigned: false };
+    }
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { driverProfileId: driverProfile.id, consigneSuspended: false } as any,
+    });
+
+    this.notifications.sendToUser(
+      booking.passengerId,
+      'Nouveau chauffeur consigne ✅',
+      'Un chauffeur a accepté de prendre en charge votre consigne.',
+    ).catch(() => {});
+
+    this.audit.log({
+      action: 'consigne.reassigned', entity: 'booking', entityId: bookingId,
+      userId: driverUserId, meta: { newDriverProfileId: driverProfile.id },
+    }).catch(() => {});
+
+    return { bookingId, assigned: true };
+  }
+
+  async changeConsigneMode(
+    bookingId: string,
+    passengerId: string,
+    mode: 'full_day' | 'on_demand',
+  ): Promise<{ bookingId: string; consigneMode: string; effectiveFrom: string }> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { passengerId: true, withConsigne: true, consigneStatus: true },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) throw new ForbiddenException('Accès refusé');
+    if (!booking.withConsigne) throw new BadRequestException('Pas de consigne sur cette réservation');
+    if ((booking.consigneStatus as string) !== 'active') throw new BadRequestException('La consigne n\'est pas active');
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { consigneMode: mode } as any,
+    });
+
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+
+    return { bookingId, consigneMode: mode, effectiveFrom: tomorrow.toISOString().split('T')[0] };
+  }
 }

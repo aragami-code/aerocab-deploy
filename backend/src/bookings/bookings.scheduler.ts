@@ -350,6 +350,7 @@ export class BookingsScheduler {
               booking.passengerId,
               cashbackPts,
               `Cashback auto — course ${booking.departureAirport} → ${booking.destination}`,
+              'cashback',
             );
           }
         } catch { /* ignore */ }
@@ -394,7 +395,7 @@ export class BookingsScheduler {
             data: { walletId: referrerWallet.id, amount: bonus, type: 'deposit', status: 'completed', reference: idempotencyRef },
           });
         }
-        await this.points.addPoints(referrerId, bonus, `Bonus parrainage — 1ère course de votre filleul (retry)`);
+        await this.points.addPoints(referrerId, bonus, `Bonus parrainage — 1ère course de votre filleul (retry)`, 'referral');
         await this.redis.del(key);
         this.logger.log(`[PAR·049] Retry OK — +${bonus} pts → parrain ${referrerId} (filleul ${passengerId})`);
       } catch (e: any) {
@@ -678,6 +679,33 @@ export class BookingsScheduler {
       } catch (err: any) {
         this.logger.error(`[FLW-RETRY] Erreur pour ${tx.reference}: ${err?.message}`);
       }
+    }
+  }
+
+  @Cron('0 8 * * *')
+  async checkConsigneEndDates() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const expiredConsignes = await this.prisma.booking.findMany({
+      where: {
+        withConsigne: true,
+        consigneStatus: 'active',
+        consigneEndDate: { lte: today },
+      } as any,
+      select: { id: true, passengerId: true },
+    });
+
+    for (const booking of expiredConsignes) {
+      this.notifications.sendToUser(
+        booking.passengerId,
+        'Fin de votre consigne aujourd\'hui 🗓',
+        'Votre période de consigne se termine aujourd\'hui. Pensez à réserver votre course retour vers l\'aéroport.',
+      ).catch(() => {});
+    }
+
+    if (expiredConsignes.length > 0) {
+      this.logger.log(`[Consigne] ${expiredConsignes.length} consigne(s) arrivent à échéance aujourd'hui`);
     }
   }
 }

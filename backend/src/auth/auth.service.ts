@@ -21,6 +21,7 @@ const OTP_TTL = OTP_EXPIRY_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_TTL = OTP_COOLDOWN_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_MAX = OTP_MAX_ATTEMPTS;
 const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days
+const SESSION_VERSION_KEY = (userId: string) => `session_version:${userId}`;
 
 @Injectable()
 export class AuthService {
@@ -34,6 +35,15 @@ export class AuthService {
     private sms: OtpDeliveryService,
     private settings: SettingsService,
   ) {}
+
+  private async newSessionVersion(userId: string): Promise<number> {
+    return this.redis.incr(SESSION_VERSION_KEY(userId));
+  }
+
+  private async currentSessionVersion(userId: string): Promise<number> {
+    const sv = await this.redis.get(SESSION_VERSION_KEY(userId));
+    return sv ? parseInt(sv, 10) : 0;
+  }
 
   async sendOtp(phone: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
     // H6 — Rate limit global : empêche le spam via milliers de numéros différents.
@@ -60,20 +70,20 @@ export class AuthService {
       );
     }
 
-    // Test mode: use fixed OTP if enabled via AppSetting (admin-controlled)
+    // Test mode: 100% piloté par AppSetting (admin dashboard)
+    // FORCE_TEST_OTP et FORCE_OTP_LOG (env vars) ne sont plus utilisés
     const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
-    const testOtpValue    = await this.settings.get('test_otp_value', '123456');
-    // FORCE_TEST_OTP=true (env var) bypasse la restriction production — à retirer après config SMS réel
-    const isTestMode = this.config.get('FORCE_TEST_OTP') === 'true'
-      || (testModeEnabled === 'true' && this.config.get('NODE_ENV', 'development') !== 'production');
+    const testOtpValue    = await this.settings.get('test_otp_value', '000000');
+    const otpLogEnabled   = await this.settings.get('otp_log_enabled', 'false');
+    const isTestMode      = testModeEnabled === 'true';
 
     const code = isTestMode
       ? testOtpValue
       : Math.floor(100000 + Math.random() * 900000).toString();
 
-    const forceLog = this.config.get('NODE_ENV', 'development') !== 'production'
-      || this.config.get('FORCE_OTP_LOG') === 'true';
-    if (forceLog) {
+    const shouldLog = isTestMode || otpLogEnabled === 'true'
+      || this.config.get('NODE_ENV', 'development') !== 'production';
+    if (shouldLog) {
       this.logger.log(`[OTP]${isTestMode ? ' [TEST]' : ''} ${maskPhone(phone)} → ${code}`);
     }
 
@@ -117,11 +127,14 @@ export class AuthService {
       where: { id: userId },
       data: { referredBy: referrer.id },
     });
+    const tariffs = await this.settings.getTariffs();
+    const onSignup     = tariffs.referralBonus?.onSignup    ?? 500;
+    const newUserBonus = tariffs.referralBonus?.newUserBonus ?? 300;
     await Promise.all([
-      this.prisma.pointsTransaction.create({ data: { userId: referrer.id, points: 500, type: 'credit', label: 'Parrainage accepté' } }),
-      this.prisma.pointsTransaction.create({ data: { userId, points: 500, type: 'credit', label: 'Bonus parrainage inscription' } }),
+      onSignup > 0     ? this.prisma.pointsTransaction.create({ data: { userId: referrer.id, points: onSignup,     type: 'credit', label: 'Parrainage accepté',        source: 'referral' } })         : Promise.resolve(),
+      newUserBonus > 0 ? this.prisma.pointsTransaction.create({ data: { userId,              points: newUserBonus, type: 'credit', label: 'Bonus parrainage inscription', source: 'referral' } }) : Promise.resolve(),
     ]);
-    return { success: true, message: '500 points offerts à vous et votre parrain !' };
+    return { success: true, message: `${newUserBonus} points offerts ! Votre parrain reçoit ${onSignup} points.` };
   }
 
   async logout(userId: string): Promise<void> {
@@ -188,8 +201,8 @@ export class AuthService {
 
     const { code: storedCode, attempts } = JSON.parse(otpData);
 
-    // Check max attempts (5 wrong tries)
-    if (attempts >= 5) {
+    // Check max attempts (3 wrong tries → blocked on 4th)
+    if (attempts >= 3) {
       await this.redis.del(otpKey);
       throw new UnauthorizedException(
         'Trop de tentatives incorrectes. Demandez un nouveau code.',
@@ -231,6 +244,7 @@ export class AuthService {
           where: { referralCode: referralCode.toUpperCase() },
           select: { id: true },
         });
+        if (!referrer) throw new BadRequestException('Code de parrainage invalide.');
       }
 
       user = await (this.prisma.user as any).create({
@@ -249,10 +263,10 @@ export class AuthService {
         const REFERRAL_BONUS = 500;
         await Promise.all([
           this.prisma.pointsTransaction.create({
-            data: { userId: referrer.id, type: 'credit', points: REFERRAL_BONUS, label: `Parrainage — nouvel inscrit` },
+            data: { userId: referrer.id, type: 'credit', points: REFERRAL_BONUS, label: `Parrainage — nouvel inscrit`, source: 'referral' },
           }),
           this.prisma.pointsTransaction.create({
-            data: { userId: user.id, type: 'credit', points: REFERRAL_BONUS, label: `Bonus parrainage à l'inscription` },
+            data: { userId: user.id, type: 'credit', points: REFERRAL_BONUS, label: `Bonus parrainage à l'inscription`, source: 'referral' },
           }),
         ]);
         this.logger.log(`Referral bonus: ${REFERRAL_BONUS} pts → parrain ${referrer.id} + filleul ${user.id}`);
@@ -266,8 +280,9 @@ export class AuthService {
       throw new UnauthorizedException('Compte suspendu. Contactez le support.');
     }
 
-    // Generate tokens
-    const payload = { sub: user.id, role: user.role };
+    // Generate tokens — session unique (D3)
+    const sv = await this.newSessionVersion(user.id);
+    const payload = { sub: user.id, role: user.role, sv };
     const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
     const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
 
@@ -305,8 +320,9 @@ export class AuthService {
         throw new UnauthorizedException('Utilisateur introuvable ou suspendu');
       }
 
-      // Generate new tokens
-      const newPayload = { sub: user.id, role: user.role };
+      // Refresh conserve la session version courante (pas de nouvel login)
+      const sv = await this.currentSessionVersion(user.id);
+      const newPayload = { sub: user.id, role: user.role, sv };
       const newAccessToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
       const newRefreshToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
 
@@ -405,8 +421,9 @@ export class AuthService {
       throw new UnauthorizedException('Compte suspendu. Contactez le support.');
     }
 
-    // Generate tokens
-    const payload = { sub: user.id, role: user.role };
+    // Generate tokens — session unique (D3)
+    const svGoogle = await this.newSessionVersion(user.id);
+    const payload = { sub: user.id, role: user.role, sv: svGoogle };
     const newAccessToken = this.jwt.sign(payload, { expiresIn: '30d' });
     const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
 
@@ -478,8 +495,9 @@ export class AuthService {
       if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
       if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: roleFromDeepLink } }); isNewUser = true; }
 
-      // Generate tokens
-      const payload = { sub: user.id, role: user.role };
+      // Generate tokens — session unique (D3)
+      const svCb = await this.newSessionVersion(user.id);
+      const payload = { sub: user.id, role: user.role, sv: svCb };
       const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
       const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
       await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
