@@ -11,16 +11,30 @@ export class AuthController {
 
   @Post('otp/send')
   @HttpCode(200)
-  @SkipThrottle() // rate limit géré dans auth.service.ts (Redis)
+  @SkipThrottle()
   async sendOtp(@Body() dto: SendOtpDto) {
     return this.authService.sendOtp(dto.phone, dto.lang ?? 'fr');
   }
 
   @Post('otp/verify')
   @HttpCode(200)
-  @SkipThrottle() // rate limit géré dans auth.service.ts (Redis)
+  @SkipThrottle()
   async verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.authService.verifyOtp(dto.phone, dto.code, dto.intendedRole, dto.referralCode);
+  }
+
+  @Post('otp/send-email')
+  @HttpCode(200)
+  @SkipThrottle()
+  async sendEmailOtp(@Body() body: { email: string; lang?: string }) {
+    return this.authService.sendEmailOtp(body.email, body.lang ?? 'fr');
+  }
+
+  @Post('otp/verify-email')
+  @HttpCode(200)
+  @SkipThrottle()
+  async verifyEmailOtp(@Body() body: { email: string; code: string; intendedRole?: 'passenger' | 'driver'; referralCode?: string }) {
+    return this.authService.verifyEmailOtp(body.email, body.code, body.intendedRole, body.referralCode);
   }
 
   @Get('referral')
@@ -99,6 +113,7 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
+  @SkipThrottle()
   async getMe(@CurrentUser('id') userId: string) {
     return this.authService.getMe(userId);
   }

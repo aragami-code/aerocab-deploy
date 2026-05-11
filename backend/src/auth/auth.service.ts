@@ -9,8 +9,10 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { OtpDeliveryService } from '../otp/otp-delivery.service';
+import { EmailRouterService } from '../email/email-router.service';
 import { SettingsService } from '../settings/settings.service';
 import { maskPhone } from '../common/helpers';
+import { extractCountryFromPhone } from '../common/phone-country';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -33,6 +35,7 @@ export class AuthService {
     private jwt: JwtService,
     private config: ConfigService,
     private sms: OtpDeliveryService,
+    private email: EmailRouterService,
     private settings: SettingsService,
   ) {}
 
@@ -104,6 +107,130 @@ export class AuthService {
     }
 
     return { message: 'OTP envoye avec succes', expiresIn: OTP_TTL };
+  }
+
+  async sendEmailOtp(emailAddr: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(emailAddr)) {
+      throw new BadRequestException('Adresse email invalide.');
+    }
+
+    // Rate limit par email
+    const rateKey = `otp_email_rate:${emailAddr}`;
+    const currentCount = await this.redis.get(rateKey);
+    const count = currentCount ? parseInt(currentCount, 10) : 0;
+    if (count >= OTP_RATE_LIMIT_MAX) {
+      const ttl = await this.redis.ttl(rateKey);
+      throw new BadRequestException(
+        `Trop de tentatives. Réessayez dans ${Math.ceil(ttl / 60)} minute(s).`,
+      );
+    }
+
+    const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
+    const testOtpValue    = await this.settings.get('test_otp_value', '000000');
+    const isTestMode      = testModeEnabled === 'true';
+
+    const code = isTestMode
+      ? testOtpValue
+      : Math.floor(100000 + Math.random() * 900000).toString();
+
+    this.logger.log(`[OTP-EMAIL]${isTestMode ? ' [TEST]' : ''} ${emailAddr} → ${isTestMode ? code : '******'}`);
+
+    const otpKey = `otp:email:${emailAddr}`;
+    await this.redis.set(otpKey, JSON.stringify({ code, attempts: 0 }), OTP_TTL);
+
+    await this.redis.incr(rateKey);
+    if (count === 0) await this.redis.expire(rateKey, OTP_RATE_LIMIT_TTL);
+
+    const subject = 'Votre code AeroGo 24';
+    const html = `
+      <div style="font-family:sans-serif;max-width:400px;margin:auto;padding:24px">
+        <h2 style="color:#1D2C4D">AeroGo 24</h2>
+        <p>Voici votre code de vérification :</p>
+        <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1D2C4D;text-align:center;padding:16px 0">${code}</div>
+        <p style="color:#64748b;font-size:13px">Ce code expire dans ${OTP_EXPIRY_MINUTES} minutes. Ne le partagez pas.</p>
+      </div>
+    `;
+
+    const sent = await this.email.send(emailAddr, subject, html);
+    if (!sent) {
+      throw new BadRequestException("Échec d'envoi de l'email. Réessayez.");
+    }
+
+    return { message: 'Code envoyé par email', expiresIn: OTP_TTL };
+  }
+
+  async verifyEmailOtp(
+    emailAddr: string,
+    code: string,
+    intendedRole?: 'passenger' | 'driver',
+    referralCode?: string,
+  ) {
+    const otpKey = `otp:email:${emailAddr}`;
+    const otpData = await this.redis.get(otpKey);
+
+    if (!otpData) throw new UnauthorizedException('Code OTP expiré ou invalide');
+
+    const { code: storedCode, attempts } = JSON.parse(otpData);
+
+    if (attempts >= 3) {
+      await this.redis.del(otpKey);
+      throw new UnauthorizedException('Trop de tentatives. Demandez un nouveau code.');
+    }
+
+    if (storedCode !== code) {
+      await this.redis.set(
+        otpKey,
+        JSON.stringify({ code: storedCode, attempts: attempts + 1 }),
+        await this.redis.ttl(otpKey),
+      );
+      throw new UnauthorizedException('Code OTP incorrect');
+    }
+
+    await this.redis.del(otpKey);
+
+    let user = await this.prisma.user.findFirst({ where: { email: emailAddr } });
+    let isNewUser = false;
+
+    if (!user) {
+      const role = intendedRole ?? 'passenger';
+      let newReferralCode: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        const candidate = this.generateReferralCode();
+        const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+        if (!exists) { newReferralCode = candidate; break; }
+      }
+
+      let referrer: { id: string } | null = null;
+      if (referralCode) {
+        referrer = await (this.prisma.user as any).findUnique({
+          where: { referralCode: referralCode.toUpperCase() },
+          select: { id: true },
+        });
+        if (!referrer) throw new BadRequestException('Code de parrainage invalide.');
+      }
+
+      user = await (this.prisma.user as any).create({
+        data: { email: emailAddr, role, referralCode: newReferralCode, referredBy: referrer?.id ?? null },
+      });
+      isNewUser = true;
+      this.logger.log(`New user created via email: ${user.id} (${emailAddr}) role=${role}`);
+
+      if (referrer) {
+        const BONUS = 500;
+        await Promise.all([
+          this.prisma.pointsTransaction.create({ data: { userId: referrer.id, type: 'credit', points: BONUS, label: 'Parrainage — nouvel inscrit', source: 'referral' } }),
+          this.prisma.pointsTransaction.create({ data: { userId: user.id, type: 'credit', points: BONUS, label: 'Bonus parrainage à l\'inscription', source: 'referral' } }),
+        ]);
+      }
+    }
+
+    const sv = await this.newSessionVersion(user.id);
+    const accessToken  = this.jwt.sign({ sub: user.id, role: user.role, sv });
+    const refreshToken = this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: `${REFRESH_TOKEN_TTL}s` });
+    await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
+
+    return { accessToken, refreshToken, user: { id: user.id, email: user.email, name: user.name, role: user.role }, isNewUser };
   }
 
   private generateReferralCode(): string {
@@ -253,6 +380,7 @@ export class AuthService {
           role,
           referralCode: newReferralCode,
           referredBy: referrer?.id ?? null,
+          countryCode: extractCountryFromPhone(phone),
         },
       });
       isNewUser = true;

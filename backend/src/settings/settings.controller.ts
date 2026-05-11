@@ -1,7 +1,8 @@
-import { Controller, Get, Patch, Put, Body, UseGuards, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Patch, Put, Post, HttpCode, Body, UseGuards, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { SettingsService } from './settings.service';
 import { AuditService } from '../audit/audit.service';
+import { EdoctorPaymentService } from '../payments/edoctor-payment.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { CurrentUser } from '../auth/decorators';
@@ -28,9 +29,11 @@ const DEDICATED_ENDPOINT_KEYS = [
   'payment_mpesa_consumer_key', 'payment_mpesa_consumer_secret', 'payment_mpesa_shortcode', 'payment_mpesa_passkey',
   'payment_paypal_client_id', 'payment_paypal_client_secret', 'payment_paypal_webhook_id',
   'payment_wave_api_key', 'payment_wave_webhook_secret',
+  'payment_edoctor_url', 'payment_edoctor_email', 'payment_edoctor_password',
   // Toggles providers (gérés via PUT /payment-providers)
   'payment_cinetpay_enabled', 'payment_flutterwave_enabled', 'payment_stripe_enabled',
   'payment_notchpay_enabled', 'payment_mpesa_enabled', 'payment_paypal_enabled', 'payment_wave_enabled',
+  'payment_edoctor_enabled',
   // Sécurité paiements + config système (gérés via PATCH /payment-security)
   'payment_max_recharge_amount',
   'withdrawal_min_amount', 'withdrawal_max_amount', 'withdrawal_max_daily_amount', 'withdrawal_carence_hours',
@@ -77,7 +80,11 @@ class SetAppSettingDto {
 @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
 @Roles('admin')
 export class SettingsController {
-  constructor(private settings: SettingsService, private audit: AuditService) {}
+  constructor(
+    private settings: SettingsService,
+    private audit: AuditService,
+    private edoctor: EdoctorPaymentService,
+  ) {}
 
   @Get()
   getAll() {
@@ -183,6 +190,7 @@ export class SettingsController {
       'orange_cm_client_id', 'orange_cm_client_secret', 'orange_cm_sender_address',
       'at_api_key', 'at_username', 'at_sender_id',
       'sendgrid_api_key', 'sendgrid_from_email',
+      'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from_email',
     ];
     const values = await Promise.all(keys.map((k) => this.settings.get(k)));
     const status: Record<string, boolean> = {};
@@ -201,6 +209,7 @@ export class SettingsController {
       'orange_cm_client_id', 'orange_cm_client_secret', 'orange_cm_sender_address',
       'at_api_key', 'at_username', 'at_sender_id',
       'sendgrid_api_key', 'sendgrid_from_email',
+      'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from_email',
     ];
     const updates: string[] = [];
     for (const [key, value] of Object.entries(body)) {
@@ -403,7 +412,7 @@ export class SettingsController {
   // ── Payment providers credentials ─────────────────────────────────────────
 
   static readonly PAYMENT_PROVIDERS = [
-    'cinetpay', 'flutterwave', 'stripe', 'notchpay', 'mpesa', 'paypal', 'wave',
+    'cinetpay', 'flutterwave', 'stripe', 'notchpay', 'mpesa', 'paypal', 'wave', 'edoctor',
   ] as const;
 
   /** Clés DB → sensibles masquées, les autres indiquent juste si configurées */
@@ -426,6 +435,9 @@ export class SettingsController {
     { key: 'payment_paypal_webhook_id',           label: 'PayPal Webhook ID',            sensitive: false },
     { key: 'payment_wave_api_key',                label: 'Wave API Key',                 sensitive: true  },
     { key: 'payment_wave_webhook_secret',         label: 'Wave Webhook Secret',          sensitive: true  },
+    { key: 'payment_edoctor_url',                 label: 'EdoctorPay URL',               sensitive: false },
+    { key: 'payment_edoctor_email',               label: 'EdoctorPay Email',             sensitive: false },
+    { key: 'payment_edoctor_password',            label: 'EdoctorPay Mot de passe',      sensitive: true  },
   ];
 
   /**
@@ -506,5 +518,229 @@ export class SettingsController {
     }).catch(() => {});
 
     return { success: true, updated };
+  }
+
+  /**
+   * POST /admin/settings/payment-providers/edoctor/test
+   * Teste la connexion EdoctorPay avec les credentials enregistrés en DB.
+   */
+  @Post('payment-providers/edoctor/test')
+  @HttpCode(200)
+  @RequirePermission('manage_payment_providers')
+  async testEdoctorConnection() {
+    return this.edoctor.testConnection();
+  }
+
+  // ── Forfaits de recharge de points ───────────────────────────────────────────
+
+  @Get('points-packages')
+  @RequirePermission('view_tariffs')
+  async getPointsPackages() {
+    const raw = await this.settings.get('points_recharge_packages', '[1000,3000,5000,10000]');
+    let sizes: number[];
+    try { sizes = JSON.parse(raw); } catch { sizes = [1000, 3000, 5000, 10000]; }
+    return { packages: sizes };
+  }
+
+  @Patch('points-packages')
+  @RequirePermission('edit_tariffs')
+  async setPointsPackages(
+    @Body() body: { packages: number[] },
+    @CurrentUser() admin: any,
+  ) {
+    if (!Array.isArray(body.packages)) throw new BadRequestException('packages doit être un tableau de nombres');
+    const sizes = body.packages
+      .map(n => parseInt(String(n), 10))
+      .filter(n => !isNaN(n) && n > 0 && n <= 1_000_000);
+    if (sizes.length === 0) throw new BadRequestException('Au moins un forfait requis');
+    await this.settings.set('points_recharge_packages', JSON.stringify(sizes));
+    this.audit.log({
+      action: 'UPDATE_POINTS_PACKAGES',
+      entity: 'AppSetting',
+      adminId: admin.id,
+      meta: { packages: sizes },
+    }).catch(() => {});
+    return { success: true, packages: sizes };
+  }
+
+  // ── Configuration documents chauffeur ─────────────────────────────────────────
+
+  static readonly ALL_DOCUMENT_TYPES = [
+    'cni_front', 'cni_back', 'license', 'registration', 'vehicle_photo',
+    'insurance', 'technical_control', 'vtc_license', 'passport', 'portrait',
+    'criminal_record', 'proof_of_address', 'medical_certificate',
+    'vaccination_card', 'border_pass', 'selfie',
+  ] as const;
+
+  static readonly DEFAULT_DOCUMENT_CONFIG = [
+    { type: 'cni_front',     label: 'CNI — Recto',              description: 'Face avant de votre carte nationale',        required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'cni_back',      label: 'CNI — Verso',              description: "Face arrière de votre carte nationale",      required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'license',       label: 'Permis de conduire',       description: 'Permis en cours de validité',                required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'registration',  label: 'Carte grise',              description: "Document d'immatriculation du véhicule",    required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vehicle_photo', label: 'Photo du véhicule',        description: 'Vue de face du véhicule',                    required: true,  enabled: true,  acceptedExtensions: ['jpg','png'] },
+    { type: 'insurance',        label: "Attestation d'assurance", description: 'Attestation couvrant le transport de personnes', required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'technical_control',label: 'Visite technique',        description: 'Contrôle technique en cours de validité',  required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vtc_license',      label: 'Autorisation VTC',        description: 'Autorisation officielle de transport VTC', required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'passport',         label: 'Passeport',               description: 'Passeport en cours de validité',            required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'portrait',         label: 'Photo portrait',          description: 'Selfie face caméra, fond neutre',           required: false, enabled: false, acceptedExtensions: ['jpg','png'] },
+    { type: 'criminal_record',  label: 'Casier judiciaire',       description: 'Bulletin n°3 daté de moins de 3 mois',     required: false, enabled: false, acceptedExtensions: ['pdf'] },
+    { type: 'proof_of_address', label: 'Justificatif de domicile',description: 'Facture ou relevé de moins de 3 mois',     required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'medical_certificate', label: 'Certificat médical',   description: "Attestation d'aptitude à la conduite",     required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vaccination_card',    label: 'Carte de vaccination',  description: 'Carnet de vaccination à jour',              required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'border_pass',         label: 'Laissez-passer frontalier', description: 'Document frontalier valide',           required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'selfie',              label: 'Selfie avec CNI',           description: 'Photo de vous tenant votre CNI',        required: false, enabled: false, acceptedExtensions: ['jpg','png'] },
+  ];
+
+  @Get('driver-documents')
+  @RequirePermission('view_drivers')
+  async getDriverDocumentConfig() {
+    const raw = await this.settings.get('driver_document_config', '');
+    if (raw) {
+      try {
+        return { documents: JSON.parse(raw) };
+      } catch { /* fallback */ }
+    }
+    return { documents: SettingsController.DEFAULT_DOCUMENT_CONFIG };
+  }
+
+  @Patch('driver-documents')
+  @RequirePermission('verify_driver')
+  async setDriverDocumentConfig(
+    @Body() body: { documents: { type: string; label: string; description?: string; required: boolean; enabled: boolean; acceptedExtensions?: string[] }[] },
+    @CurrentUser() admin: any,
+  ) {
+    if (!Array.isArray(body.documents)) throw new BadRequestException('documents doit être un tableau');
+    const allowed = new Set(SettingsController.ALL_DOCUMENT_TYPES as readonly string[]);
+    const VALID_EXT = new Set(['jpg', 'png', 'pdf', 'heic', 'webp']);
+    const validated = body.documents
+      .filter(d => allowed.has(d.type))
+      .map(d => ({
+        type: d.type,
+        label: d.label?.trim() || d.type,
+        description: d.description?.trim() || '',
+        required: !!d.required,
+        enabled: !!d.enabled,
+        acceptedExtensions: Array.isArray(d.acceptedExtensions)
+          ? d.acceptedExtensions.filter(e => VALID_EXT.has(e))
+          : ['jpg', 'png', 'pdf'],
+      }));
+    if (validated.length === 0) throw new BadRequestException('Aucun document valide');
+    await this.settings.set('driver_document_config', JSON.stringify(validated));
+    this.audit.log({
+      action: 'UPDATE_DRIVER_DOCUMENT_CONFIG',
+      entity: 'AppSetting',
+      adminId: admin.id,
+      meta: { count: validated.length },
+    }).catch(() => {});
+    return { success: true, documents: validated };
+  }
+
+  @Get('driver-documents/all')
+  @RequirePermission('view_drivers')
+  async getAllDocumentTypes() {
+    return {
+      types: SettingsController.ALL_DOCUMENT_TYPES,
+      defaults: SettingsController.DEFAULT_DOCUMENT_CONFIG,
+    };
+  }
+
+  // ── Bot assistant ─────────────────────────────────────────────────────────
+
+  static readonly BOT_PROVIDERS = ['claude', 'openai', 'zhipu', 'gemini'] as const;
+
+  @Get('bot')
+  @RequirePermission('view_settings')
+  async getBotSettings() {
+    const [enabled, provider, model, rawMaxTokens, systemPrompt,
+           claudeKey, openaiKey, zhipuKey, geminiKey] = await Promise.all([
+      this.settings.get('bot_enabled',          'false'),
+      this.settings.get('bot_provider',          'claude'),
+      this.settings.get('bot_model',             'claude-haiku-4-5-20251001'),
+      this.settings.get('bot_max_tokens',        '500'),
+      this.settings.get('bot_system_prompt',     ''),
+      this.settings.get('bot_claude_api_key',    ''),
+      this.settings.get('bot_openai_api_key',    ''),
+      this.settings.get('bot_zhipu_api_key',     ''),
+      this.settings.get('bot_gemini_api_key',    ''),
+    ]);
+
+    const mask = (k: string) => k ? k.slice(0, 6) + '••••••••••••' + k.slice(-4) : '';
+
+    return {
+      enabled:         enabled === 'true',
+      provider,
+      model,
+      maxTokens:       parseInt(rawMaxTokens, 10) || 500,
+      systemPrompt,
+      providers:       SettingsController.BOT_PROVIDERS,
+      claudeKey:       { configured: !!claudeKey,  masked: mask(claudeKey)  },
+      openaiKey:       { configured: !!openaiKey,  masked: mask(openaiKey)  },
+      zhipuKey:        { configured: !!zhipuKey,   masked: mask(zhipuKey)   },
+      geminiKey:       { configured: !!geminiKey,  masked: mask(geminiKey)  },
+    };
+  }
+
+  @Patch('bot')
+  @RequirePermission('edit_settings')
+  async setBotSettings(
+    @Body() body: {
+      enabled?:      boolean;
+      provider?:     string;
+      model?:        string;
+      maxTokens?:    number;
+      systemPrompt?: string;
+      claudeApiKey?: string;
+      openaiApiKey?: string;
+      zhipuApiKey?:  string;
+      geminiApiKey?: string;
+    },
+    @CurrentUser() admin: any,
+  ) {
+    const ops: Promise<void>[] = [];
+
+    if (body.enabled !== undefined)
+      ops.push(this.settings.set('bot_enabled', String(!!body.enabled)));
+
+    if (body.provider !== undefined) {
+      if (!(SettingsController.BOT_PROVIDERS as readonly string[]).includes(body.provider))
+        throw new BadRequestException(`Provider inconnu. Valeurs acceptées : ${SettingsController.BOT_PROVIDERS.join(', ')}`);
+      ops.push(this.settings.set('bot_provider', body.provider));
+    }
+
+    if (body.model?.trim())
+      ops.push(this.settings.set('bot_model', body.model.trim()));
+
+    if (body.maxTokens !== undefined) {
+      const t = parseInt(String(body.maxTokens), 10);
+      if (isNaN(t) || t < 50 || t > 4096)
+        throw new BadRequestException('maxTokens doit être entre 50 et 4096');
+      ops.push(this.settings.set('bot_max_tokens', String(t)));
+    }
+
+    if (body.systemPrompt !== undefined)
+      ops.push(this.settings.set('bot_system_prompt', body.systemPrompt));
+
+    if (body.claudeApiKey?.trim())
+      ops.push(this.settings.set('bot_claude_api_key', body.claudeApiKey.trim()));
+
+    if (body.openaiApiKey?.trim())
+      ops.push(this.settings.set('bot_openai_api_key', body.openaiApiKey.trim()));
+
+    if (body.zhipuApiKey?.trim())
+      ops.push(this.settings.set('bot_zhipu_api_key', body.zhipuApiKey.trim()));
+
+    if (body.geminiApiKey?.trim())
+      ops.push(this.settings.set('bot_gemini_api_key', body.geminiApiKey.trim()));
+
+    await Promise.all(ops);
+
+    this.audit.log({
+      action: 'UPDATE_BOT_SETTINGS',
+      entity: 'AppSetting',
+      adminId: admin.id,
+      meta: { provider: body.provider, enabled: body.enabled },
+    }).catch(() => {});
+
+    return { success: true };
   }
 }

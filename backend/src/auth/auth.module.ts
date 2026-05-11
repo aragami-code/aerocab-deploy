@@ -6,7 +6,9 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
 import { OtpModule } from '../otp/otp.module';
+import { EmailModule } from '../email/email.module';
 import { SettingsModule } from '../settings/settings.module';
+import { RedisModule } from '../redis/redis.module';
 
 @Module({
   imports: [
@@ -20,7 +22,9 @@ import { SettingsModule } from '../settings/settings.module';
       inject: [ConfigService],
     }),
     OtpModule,
+    EmailModule,
     SettingsModule,
+    RedisModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
