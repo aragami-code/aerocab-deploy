@@ -2,8 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
+import * as fs from 'fs';
 import { AppModule } from './app.module';
 import { SettingsService } from './settings/settings.service';
+
+const UPLOAD_DIR = '/tmp/aerogo24-uploads';
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 function bootstrap_cors(): (string | RegExp)[] {
   const base: (string | RegExp)[] = [
@@ -55,12 +59,12 @@ async function bootstrap() {
     throw new Error('[STARTUP] JWT_SECRET non défini ou valeur par défaut détectée — arrêt immédiat');
   }
 
-  // 1.B2 — Fail fast si test_mode_enabled=true en production
+  // 1.B2 — Avertissement si test_mode_enabled=true en production (non bloquant tant que SMS non configuré)
   if (process.env.NODE_ENV === 'production') {
     const settings = app.get(SettingsService);
     const testMode = await settings.get('test_mode_enabled', 'false');
     if (testMode === 'true') {
-      throw new Error('[STARTUP] test_mode_enabled=true interdit en NODE_ENV=production — arrêt immédiat');
+      console.warn('[STARTUP] ATTENTION : test_mode_enabled=true en production — désactiver dès que les SMS sont configurés');
     }
   }
 

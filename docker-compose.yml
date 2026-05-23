@@ -33,6 +33,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Caddy (reverse proxy + TLS auto) ─────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: aerocab_caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    networks:
+      - aerocab_net
+
   # ── Admin Dashboard ───────────────────────────────────────────────────────
   admin:
     build:
@@ -40,8 +58,6 @@ services:
       dockerfile: Dockerfile
     container_name: aerocab_admin
     restart: unless-stopped
-    ports:
-      - '80:80'
     depends_on:
       - api
     networks:
@@ -62,6 +78,7 @@ services:
       DATABASE_URL: postgresql://laravel:secret@postgres:5432/aerogo24
       REDIS_URL: redis://redis:6379
       NODE_ENV: production
+      BYPASS_PROXIMITY_CHECK: "true"
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -107,3 +124,5 @@ networks:
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

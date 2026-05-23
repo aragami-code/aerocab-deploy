@@ -507,10 +507,12 @@ model PricingZone {
   name        String
   minDistKm   Float    @default(0)   @map("min_dist_km")
   maxDistKm   Float    @default(999) @map("max_dist_km")
-  // Prix en points par type de véhicule : { "eco": 800, "standard": 1000, "confort": 1800 }
+  // Prix par type de véhicule : { "eco": 800, "standard": 1000, "confort": 1800 }
   prices      Json     @default("{}")
-  // Pays auquel cette zone s'applique. null = zone globale (fallback pour pays sans zones spécifiques).
-  // Cascade matching : findForCountry('NG') → cherche d'abord countryCode='NG', sinon fallback null.
+  currency    String   @default("XAF")
+  // Aéroport auquel cette zone est liée (IATA). null = niveau pays ou global.
+  // Cascade matching : airport → countryCode → global (null)
+  airportIata String?  @map("airport_iata") @db.VarChar(3)
   countryCode String?  @map("country_code") @db.VarChar(2)
   isActive    Boolean  @default(true) @map("is_active")
   sortOrder   Int      @default(0)   @map("sort_order")
@@ -520,6 +522,7 @@ model PricingZone {
   bookings    Booking[]
 
   @@index([isActive, minDistKm])
+  @@index([airportIata, isActive, sortOrder])
   @@index([countryCode, isActive, sortOrder])
   @@map("pricing_zones")
 }

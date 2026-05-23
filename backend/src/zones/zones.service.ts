@@ -16,7 +16,9 @@ export interface PricingZone {
   minDistKm: number;
   maxDistKm: number;
   prices: ZonePrices;
-  countryCode: string | null;  // null = zone globale (fallback)
+  currency: string;
+  airportIata: string | null;
+  countryCode: string | null;
   isActive: boolean;
   sortOrder: number;
 }
@@ -40,8 +42,14 @@ export class ZonesService {
     return zones.map(this.toZone);
   }
 
-  async findAllIncludingInactive(filter?: { countryCode?: string | null }): Promise<PricingZone[]> {
+  async findAllIncludingInactive(filter?: {
+    countryCode?: string | null;
+    airportIata?: string | null;
+  }): Promise<PricingZone[]> {
     const where: any = {};
+    if (filter && 'airportIata' in filter) {
+      where.airportIata = filter.airportIata ? filter.airportIata.toUpperCase() : null;
+    }
     if (filter && 'countryCode' in filter) {
       where.countryCode = filter.countryCode ? filter.countryCode.toUpperCase() : null;
     }
@@ -53,23 +61,28 @@ export class ZonesService {
   }
 
   /**
-   * Retourne les zones applicables à un pays donné, avec cascade :
-   *  1. Zones spécifiques au pays (countryCode = X)
-   *  2. Si aucune → zones globales (countryCode IS NULL)
-   *
-   * Permet d'avoir des découpages géographiques différents par pays sans
-   * forcer la création de zones pour chaque pays opéré.
+   * Retourne les zones de l'aéroport donné.
+   * Pas de fallback pays/global : si aucune zone n'est configurée pour cet aéroport,
+   * retourne un tableau vide — le booking service lèvera une erreur explicite.
+   * Si airportIata est null (cas sans aéroport), retourne les zones pays puis global.
    */
-  async findForCountry(countryCode: string | null): Promise<PricingZone[]> {
-    if (countryCode) {
-      const country = await this.prisma.pricingZone.findMany({
-        where: { isActive: true, countryCode: countryCode.toUpperCase() },
+  async findForCountry(countryCode: string | null, airportIata?: string | null): Promise<PricingZone[]> {
+    if (airportIata) {
+      const byAirport = await this.prisma.pricingZone.findMany({
+        where: { isActive: true, airportIata: airportIata.toUpperCase() },
         orderBy: { sortOrder: 'asc' },
       });
-      if (country.length > 0) return country.map(this.toZone);
+      return byAirport.map(this.toZone);
+    }
+    if (countryCode) {
+      const byCountry = await this.prisma.pricingZone.findMany({
+        where: { isActive: true, countryCode: countryCode.toUpperCase(), airportIata: null },
+        orderBy: { sortOrder: 'asc' },
+      });
+      if (byCountry.length > 0) return byCountry.map(this.toZone);
     }
     const global = await this.prisma.pricingZone.findMany({
-      where: { isActive: true, countryCode: null },
+      where: { isActive: true, countryCode: null, airportIata: null },
       orderBy: { sortOrder: 'asc' },
     });
     return global.map(this.toZone);
@@ -81,13 +94,24 @@ export class ZonesService {
     return this.toZone(zone);
   }
 
-  async create(dto: { name: string; minDistKm: number; maxDistKm: number; prices: ZonePrices; countryCode?: string | null; sortOrder?: number }): Promise<PricingZone> {
+  async create(dto: {
+    name: string;
+    minDistKm: number;
+    maxDistKm: number;
+    prices: ZonePrices;
+    currency?: string;
+    airportIata?: string | null;
+    countryCode?: string | null;
+    sortOrder?: number;
+  }): Promise<PricingZone> {
     const zone = await this.prisma.pricingZone.create({
       data: {
         name: dto.name,
         minDistKm: dto.minDistKm,
         maxDistKm: dto.maxDistKm,
         prices: dto.prices as any,
+        currency: dto.currency ?? 'XAF',
+        airportIata: dto.airportIata ? dto.airportIata.toUpperCase() : null,
         countryCode: dto.countryCode ? dto.countryCode.toUpperCase() : null,
         sortOrder: dto.sortOrder ?? 0,
       },
@@ -95,7 +119,20 @@ export class ZonesService {
     return this.toZone(zone);
   }
 
-  async update(id: string, dto: Partial<{ name: string; minDistKm: number; maxDistKm: number; prices: ZonePrices; countryCode: string | null; isActive: boolean; sortOrder: number }>): Promise<PricingZone> {
+  async update(
+    id: string,
+    dto: Partial<{
+      name: string;
+      minDistKm: number;
+      maxDistKm: number;
+      prices: ZonePrices;
+      currency: string;
+      airportIata: string | null;
+      countryCode: string | null;
+      isActive: boolean;
+      sortOrder: number;
+    }>,
+  ): Promise<PricingZone> {
     await this.findOne(id);
     const zone = await this.prisma.pricingZone.update({
       where: { id },
@@ -104,6 +141,8 @@ export class ZonesService {
         ...(dto.minDistKm !== undefined   && { minDistKm: dto.minDistKm }),
         ...(dto.maxDistKm !== undefined   && { maxDistKm: dto.maxDistKm }),
         ...(dto.prices !== undefined      && { prices: dto.prices as any }),
+        ...(dto.currency !== undefined    && { currency: dto.currency }),
+        ...(dto.airportIata !== undefined && { airportIata: dto.airportIata ? dto.airportIata.toUpperCase() : null }),
         ...(dto.countryCode !== undefined && { countryCode: dto.countryCode ? dto.countryCode.toUpperCase() : null }),
         ...(dto.isActive !== undefined    && { isActive: dto.isActive }),
         ...(dto.sortOrder !== undefined   && { sortOrder: dto.sortOrder }),
@@ -117,10 +156,6 @@ export class ZonesService {
     await this.prisma.pricingZone.update({ where: { id }, data: { isActive: false } });
   }
 
-  /**
-   * Trouve la zone correspondant à une distance routière donnée (sans considérer le type de véhicule).
-   * Retourne null si aucune zone active n'existe.
-   */
   matchZone(distanceKm: number, zones: PricingZone[]): PricingZone | null {
     const sorted = [...zones].sort((a, b) => a.minDistKm - b.minDistKm);
     for (const zone of sorted) {
@@ -129,11 +164,6 @@ export class ZonesService {
     return sorted[sorted.length - 1] ?? null;
   }
 
-  /**
-   * Trouve la zone ET le prix pour un type de véhicule donné.
-   * Retourne null si la zone n'existe pas OU si le véhicule n'a pas de prix dans cette zone.
-   * Aucun fallback : un véhicule absent de la zone = non disponible pour cette distance.
-   */
   match(distanceKm: number, vehicleType: string, zones: PricingZone[]): { zone: PricingZone; pricePoints: number } | null {
     const zone = this.matchZone(distanceKm, zones);
     if (!zone) return null;
@@ -149,6 +179,8 @@ export class ZonesService {
       minDistKm:   raw.minDistKm,
       maxDistKm:   raw.maxDistKm,
       prices:      (raw.prices ?? {}) as ZonePrices,
+      currency:    raw.currency ?? 'XAF',
+      airportIata: raw.airportIata ?? null,
       countryCode: raw.countryCode ?? null,
       isActive:    raw.isActive,
       sortOrder:   raw.sortOrder,

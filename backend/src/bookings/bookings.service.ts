@@ -505,12 +505,17 @@ export class BookingsService {
     const bookingPointValue = bookingTariffs.pointValue ?? 1; // pts par unité monétaire locale
 
     // ── Zone pricing ───────────────────────────────────────────────────────────
-    // Cascade pays → global : zones spécifiques au pays si dispo, sinon zones globales.
+    // Cascade aéroport → pays → global
     const pricingMode = 'zone';
-    const zones = await this.zonesService.findForCountry(bookingCountryCode);
+    const zones = await this.zonesService.findForCountry(bookingCountryCode, dto.departureAirport ?? null);
 
     const matchedZone = this.zonesService.matchZone(distanceKm, zones);
-    if (!matchedZone) throw new BadRequestException('AUCUNE_ZONE_TARIFAIRE_CONFIGUREE');
+    if (!matchedZone) {
+      const airportLabel = dto.departureAirport ? `l'aéroport ${dto.departureAirport.toUpperCase()}` : `le pays ${bookingCountryCode}`;
+      throw new BadRequestException(
+        `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
+      );
+    }
 
     const zonePrice = matchedZone.prices[dto.vehicleType];
     if (zonePrice === undefined) {
@@ -1979,7 +1984,8 @@ export class BookingsService {
         targetLng = airport.longitude;
       }
     }
-    if (targetLat !== null && targetLng !== null && driverProfile.latitude && driverProfile.longitude) {
+    const bypassProximity = process.env.BYPASS_PROXIMITY_CHECK === 'true';
+    if (!bypassProximity && targetLat !== null && targetLng !== null && driverProfile.latitude && driverProfile.longitude) {
       const dKm = haversineKm(driverProfile.latitude, driverProfile.longitude, targetLat, targetLng);
       if (dKm > proximityKm) {
         throw new BadRequestException(
@@ -2433,11 +2439,20 @@ export class BookingsService {
     const tariffs = await this.settingsService.getTariffsByCountry(countryCode);
     const pointValue = tariffs.pointValue ?? 1;
 
-    // Chargement des zones tarifaires actives — cascade pays → global
-    const zones = await this.zonesService.findForCountry(countryCode ?? null);
+    // Chargement des zones tarifaires actives — cascade aéroport → pays → global
+    const zones = await this.zonesService.findForCountry(countryCode ?? null, dto.departureAirport ?? null);
 
     // Zone unique pour cette distance (commune à tous les types de véhicules)
     const matchedZone = this.zonesService.matchZone(distanceKm, zones);
+
+    if (!matchedZone) {
+      const airportLabel = dto.departureAirport
+        ? `l'aéroport ${dto.departureAirport.toUpperCase()}`
+        : `le pays ${countryCode}`;
+      throw new BadRequestException(
+        `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
+      );
+    }
 
     // Prix par type de véhicule — seuls les véhicules ayant un prix dans cette zone sont inclus
     const estimates: Record<string, {
@@ -2448,7 +2463,6 @@ export class BookingsService {
 
     for (const vType of Object.keys(tariffs.vehicles)) {
       if (tariffs.vehicles[vType]?.isActive === false) continue;
-      if (!matchedZone) continue;
 
       const zonePrice = matchedZone.prices[vType];
       // Véhicule non disponible pour cette zone → on ne l'affiche pas

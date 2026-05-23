@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AirportsService } from './airports.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
@@ -15,6 +16,7 @@ export class AirportsController {
   }
 
   @Get('admin')
+  @Throttle({ admin: { limit: 300, ttl: 60000 } })
   @Roles(UserRole.admin)
   @UseGuards(JwtAuthGuard, RolesGuard)
   findAllAdmin(

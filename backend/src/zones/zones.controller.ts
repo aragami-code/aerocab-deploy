@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, HttpCode } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards';
 import { ZonesService, ZonePrices } from './zones.service';
 import { AirportsService } from '../airports/airports.service';
@@ -18,11 +19,11 @@ export class ZonesController {
   }
 
   /**
-   * Retourne la liste des codes pays disponibles pour créer des zones :
-   * union des pays opérés (airports.is_operated=true) et des pays ayant des
-   * tarifs configurés. 100% dynamique, aucun pays hardcodé.
+   * Retourne les codes pays disponibles pour créer des zones :
+   * union des pays avec aéroports opérés + pays ayant des tarifs configurés.
    */
   @Get('admin/countries')
+  @Throttle({ admin: { limit: 300, ttl: 60000 } })
   @UseGuards(JwtAuthGuard)
   async getAvailableCountries() {
     const [operated, withTariffs] = await Promise.all([
@@ -35,26 +36,69 @@ export class ZonesController {
   }
 
   /**
+   * Retourne les aéroports opérés pour un pays donné.
+   * Utilisé par l'admin pour lister les aéroports disponibles sous un pays.
+   */
+  @Get('admin/airports')
+  @Throttle({ admin: { limit: 300, ttl: 60000 } })
+  @UseGuards(JwtAuthGuard)
+  async getAirportsForCountry(@Query('countryCode') countryCode: string) {
+    const result = await this.airportsService.findAllAdmin({
+      country: countryCode?.toUpperCase(),
+      limit: 200,
+    });
+    const operated = result.data.filter((a: any) => a.isOperated && a.isActive);
+    return operated.map((a: any) => ({
+      iataCode:    a.iataCode,
+      name:        a.name,
+      city:        a.city,
+      countryCode: a.countryCode,
+    }));
+  }
+
+  /**
    * Admin — liste toutes les zones (actives ou non).
-   * Filtre optionnel :
-   *  - ?countryCode=CM  → uniquement les zones CM
-   *  - ?countryCode=    → uniquement les zones globales (null)
-   *  - aucun param      → toutes confondues
+   * Filtres :
+   *  - ?airportIata=DLA  → zones de l'aéroport DLA
+   *  - ?countryCode=CM   → zones pays CM (sans airport)
+   *  - ?countryCode=     → zones globales (null)
+   *  - aucun param       → toutes
    */
   @Get('admin/all')
+  @Throttle({ admin: { limit: 300, ttl: 60000 } })
   @UseGuards(JwtAuthGuard)
-  findAllAdmin(@Query('countryCode') countryCode?: string) {
-    if (countryCode === undefined) {
-      return this.zonesService.findAllIncludingInactive();
+  findAllAdmin(
+    @Query('airportIata') airportIata?: string,
+    @Query('countryCode') countryCode?: string,
+  ) {
+    if (airportIata !== undefined) {
+      return this.zonesService.findAllIncludingInactive({
+        airportIata: airportIata === '' ? null : airportIata,
+      });
     }
-    return this.zonesService.findAllIncludingInactive({
-      countryCode: countryCode === '' ? null : countryCode,
-    });
+    if (countryCode !== undefined) {
+      return this.zonesService.findAllIncludingInactive({
+        countryCode: countryCode === '' ? null : countryCode,
+      });
+    }
+    return this.zonesService.findAllIncludingInactive();
   }
 
   @Post()
   @UseGuards(JwtAuthGuard)
-  create(@Body() dto: { name: string; minDistKm: number; maxDistKm: number; prices: ZonePrices; countryCode?: string | null; sortOrder?: number }) {
+  create(
+    @Body()
+    dto: {
+      name: string;
+      minDistKm: number;
+      maxDistKm: number;
+      prices: ZonePrices;
+      currency?: string;
+      airportIata?: string | null;
+      countryCode?: string | null;
+      sortOrder?: number;
+    },
+  ) {
     return this.zonesService.create(dto);
   }
 
@@ -62,7 +106,18 @@ export class ZonesController {
   @UseGuards(JwtAuthGuard)
   update(
     @Param('id') id: string,
-    @Body() dto: Partial<{ name: string; minDistKm: number; maxDistKm: number; prices: ZonePrices; countryCode: string | null; isActive: boolean; sortOrder: number }>,
+    @Body()
+    dto: Partial<{
+      name: string;
+      minDistKm: number;
+      maxDistKm: number;
+      prices: ZonePrices;
+      currency: string;
+      airportIata: string | null;
+      countryCode: string | null;
+      isActive: boolean;
+      sortOrder: number;
+    }>,
   ) {
     return this.zonesService.update(id, dto);
   }
