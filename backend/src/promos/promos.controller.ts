@@ -1,9 +1,11 @@
 import { Controller, Get, Post, Delete, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PromosService } from './promos.service';
 import { CreatePromoDto } from './dto/create-promo.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 
+@SkipThrottle()
 @Controller('promos')
 @UseGuards(JwtAuthGuard)
 export class PromosController {

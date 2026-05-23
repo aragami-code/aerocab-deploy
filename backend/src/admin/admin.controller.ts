@@ -3,23 +3,39 @@ import {
   Get,
   Patch,
   Post,
+  Delete,
   Param,
   Body,
   Query,
+  Header,
+  HttpCode,
+  StreamableFile,
   UseGuards,
+  BadRequestException,
+  Req,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { DriversService } from '../drivers/drivers.service';
 import { VerifyDriverDto } from './dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles, CurrentUser } from '../auth/decorators';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { RequirePermission } from '../rbac/require-permission.decorator';
+import { SkipThrottle } from '@nestjs/throttler';
+import { PayoutService } from '../payments/payout.service';
+import { SettingsService } from '../settings/settings.service';
 
+@SkipThrottle()
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
 @Roles('admin')
 export class AdminController {
-  constructor(private adminService: AdminService) {}
+  constructor(
+    private adminService: AdminService,
+    private driversService: DriversService,
+    private payout: PayoutService,
+    private settings: SettingsService,
+  ) {}
 
   // ── Stats ────────────────────────────────────────────
 
@@ -27,6 +43,12 @@ export class AdminController {
   @RequirePermission('view_stats')
   async getStats() {
     return this.adminService.getStats();
+  }
+
+  @Get('chart-data')
+  @RequirePermission('view_stats')
+  async getChartData() {
+    return this.adminService.getChartData();
   }
 
   // ── Active bookings (real-time) ──────────────────────
@@ -43,6 +65,22 @@ export class AdminController {
   @RequirePermission('view_stats')
   async getRevenueMetrics(@Query('period') period?: 'day' | 'week' | 'month') {
     return this.adminService.getRevenueMetrics(period ?? 'day');
+  }
+
+  // ── Rapport financier (plage de dates) ───────────────
+
+  @Get('financial-report')
+  @RequirePermission('view_stats')
+  @SkipThrottle()
+  async getFinancialReport(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    if (!from || !to) throw new BadRequestException('Paramètres from et to requis (ISO 8601)');
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) throw new BadRequestException('Dates invalides');
+    return this.adminService.getFinancialReport(from, to);
   }
 
   // ── Online drivers ────────────────────────────────────
@@ -67,6 +105,22 @@ export class AdminController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
+  }
+
+  @Get('drivers/country-change-requests')
+  @RequirePermission('view_drivers')
+  async listCountryChangeRequests(@Query('status') status?: string) {
+    return this.driversService.adminListCountryChangeRequests(status);
+  }
+
+  @Patch('drivers/country-change-requests/:id')
+  @RequirePermission('edit_driver_profile')
+  async reviewCountryChangeRequest(
+    @Param('id') id: string,
+    @CurrentUser('id') adminId: string,
+    @Body() body: { status: 'approved' | 'rejected'; adminNote?: string },
+  ) {
+    return this.driversService.adminReviewCountryChangeRequest(id, adminId, body.status, body.adminNote);
   }
 
   @Get('drivers/:id')
@@ -97,7 +151,7 @@ export class AdminController {
   @RequirePermission('edit_driver_profile')
   async updateDriverProfile(
     @Param('id') id: string,
-    @Body() body: { driverType?: string; consigneEnabled?: boolean },
+    @Body() body: { driverType?: string },
   ) {
     return this.adminService.updateDriverProfile(id, body);
   }
@@ -136,6 +190,12 @@ export class AdminController {
     return this.adminService.updateUserStatus(id, body.status);
   }
 
+  @Get('users/:id/detail')
+  @RequirePermission('view_users')
+  async getUserDetail(@Param('id') id: string) {
+    return this.adminService.getUserDetail(id);
+  }
+
   @Post('users/:id/points')
   @RequirePermission('adjust_points')
   async adjustUserPoints(
@@ -162,10 +222,26 @@ export class AdminController {
     );
   }
 
+  @Get('bookings/:id/ratings')
+  @RequirePermission('view_bookings')
+  async getBookingRatings(@Param('id') id: string) {
+    return this.adminService.getBookingRatings(id);
+  }
+
   @Patch('bookings/:id/cancel')
   @RequirePermission('cancel_booking')
   async cancelBooking(@Param('id') id: string) {
     return this.adminService.cancelBookingAdmin(id);
+  }
+
+  @Post('bookings/:id/refund')
+  @RequirePermission('cancel_booking')
+  async refundBooking(
+    @Param('id') id: string,
+    @Body('reason') reason: string | undefined,
+    @Req() req: any,
+  ) {
+    return this.adminService.refundBooking(id, req.user?.id ?? 'admin', reason);
   }
 
   // ── Reports ──────────────────────────────────────────
@@ -254,6 +330,43 @@ export class AdminController {
     return this.adminService.deleteTariffsByCountry(countryCode);
   }
 
+  // ── Pays & méthodes de paiement ─────────────────────────────────────────────
+
+  @Get('settings/countries')
+  @RequirePermission('view_tariffs')
+  async getAllCountries() {
+    return this.adminService.getAllCountries();
+  }
+
+  @Post('settings/countries')
+  @RequirePermission('edit_tariffs')
+  async createCountry(
+    @Body() body: { code: string; name: string; currency: string },
+  ) {
+    return this.adminService.createCountry(body.code, body.name, body.currency);
+  }
+
+  @Delete('settings/countries/:countryCode')
+  @RequirePermission('edit_tariffs')
+  async deleteCountry(@Param('countryCode') countryCode: string) {
+    return this.adminService.deleteCountry(countryCode);
+  }
+
+  @Get('settings/countries/:countryCode/payment-methods')
+  @RequirePermission('view_tariffs')
+  async getCountryPaymentMethods(@Param('countryCode') countryCode: string) {
+    return this.adminService.getCountryPaymentMethods(countryCode);
+  }
+
+  @Patch('settings/countries/:countryCode/payment-methods')
+  @RequirePermission('edit_tariffs')
+  async setCountryPaymentMethods(
+    @Param('countryCode') countryCode: string,
+    @Body() body: { methods: { id: string; label: string; icon: string }[] },
+  ) {
+    return this.adminService.setCountryPaymentMethods(countryCode, body.methods);
+  }
+
   // ── Retraits chauffeurs ──────────────────────────────────────────────────────
 
   @Get('withdrawals')
@@ -273,5 +386,150 @@ export class AdminController {
     @Body() body: { status: 'approved' | 'rejected' | 'paid'; adminNote?: string },
   ) {
     return this.adminService.processWithdrawal(id, body.status, adminId, body.adminNote);
+  }
+
+  @Get('withdrawals/stats')
+  @RequirePermission('view_withdrawals')
+  async getWithdrawalStats() {
+    return this.adminService.getWithdrawalStats();
+  }
+
+  // ── D5 : Fraude / solde ───────────────────────────────────────────────────
+
+  @Get('fraud/alerts')
+  @RequirePermission('view_stats')
+  async getFraudAlerts(@Query('min') min?: string) {
+    return this.adminService.getFraudAlerts(min ? parseInt(min) : 3);
+  }
+
+  @Patch('fraud/reset/:userId')
+  @RequirePermission('suspend_user')
+  async resetFraudCounter(@Param('userId') userId: string) {
+    return this.adminService.resetFraudCounter(userId);
+  }
+
+  // ── Export CSV ─────────────────────────────────────────────────────────────
+
+  @Get('export/bookings')
+  @RequirePermission('view_stats')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="bookings.csv"')
+  async exportBookings() {
+    const csv = await this.adminService.getBookingsCsv();
+    return new StreamableFile(Buffer.from(csv, 'utf-8'));
+  }
+
+  @Get('export/users')
+  @RequirePermission('view_stats')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="users.csv"')
+  async exportUsers() {
+    const csv = await this.adminService.getUsersCsv();
+    return new StreamableFile(Buffer.from(csv, 'utf-8'));
+  }
+
+  @Get('export/withdrawals')
+  @RequirePermission('view_withdrawals')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="withdrawals.csv"')
+  async exportWithdrawals() {
+    const csv = await this.adminService.getWithdrawalsCsv();
+    return new StreamableFile(Buffer.from(csv, 'utf-8'));
+  }
+
+  // ── Export Excel (.xlsx) ────────────────────────────────────────────────
+
+  @Get('export/bookings/excel')
+  @RequirePermission('export_data')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="reservations.xlsx"')
+  async exportBookingsExcel() {
+    const buf = await this.adminService.getBookingsXlsx();
+    return new StreamableFile(buf);
+  }
+
+  @Get('export/users/excel')
+  @RequirePermission('export_data')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="utilisateurs.xlsx"')
+  async exportUsersExcel() {
+    const buf = await this.adminService.getUsersXlsx();
+    return new StreamableFile(buf);
+  }
+
+  @Get('export/withdrawals/excel')
+  @RequirePermission('export_data')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="retraits.xlsx"')
+  async exportWithdrawalsExcel() {
+    const buf = await this.adminService.getWithdrawalsXlsx();
+    return new StreamableFile(buf);
+  }
+
+  // ── C.2 — Retrait auto chauffeur : forcer / bloquer ──────────────────────
+
+  @Post('drivers/:driverProfileId/auto-withdrawal/force')
+  @HttpCode(200)
+  @RequirePermission('manage_withdrawals')
+  async forceAutoWithdrawal(
+    @Param('driverProfileId') driverProfileId: string,
+    @Body() body: { amount?: number },
+  ) {
+    const balance = body.amount ?? (await (async () => {
+      const w = await this.payout.getBalance(driverProfileId);
+      return w.balance;
+    })());
+    try {
+      await this.payout.disburse({ driverProfileId, amount: balance });
+    } catch (e: any) {
+      if (e?.status >= 400 && e?.status < 500) throw e;
+      throw new BadRequestException(e?.message ?? 'Erreur lors du virement');
+    }
+    return { ok: true, message: `Retrait de ${balance} XAF initié` };
+  }
+
+  @Post('drivers/:driverProfileId/auto-withdrawal/block')
+  @HttpCode(200)
+  @RequirePermission('manage_withdrawals')
+  async blockAutoWithdrawal(@Param('driverProfileId') driverProfileId: string) {
+    const raw = await this.settings.get('auto_withdrawal_blocked_drivers', '[]');
+    let ids: string[] = [];
+    try { ids = JSON.parse(raw); } catch { ids = []; }
+    if (!ids.includes(driverProfileId)) {
+      ids.push(driverProfileId);
+      await this.settings.set('auto_withdrawal_blocked_drivers', JSON.stringify(ids));
+    }
+    return { ok: true, blocked: ids };
+  }
+
+  @Delete('drivers/:driverProfileId/auto-withdrawal/block')
+  @RequirePermission('manage_withdrawals')
+  async unblockAutoWithdrawal(@Param('driverProfileId') driverProfileId: string) {
+    const raw = await this.settings.get('auto_withdrawal_blocked_drivers', '[]');
+    let ids: string[] = [];
+    try { ids = JSON.parse(raw); } catch { ids = []; }
+    ids = ids.filter(id => id !== driverProfileId);
+    await this.settings.set('auto_withdrawal_blocked_drivers', JSON.stringify(ids));
+    return { ok: true, blocked: ids };
+  }
+
+  // ── Export PDF (vrai .pdf via pdfkit) ────────────────────────────────────
+
+  @Get('export/bookings/pdf')
+  @RequirePermission('export_data')
+  @Header('Content-Type', 'application/pdf')
+  @Header('Content-Disposition', 'attachment; filename="reservations.pdf"')
+  async exportBookingsPdf() {
+    const buf = await this.adminService.getBookingsPdf();
+    return new StreamableFile(buf);
+  }
+
+  @Get('export/users/pdf')
+  @RequirePermission('export_data')
+  @Header('Content-Type', 'application/pdf')
+  @Header('Content-Disposition', 'attachment; filename="utilisateurs.pdf"')
+  async exportUsersPdf() {
+    const buf = await this.adminService.getUsersPdf();
+    return new StreamableFile(buf);
   }
 }

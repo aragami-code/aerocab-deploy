@@ -17,8 +17,18 @@ export class AirportsController {
   @Get('admin')
   @Roles(UserRole.admin)
   @UseGuards(JwtAuthGuard, RolesGuard)
-  findAllAdmin() {
-    return this.airportsService.findAllAdmin();
+  findAllAdmin(
+    @Query('page')    page?:    string,
+    @Query('limit')   limit?:   string,
+    @Query('search')  search?:  string,
+    @Query('country') country?: string,
+  ) {
+    return this.airportsService.findAllAdmin({
+      page:    page    ? parseInt(page)  : undefined,
+      limit:   limit   ? parseInt(limit) : undefined,
+      search:  search  || undefined,
+      country: country || undefined,
+    });
   }
 
   @Get('search')
@@ -49,6 +59,7 @@ export class AirportsController {
   }
 
   @Get('detect')
+  @UseGuards(JwtAuthGuard)
   async detect(
     @Query('lat') lat: string,
     @Query('lng') lng: string,
@@ -82,6 +93,17 @@ export class AirportsController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   update(@Param('id') id: string, @Body() data: UpdateAirportDto) {
     return this.airportsService.update(id, data);
+  }
+
+  // Toggle dédié pour le flag « opéré » — distinct de update pour audit/RBAC clair
+  @Patch(':id/operated')
+  @Roles(UserRole.admin)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  setOperated(@Param('id') id: string, @Body() body: { isOperated: boolean }) {
+    if (typeof body?.isOperated !== 'boolean') {
+      throw new BadRequestException('isOperated (boolean) requis');
+    }
+    return this.airportsService.setOperated(id, body.isOperated);
   }
 
   @Delete(':id')

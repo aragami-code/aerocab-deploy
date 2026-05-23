@@ -3,14 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { CreateFlightDto } from './dto';
 
-// Mapping statuts FR24 → statuts internes
-const FR24_STATUS_MAP: Record<string, string> = {
-  'SCHEDULED':  'scheduled',
-  'EN-ROUTE':   'active',
-  'LANDED':     'landed',
-  'CANCELLED':  'cancelled',
-  'DIVERTED':   'diverted',
-};
 
 @Injectable()
 export class FlightsService {
@@ -33,54 +25,54 @@ export class FlightsService {
     }
 
     try {
+      // Utilise live/flight-positions/full (disponible sur notre plan)
+      // flight-summaries/light n'est pas accessible sur notre niveau d'abonnement FR24
       const fr24BaseUrl = this.config.get('FLIGHT_RADAR_API_URL', 'https://fr24api.flightradar24.com/api');
       const res = await fetch(
-        `${fr24BaseUrl}/flight-summaries/light?flights=${normalized}`,
+        `${fr24BaseUrl}/live/flight-positions/full?flights=${normalized}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Accept': 'application/json',
+            'Accept-Version': 'v1',
           },
         },
       );
 
       if (!res.ok) {
-        console.error(`[FlightsService] FR24 flight-summaries erreur: ${res.status}`);
-        return null;
+        console.error(`[FlightsService] FR24 live/flight-positions/full erreur: ${res.status}`);
+        return this.getMockFlightInfo(normalized);
       }
 
       const data = await res.json() as { data?: any[] };
-      if (!data.data?.length) return null;
+      if (!data.data?.length) return null; // Vol non trouvé → le client affichera le sélecteur d'aéroport
 
-      // Priorité : EN-ROUTE > SCHEDULED > premier résultat
-      const f = data.data.find((d: any) => d.status === 'EN-ROUTE')
-             ?? data.data.find((d: any) => d.status === 'SCHEDULED')
-             ?? data.data[0];
+      const f = data.data[0];
 
-      const arrivalAirport = (f.dest_iata ?? 'DLA').toUpperCase();
-      const scheduledArrival = f.estimated_arrival ?? f.scheduled_arrival;
-
-      if (!scheduledArrival) return null;
+      const arrivalAirport = f.dest_iata ? f.dest_iata.toUpperCase() : null;
+      // ETA est le champ disponible sur l'endpoint live/full
+      const scheduledArrival = f.eta ?? null;
 
       return {
         flightNumber: f.flight ?? normalized,
-        airline: f.airline_iata ?? null,
+        airline: f.operating_as ?? f.painted_as ?? null,
         origin: f.orig_iata ?? null,
         destination: f.dest_iata ?? null,
         arrivalAirport,
         scheduledArrival,
-        actualArrival: f.actual_arrival ?? null,
-        status: FR24_STATUS_MAP[f.status] ?? 'scheduled',
+        actualArrival: null,
+        status: 'active' as const, // vol en cours si présent dans live
         source: 'api' as const,
       };
     } catch (error) {
       console.error(`[FlightsService] Erreur searchFlight ${normalized}:`, error);
-      return null;
+      return null; // Erreur réseau → client affichera le sélecteur d'aéroport
     }
   }
 
   /**
    * Infos complètes + position live d'un vol (pour tracking passager/driver)
+   * Retourne une structure imbriquée compatible avec FlightDetailsScreen (driver).
    */
   async getLiveFlightDetails(flightNumber: string) {
     const normalized = flightNumber.replace(/\s/g, '').toUpperCase();
@@ -93,7 +85,34 @@ export class FlightsService {
     ]);
 
     if (!summary) return null;
-    return { ...summary, live };
+
+    // Transforme la structure plate en structure imbriquée attendue par l'UI driver
+    return {
+      flightNumber: summary.flightNumber,
+      airline: { name: summary.airline ?? null },
+      departure: {
+        iata:      summary.origin ?? null,
+        airport:   summary.origin ?? null,
+        scheduled: null,
+        actual:    null,
+        delay:     0,
+        terminal:  null,
+        gate:      null,
+      },
+      arrival: {
+        iata:      summary.destination ?? null,
+        airport:   summary.destination ?? null,
+        scheduled: summary.scheduledArrival ?? null,
+        actual:    summary.actualArrival ?? null,
+        estimated: summary.scheduledArrival ?? null,
+        delay:     0,
+        terminal:  null,
+        baggage:   null,
+      },
+      status:   summary.status,
+      aircraft: null,
+      live,
+    };
   }
 
   /**
@@ -111,6 +130,7 @@ export class FlightsService {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Accept': 'application/json',
+            'Accept-Version': 'v1',
           },
         },
       );
@@ -189,6 +209,7 @@ export class FlightsService {
     const airlines: Record<string, string> = {
       AF: 'Air France', TK: 'Turkish Airlines', ET: 'Ethiopian Airlines',
       CM: 'Camair-Co', QC: 'Camair-Co', RW: 'RwandAir', KQ: 'Kenya Airways',
+      J7: 'Afrijet', U6: 'Ural Airlines', FR: 'Ryanair', W6: 'Wizz Air',
     };
     const prefix = flightNumber.slice(0, 2);
     const hoursFromNow = Math.floor(Math.random() * 10) + 2;
@@ -197,17 +218,16 @@ export class FlightsService {
     arrival.setMinutes(Math.floor(Math.random() * 4) * 15);
     arrival.setSeconds(0);
 
-    const arrivalAirport = Math.random() > 0.5 ? 'DLA' : 'NSI';
     return {
       flightNumber,
-      airline: airlines[prefix] ?? 'Unknown Airline',
-      origin: 'Paris Charles de Gaulle (CDG)',
-      destination: arrivalAirport === 'DLA' ? 'Douala International (DLA)' : 'Yaoundé Nsimalen (NSI)',
-      arrivalAirport,
+      airline: airlines[prefix] ?? null,
+      origin: null,
+      destination: null,
+      arrivalAirport: null, // Pas d'aéroport confirmé → le client affichera le sélecteur
       scheduledArrival: arrival.toISOString(),
       actualArrival: null,
       status: 'scheduled',
-      source: 'api' as const,
+      source: 'mock' as const,
     };
   }
 }

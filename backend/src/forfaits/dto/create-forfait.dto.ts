@@ -10,15 +10,14 @@ export class CreateForfaitDto {
   @IsString()
   destinationName!: string;
 
-  @IsNumber()
-  destLat!: number;
-
-  @IsNumber()
-  destLng!: number;
-
   @IsOptional()
   @IsNumber()
-  destRadius?: number;
+  @Min(0)
+  minDistKm?: number;
+
+  @IsNumber()
+  @Min(0)
+  maxDistKm!: number;
 
   @IsNumber()
   @Min(0)
@@ -52,21 +51,6 @@ export class CreateForfaitDto {
   @Min(0)
   @Max(100)
   companyPercent?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(1)
-  nightSurgeRate?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(1)
-  rainSurgeRate?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(1)
-  rushHourSurgeRate?: number;
 
   @IsOptional()
   @IsBoolean()

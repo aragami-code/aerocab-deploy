@@ -1,21 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ISmsProvider } from '../interfaces/sms-provider.interface';
+import { SettingsService } from '../../settings/settings.service';
 
 @Injectable()
 export class OrangeCmProvider implements ISmsProvider {
   readonly name = 'orange-cm';
   private readonly logger = new Logger(OrangeCmProvider.name);
 
-  constructor(private config: ConfigService) {}
+  constructor(
+    private config: ConfigService,
+    private settings: SettingsService,
+  ) {}
 
   async send(to: string, message: string): Promise<boolean> {
-    const clientId     = this.config.get<string>('ORANGE_CM_CLIENT_ID');
-    const clientSecret = this.config.get<string>('ORANGE_CM_CLIENT_SECRET');
-    const senderAddr   = this.config.get<string>('ORANGE_CM_SENDER_ADDRESS');
+    // Priorité : AppSetting (admin) → env var (fallback)
+    const [idDb, secretDb, senderDb] = await Promise.all([
+      this.settings.get('orange_cm_client_id'),
+      this.settings.get('orange_cm_client_secret'),
+      this.settings.get('orange_cm_sender_address'),
+    ]);
+    const clientId     = idDb     || this.config.get<string>('ORANGE_CM_CLIENT_ID', '');
+    const clientSecret = secretDb || this.config.get<string>('ORANGE_CM_CLIENT_SECRET', '');
+    const senderAddr   = senderDb || this.config.get<string>('ORANGE_CM_SENDER_ADDRESS', '');
 
     if (!clientId || !clientSecret || !senderAddr) {
-      this.logger.error('Orange CM credentials manquants (ORANGE_CM_CLIENT_ID, ORANGE_CM_CLIENT_SECRET, ORANGE_CM_SENDER_ADDRESS)');
+      this.logger.error('Orange CM credentials manquants — configurez via admin > Configuration > SMS');
       return false;
     }
 
@@ -39,20 +49,23 @@ export class OrangeCmProvider implements ISmsProvider {
       const { access_token } = await tokenRes.json() as { access_token: string };
 
       // Step 2: Send SMS
-      const smsRes = await fetch(`https://api.orange.com/smsmessaging/v1/outbound/${encodeURIComponent(senderAddr)}/requests`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          outboundSMSMessageRequest: {
-            address: `tel:${to}`,
-            senderAddress: senderAddr,
-            outboundSMSTextMessage: { message },
+      const smsRes = await fetch(
+        `https://api.orange.com/smsmessaging/v1/outbound/${encodeURIComponent(senderAddr)}/requests`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${access_token}`,
+            'Content-Type': 'application/json',
           },
-        }),
-      });
+          body: JSON.stringify({
+            outboundSMSMessageRequest: {
+              address: `tel:${to}`,
+              senderAddress: senderAddr,
+              outboundSMSTextMessage: { message },
+            },
+          }),
+        },
+      );
 
       if (!smsRes.ok) {
         const err = await smsRes.json() as any;

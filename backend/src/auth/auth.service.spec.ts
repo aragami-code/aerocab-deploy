@@ -7,6 +7,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { OtpDeliveryService } from '../otp/otp-delivery.service';
 import { SettingsService } from '../settings/settings.service';
+import { EmailRouterService } from '../email/email-router.service';
 
 const mockPrisma = {
   user: {
@@ -31,9 +32,11 @@ const mockRedis = {
 
 const mockJwt = { sign: jest.fn().mockReturnValue('token-abc') };
 const mockConfig = { get: jest.fn((key: string, fallback?: any) => fallback ?? undefined) };
-const mockSms = { sendOtp: jest.fn().mockResolvedValue(true) };
+const mockSms   = { sendOtp: jest.fn().mockResolvedValue(true) };
+const mockEmail = { send: jest.fn().mockResolvedValue(true) };
 const mockSettings = {
   get: jest.fn((key: string, fallback?: string) => Promise.resolve(fallback ?? '')),
+  getTariffs: jest.fn().mockResolvedValue({}),
 };
 
 describe('AuthService', () => {
@@ -48,8 +51,9 @@ describe('AuthService', () => {
         { provide: RedisService,      useValue: mockRedis    },
         { provide: JwtService,        useValue: mockJwt      },
         { provide: ConfigService,     useValue: mockConfig   },
-        { provide: OtpDeliveryService,useValue: mockSms      },
-        { provide: SettingsService,   useValue: mockSettings },
+        { provide: OtpDeliveryService,  useValue: mockSms      },
+        { provide: SettingsService,     useValue: mockSettings },
+        { provide: EmailRouterService,  useValue: mockEmail    },
       ],
     }).compile();
 

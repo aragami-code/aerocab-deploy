@@ -3,12 +3,14 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     configService: ConfigService,
     private prisma: PrismaService,
+    private redis: RedisService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -17,7 +19,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub: string; role: string }) {
+  async validate(payload: { sub: string; role: string; sv?: number }) {
+    // D3 — Session unique : vérifie que le token appartient à la session active
+    if (payload.sv !== undefined) {
+      const stored = await this.redis.get(`session_version:${payload.sub}`);
+      const currentSv = stored ? parseInt(stored, 10) : 0;
+      if (payload.sv !== currentSv) {
+        throw new UnauthorizedException('Session expirée — reconnectez-vous');
+      }
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: { id: true, phone: true, name: true, role: true, status: true },

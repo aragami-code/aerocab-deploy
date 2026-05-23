@@ -21,7 +21,7 @@ function bootstrap_cors(): (string | RegExp)[] {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
 
   // 0.B5 — Helmet: HTTP security headers
   app.use(helmet());

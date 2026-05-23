@@ -16,6 +16,7 @@ const mockPrisma = {
     create: jest.fn(),
     findMany: jest.fn(),
     count: jest.fn(),
+    groupBy: jest.fn(),
   },
   $transaction: jest.fn((fn: (tx: typeof mockTx) => Promise<any>) => fn(mockTx)),
 };
@@ -38,20 +39,24 @@ describe('PointsService', () => {
   // ── getBalance ──────────────────────────────────────────────────────────────
 
   describe('getBalance', () => {
-    it('retourne le solde agrégé', async () => {
-      mockPrisma.pointsTransaction.aggregate.mockResolvedValue({ _sum: { points: 1500 } });
+    it('retourne le solde agrégé par source', async () => {
+      mockPrisma.pointsTransaction.groupBy.mockResolvedValue([
+        { source: 'loyalty',  _sum: { points: 1000 } },
+        { source: 'referral', _sum: { points: 500  } },
+      ]);
       const result = await service.getBalance('user-1');
-      expect(result).toEqual({ balance: 1500 });
-      expect(mockPrisma.pointsTransaction.aggregate).toHaveBeenCalledWith({
-        where: { userId: 'user-1' },
-        _sum: { points: true },
-      });
+      expect(result.balance).toBe(1500);
+      expect(result.breakdown.loyalty).toBe(1000);
+      expect(result.breakdown.referral).toBe(500);
+      expect(mockPrisma.pointsTransaction.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({ by: ['source'], where: { userId: 'user-1' } }),
+      );
     });
 
     it('retourne 0 si aucune transaction', async () => {
-      mockPrisma.pointsTransaction.aggregate.mockResolvedValue({ _sum: { points: null } });
+      mockPrisma.pointsTransaction.groupBy.mockResolvedValue([]);
       const result = await service.getBalance('user-empty');
-      expect(result).toEqual({ balance: 0 });
+      expect(result.balance).toBe(0);
     });
   });
 
@@ -77,15 +82,15 @@ describe('PointsService', () => {
       mockPrisma.pointsTransaction.create.mockResolvedValue({ id: 'tx1' });
       await service.addPoints('user-1', 500, 'Bonus parrainage');
       expect(mockPrisma.pointsTransaction.create).toHaveBeenCalledWith({
-        data: { userId: 'user-1', type: 'credit', points: 500, label: 'Bonus parrainage' },
+        data: { userId: 'user-1', type: 'credit', source: 'bonus', points: 500, label: 'Bonus parrainage' },
       });
     });
 
-    it('crée une transaction debit pour un montant négatif', async () => {
+    it('crée une transaction debit pour un montant négatif (source payment)', async () => {
       mockPrisma.pointsTransaction.create.mockResolvedValue({ id: 'tx2' });
-      await service.addPoints('user-1', -200, 'Ajustement');
+      await service.addPoints('user-1', -200, 'Ajustement', 'payment');
       expect(mockPrisma.pointsTransaction.create).toHaveBeenCalledWith({
-        data: { userId: 'user-1', type: 'debit', points: -200, label: 'Ajustement' },
+        data: { userId: 'user-1', type: 'debit', source: 'payment', points: -200, label: 'Ajustement' },
       });
     });
   });
@@ -104,7 +109,7 @@ describe('PointsService', () => {
         _sum: { points: true },
       });
       expect(mockTx.pointsTransaction.create).toHaveBeenCalledWith({
-        data: { userId: 'user-1', type: 'debit', points: -500, label: 'Paiement course' },
+        data: { userId: 'user-1', type: 'debit', source: 'payment', points: -500, label: 'Paiement course' },
       });
     });
 
@@ -143,7 +148,7 @@ describe('PointsService', () => {
       await service.deductPointsTx(mockTx as any, 'user-1', 300, 'Paiement via tx');
 
       expect(mockTx.pointsTransaction.create).toHaveBeenCalledWith({
-        data: { userId: 'user-1', type: 'debit', points: -300, label: 'Paiement via tx' },
+        data: { userId: 'user-1', type: 'debit', source: 'payment', points: -300, label: 'Paiement via tx' },
       });
     });
 

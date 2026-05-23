@@ -29,9 +29,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   async handleConnection(client: Socket) {
+    this.logger.log(`[Chat] connection attempt ${client.id} origin=${client.handshake.headers?.origin ?? 'none'}`);
     try {
       const token = client.handshake.auth?.token || client.handshake.query?.token;
       if (!token) {
+        this.logger.warn(`[Chat] disconnect ${client.id} — no token in handshake.auth nor handshake.query`);
         client.disconnect();
         return;
       }
@@ -40,13 +42,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const userId = payload.sub;
       client.data.userId = userId;
 
-      // Track user sockets
       const sockets = this.userSockets.get(userId) || [];
       sockets.push(client.id);
       this.userSockets.set(userId, sockets);
 
-      this.logger.log(`Client connected: ${client.id} (user: ${userId})`);
-    } catch {
+      this.logger.log(`[Chat] connected ${client.id} user=${userId}`);
+    } catch (err: any) {
+      this.logger.warn(`[Chat] disconnect ${client.id} — auth error: ${err?.message ?? err}`);
       client.disconnect();
     }
   }
@@ -85,7 +87,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('message')
   async handleMessage(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { conversationId: string; content: string },
+    @MessageBody() data: {
+      conversationId: string;
+      content: string;
+      mediaUrl?: string;
+      mediaType?: string;
+    },
   ) {
     const userId = client.data.userId;
     if (!userId) return;
@@ -94,10 +101,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const message = await this.chatService.sendMessage(
         data.conversationId,
         userId,
-        data.content,
+        data.content ?? '',
+        data.mediaUrl,
+        data.mediaType,
       );
 
-      // Broadcast to all in conversation room
       this.server
         .to(`conversation:${data.conversationId}`)
         .emit('new_message', message);
@@ -114,12 +122,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { conversationId: string; isTyping: boolean },
   ) {
-    client
-      .to(`conversation:${data.conversationId}`)
-      .emit('user_typing', {
-        userId: client.data.userId,
-        isTyping: data.isTyping,
-      });
+    client.to(`conversation:${data.conversationId}`).emit('user_typing', {
+      userId: client.data.userId,
+      isTyping: data.isTyping,
+    });
   }
 
   @SubscribeMessage('read')
@@ -131,8 +137,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!userId) return;
 
     await this.chatService.markAsRead(data.conversationId, userId);
-    client
-      .to(`conversation:${data.conversationId}`)
-      .emit('messages_read', { userId });
+    client.to(`conversation:${data.conversationId}`).emit('messages_read', { userId });
   }
 }

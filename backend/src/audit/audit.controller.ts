@@ -2,7 +2,9 @@ import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AuditService } from './audit.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
+import { SkipThrottle } from '@nestjs/throttler';
 
+@SkipThrottle()
 @Controller('admin/audit-logs')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('admin')

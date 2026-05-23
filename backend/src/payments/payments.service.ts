@@ -1,11 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-
-// 0.B10 — URLs externalisées via env vars (avec fallback sur les URLs officielles)
+import { SettingsService } from '../settings/settings.service';
 
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+
+  constructor(
+    private config: ConfigService,
+    private settings: SettingsService,
+  ) {}
 
   private get cinetpayUrl(): string {
     return this.config.get('CINETPAY_URL', 'https://api-checkout.cinetpay.com/v2/payment');
@@ -14,7 +18,11 @@ export class PaymentsService {
     return this.config.get('CINETPAY_CHECK_URL', 'https://api-checkout.cinetpay.com/v2/payment/check');
   }
 
-  constructor(private config: ConfigService) {}
+  /** Lit une credential depuis app_settings en priorité, env var en fallback */
+  private async cred(dbKey: string, envKey: string): Promise<string> {
+    const fromDb = await this.settings.get(dbKey, '');
+    return fromDb || this.config.get<string>(envKey, '');
+  }
 
   async initiate(params: {
     transactionId: string;
@@ -25,64 +33,47 @@ export class PaymentsService {
     channels?: 'MOBILE_MONEY' | 'CREDIT_CARD' | 'ALL';
     returnPath?: string;
   }): Promise<{ paymentUrl: string }> {
-    const apiKey = this.config.get<string>('CINETPAY_API_KEY');
-    const siteId = this.config.get<string>('CINETPAY_SITE_ID');
-    const backendUrl = this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com');
-    const appScheme = this.config.get('PAYMENT_RETURN_SCHEME', 'aerogo24-passenger');
+    const apiKey     = await this.cred('payment_cinetpay_api_key', 'CINETPAY_API_KEY');
+    const siteId     = await this.cred('payment_cinetpay_site_id', 'CINETPAY_SITE_ID');
+    const backendUrl = await this.settings.get('backend_url', this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com'));
+    const appScheme  = this.config.get('PAYMENT_RETURN_SCHEME', 'aerogo24-passenger');
 
     const nameParts = (params.customerName || 'Client AeroGo 24').trim().split(' ');
-    const surname = nameParts[0] || 'Client';
-    const name = nameParts.slice(1).join(' ') || 'AeroGo 24';
+    const surname   = nameParts[0] || 'Client';
+    const name      = nameParts.slice(1).join(' ') || 'AeroGo 24';
 
     const returnUrl = `${appScheme}://payment/return?ref=${encodeURIComponent(params.transactionId)}&type=${params.returnPath ?? 'payment'}`;
     const notifyUrl = `${backendUrl}/api/payments/webhook`;
 
-    // Si site_id disponible → ancien format v2 (apikey + site_id dans le body)
-    // Sinon → nouveau format Bearer auth (juste l'API key en header)
     let res: Response;
-
     if (siteId) {
-      // Format classique CinetPay v2
-      const body = {
-        apikey: apiKey,
-        site_id: siteId,
-        transaction_id: params.transactionId,
-        amount: params.amount,
-        currency: 'XAF',
-        description: params.description,
-        notify_url: notifyUrl,
-        return_url: returnUrl,
-        customer_name: name,
-        customer_surname: surname,
-        customer_phone_number: params.customerPhone || '',
-        channels: params.channels ?? 'MOBILE_MONEY',
-      };
       res = await fetch(this.cinetpayUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          apikey: apiKey, site_id: siteId,
+          transaction_id: params.transactionId,
+          amount: params.amount, currency: 'XAF',
+          description: params.description,
+          notify_url: notifyUrl, return_url: returnUrl,
+          customer_name: name, customer_surname: surname,
+          customer_phone_number: params.customerPhone || '',
+          channels: params.channels ?? 'MOBILE_MONEY',
+        }),
       });
     } else {
-      // Nouveau format — Bearer auth, site_id absent
-      const body = {
-        transaction_id: params.transactionId,
-        amount: params.amount,
-        currency: 'XAF',
-        description: params.description,
-        notify_url: notifyUrl,
-        return_url: returnUrl,
-        customer_name: name,
-        customer_surname: surname,
-        customer_phone_number: params.customerPhone || '',
-        channels: params.channels ?? 'MOBILE_MONEY',
-      };
       res = await fetch(this.cinetpayUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          transaction_id: params.transactionId,
+          amount: params.amount, currency: 'XAF',
+          description: params.description,
+          notify_url: notifyUrl, return_url: returnUrl,
+          customer_name: name, customer_surname: surname,
+          customer_phone_number: params.customerPhone || '',
+          channels: params.channels ?? 'MOBILE_MONEY',
+        }),
       });
     }
 
@@ -93,31 +84,25 @@ export class PaymentsService {
     }
 
     const data = await res.json() as any;
-    // La réponse peut être code '201' (v2) ou status 'success' (nouveau format)
     if (data.code !== '201' && data.status !== 'success') {
       this.logger.error('CinetPay error response', JSON.stringify(data));
       throw new Error(data.message || 'Erreur CinetPay');
     }
 
     const paymentUrl = data.data?.payment_url || data.payment_url;
-    if (!paymentUrl) {
-      throw new Error('URL de paiement non reçue de CinetPay');
-    }
+    if (!paymentUrl) throw new Error('URL de paiement non reçue de CinetPay');
 
     return { paymentUrl };
   }
 
-  async refund(
-    transactionId: string,
-    amount: number,
-  ): Promise<{ success: boolean; message: string }> {
+  async refund(transactionId: string, amount: number): Promise<{ success: boolean; message: string }> {
     this.logger.warn(`Refund requested for transaction ${transactionId}, amount ${amount}`);
     return { success: false, message: 'Remboursement non disponible via CinetPay' };
   }
 
   async verify(transactionId: string): Promise<'ACCEPTED' | 'REFUSED' | 'PENDING'> {
-    const apiKey = this.config.get<string>('CINETPAY_API_KEY');
-    const siteId = this.config.get<string>('CINETPAY_SITE_ID');
+    const apiKey = await this.cred('payment_cinetpay_api_key', 'CINETPAY_API_KEY');
+    const siteId = await this.cred('payment_cinetpay_site_id', 'CINETPAY_SITE_ID');
 
     let res: Response;
     if (siteId) {
@@ -133,7 +118,6 @@ export class PaymentsService {
 
     const data = await res.json() as any;
     const status = data.data?.status as string | undefined;
-
     if (status === 'ACCEPTED') return 'ACCEPTED';
     if (['REFUSED', 'FAILED', 'ANNULED'].includes(status ?? '')) return 'REFUSED';
     return 'PENDING';

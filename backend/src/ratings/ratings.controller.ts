@@ -11,6 +11,8 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { RatingsService } from './ratings.service';
 
+import { SkipThrottle } from '@nestjs/throttler';
+@SkipThrottle()
 @Controller('ratings')
 @UseGuards(AuthGuard('jwt'))
 export class RatingsController {
@@ -22,7 +24,8 @@ export class RatingsController {
     @Body()
     body: {
       toUserId: string;
-      conversationId: string;
+      conversationId?: string;
+      bookingId?: string;
       score: number;
       comment?: string;
     },

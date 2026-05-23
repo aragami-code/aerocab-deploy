@@ -13,6 +13,8 @@ import { CreateFlightDto, SearchFlightDto } from './dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
+import { SkipThrottle } from '@nestjs/throttler';
+@SkipThrottle()
 @Controller('flights')
 @UseGuards(JwtAuthGuard)
 export class FlightsController {

@@ -1,0 +1,110 @@
+# Stack isolée aerogo24V2 — ports décalés pour coexister avec les stacks existantes
+# Usage : docker compose -f docker-compose.v2.yml -p aerogo24v2 up -d --build
+#
+# Ports :
+#   API    → http://localhost:3001
+#   Admin  → http://localhost:8082
+#   Postgres → 5435 (interne au réseau, pas exposé)
+#   Redis    → 6382 (interne au réseau, pas exposé)
+
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aerogo24v2_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aerogo
+      POSTGRES_PASSWORD: aerogo_secret
+      POSTGRES_DB: aerogo24v2
+    volumes:
+      - aerogo24v2_postgres_data:/var/lib/postgresql/data
+    networks:
+      - aerogo24v2_net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U aerogo -d aerogo24v2']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aerogo24v2_redis
+    restart: unless-stopped
+    networks:
+      - aerogo24v2_net
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── NestJS API ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: aerogo24v2_api
+    restart: unless-stopped
+    ports:
+      - '3001:3000'
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://aerogo:aerogo_secret@postgres:5432/aerogo24v2
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: aerogo24v2_jwt_secret_local_dev
+      JWT_REFRESH_SECRET: aerogo24v2_refresh_secret_local_dev
+      CORS_ORIGINS: http://localhost:8082,http://192.168.137.93:8082,http://localhost:19006,http://192.168.137.93:3001
+      BACKEND_URL: http://localhost:3001
+      FORCE_TEST_OTP: 'true'
+      FORCE_OTP_LOG: 'true'
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - aerogo24v2_net
+    volumes:
+      - aerogo24v2_uploads:/tmp/aerogo24-uploads
+      - ./backend/dist:/app/backend/dist:ro
+      - ./backend-patches/prisma-generated/index.js:/app/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/.prisma/client/index.js:ro
+      - ./backend/prisma/schema.prisma:/app/backend/prisma/schema.prisma:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/api/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ── Admin Dashboard ───────────────────────────────────────────────────────
+  admin:
+    build:
+      context: ../aerocab-admin
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: aerogo24v2_admin
+    restart: unless-stopped
+    ports:
+      - '8082:80'
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - aerogo24v2_net
+    volumes:
+      - ./nginx.v2.conf:/etc/nginx/conf.d/default.conf:ro
+
+networks:
+  aerogo24v2_net:
+    name: aerogo24v2_net
+
+volumes:
+  aerogo24v2_postgres_data:
+  aerogo24v2_uploads:

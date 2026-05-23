@@ -13,6 +13,8 @@ import { CreateReportDto } from './dto/create-report.dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles, CurrentUser } from '../auth/decorators';
 
+import { SkipThrottle } from '@nestjs/throttler';
+@SkipThrottle()
 @Controller('reports')
 @UseGuards(JwtAuthGuard)
 export class ReportsController {
@@ -43,14 +45,59 @@ export class ReportsController {
     );
   }
 
+  @Get(':id')
+  getReportById(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.reportsService.getReportById(id, userId);
+  }
+
+  @Get(':id/admin')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  getReportByIdAdmin(@Param('id') id: string) {
+    return this.reportsService.getReportByIdAdmin(id);
+  }
+
+  @Post(':id/messages')
+  addMessage(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('role') userRole: string,
+    @Body('message') message: string,
+    @Body('imageUrl') imageUrl?: string,
+  ) {
+    const role = userRole === 'admin' ? 'admin' : 'user';
+    return this.reportsService.addMessage(id, userId, role, message, imageUrl);
+  }
+
+  @Patch(':id/reopen')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  reopenReport(@Param('id') id: string, @CurrentUser('id') adminId: string) {
+    return this.reportsService.reopenReport(id, adminId);
+  }
+
   @Patch(':id/resolve')
   @UseGuards(RolesGuard)
   @Roles('admin')
   resolveReport(
     @Param('id') id: string,
+    @CurrentUser('id') adminId: string,
     @Body('resolution') resolution: string,
     @Body('status') status: 'resolved' | 'dismissed',
   ) {
-    return this.reportsService.resolveReport(id, resolution, status);
+    return this.reportsService.resolveReport(id, adminId, resolution, status);
+  }
+
+  @Patch(':id/revoke-sanctions')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  revokeSanctions(
+    @Param('id') id: string,
+    @CurrentUser('id') adminId: string,
+    @Body('liftSuspension') liftSuspension: boolean,
+    @Body('restorePoints') restorePoints: boolean,
+    @Body('restoreScore') restoreScore: boolean,
+  ) {
+    return this.reportsService.revokeSanctions(id, adminId, { liftSuspension, restorePoints, restoreScore });
   }
 }

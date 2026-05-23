@@ -22,10 +22,87 @@ export class AirportsService {
     });
   }
 
-  async findAllAdmin() {
+  /**
+   * Retourne la liste des codes pays distincts ayant au moins un aéroport opéré.
+   * Utilisé par l'admin pour proposer dynamiquement les pays disponibles
+   * lors de la création de zones tarifaires.
+   */
+  async getOperatedCountryCodes(): Promise<string[]> {
+    const rows = await this.prisma.airport.findMany({
+      where: { isActive: true, isOperated: true },
+      select: { countryCode: true },
+      distinct: ['countryCode'],
+      orderBy: { countryCode: 'asc' },
+    });
+    return rows.map((r) => r.countryCode.toUpperCase());
+  }
+
+  /**
+   * Retourne uniquement les aéroports opérés par AeroCab (chauffeurs actifs,
+   * tarifs configurés). Utilisé par /config pour informer les apps mobiles
+   * de la zone de service réelle.
+   */
+  async findAllOperated() {
     return this.prisma.airport.findMany({
+      where: { isActive: true, isOperated: true },
       orderBy: { name: 'asc' },
     });
+  }
+
+  /**
+   * Renvoie true si l'aéroport (par code IATA) est opéré.
+   * Utilisé par BookingsService comme garde-fou (Filtre 2).
+   */
+  async isOperated(iataCode: string): Promise<boolean> {
+    const airport = await this.prisma.airport.findUnique({
+      where: { iataCode: iataCode.toUpperCase() },
+      select: { isOperated: true, isActive: true },
+    });
+    return !!airport && airport.isActive && airport.isOperated;
+  }
+
+  /**
+   * Toggle admin : active/désactive un aéroport comme « opéré ».
+   * Invalide le cache /config pour propager immédiatement aux apps.
+   */
+  async setOperated(id: string, isOperated: boolean) {
+    const result = await this.prisma.airport.update({
+      where: { id },
+      data: { isOperated },
+    });
+    await this.redis.del(CONFIG_CACHE_KEY);
+    return result;
+  }
+
+  async findAllAdmin(params: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    country?: string;
+  } = {}) {
+    const page  = Math.max(1, params.page  ?? 1);
+    const limit = Math.min(200, Math.max(1, params.limit ?? 50));
+    const skip  = (page - 1) * limit;
+
+    const where: any = {};
+    if (params.search) {
+      where.OR = [
+        { iataCode: { contains: params.search, mode: 'insensitive' } },
+        { icaoCode: { contains: params.search, mode: 'insensitive' } },
+        { name:     { contains: params.search, mode: 'insensitive' } },
+        { city:     { contains: params.search, mode: 'insensitive' } },
+      ];
+    }
+    if (params.country) {
+      where.countryCode = params.country.toUpperCase();
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.airport.findMany({ where, orderBy: { name: 'asc' }, skip, take: limit }),
+      this.prisma.airport.count({ where }),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async create(data: CreateAirportDto) {
@@ -128,11 +205,22 @@ export class AirportsService {
 
   async detectByCoords(lat: number, lng: number): Promise<any | null> {
     try {
+      // Bounding box ~50km pour pré-filtrer en SQL avant haversine
+      const MAX_RADIUS_KM = 50;
+      const degLat = MAX_RADIUS_KM / 111.0;
+      const degLng = MAX_RADIUS_KM / (111.0 * Math.cos((lat * Math.PI) / 180));
+
       const airports = await this.prisma.airport.findMany({
-        where: { isActive: true },
+        where: {
+          isActive: true,
+          latitude:  { gte: lat - degLat,  lte: lat + degLat  },
+          longitude: { gte: lng - degLng, lte: lng + degLng },
+        },
         select: { id: true, iataCode: true, name: true, city: true, countryCode: true, latitude: true, longitude: true, detectionRadius: true },
       });
 
+      // Tri par distance croissante, retourne le plus proche dans son rayon
+      const candidates: { airport: typeof airports[0]; distKm: number }[] = [];
       for (const airport of airports) {
         const R = 6371;
         const dLat = ((airport.latitude - lat) * Math.PI) / 180;
@@ -143,12 +231,13 @@ export class AirportsService {
             Math.cos((airport.latitude * Math.PI) / 180) *
             Math.sin(dLng / 2) ** 2;
         const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
         if (distKm <= airport.detectionRadius) {
-          return airport;
+          candidates.push({ airport, distKm });
         }
       }
-      return null;
+      if (candidates.length === 0) return null;
+      candidates.sort((a, b) => a.distKm - b.distKm);
+      return candidates[0].airport;
     } catch (e) {
       this.logger.error('[AirportsService] detectByCoords failed:', e);
       return null;

@@ -1,21 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ISmsProvider } from '../interfaces/sms-provider.interface';
+import { SettingsService } from '../../settings/settings.service';
 
 @Injectable()
 export class TwilioSmsProvider implements ISmsProvider {
   readonly name = 'twilio';
   private readonly logger = new Logger(TwilioSmsProvider.name);
 
-  constructor(private config: ConfigService) {}
+  constructor(
+    private config: ConfigService,
+    private settings: SettingsService,
+  ) {}
 
   async send(to: string, message: string): Promise<boolean> {
-    const accountSid = this.config.get<string>('TWILIO_ACCOUNT_SID');
-    const authToken  = this.config.get<string>('TWILIO_AUTH_TOKEN');
-    const from       = this.config.get<string>('TWILIO_PHONE_NUMBER');
+    // Priorité : AppSetting (admin) → env var (fallback)
+    const [sidDb, tokenDb, fromDb] = await Promise.all([
+      this.settings.get('twilio_account_sid'),
+      this.settings.get('twilio_auth_token'),
+      this.settings.get('twilio_phone_number'),
+    ]);
+    const accountSid = sidDb   || this.config.get<string>('TWILIO_ACCOUNT_SID', '');
+    const authToken  = tokenDb || this.config.get<string>('TWILIO_AUTH_TOKEN', '');
+    const from       = fromDb  || this.config.get<string>('TWILIO_PHONE_NUMBER', '');
 
     if (!accountSid || !authToken || !from) {
-      this.logger.error('Twilio credentials manquants (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER)');
+      this.logger.error('Twilio credentials manquants — configurez via admin > Configuration > SMS');
       return false;
     }
 

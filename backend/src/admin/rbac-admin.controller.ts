@@ -15,7 +15,9 @@ import { Roles } from '../auth/decorators';
 import { PermissionsGuard } from '../rbac/permissions.guard';
 import { RequirePermission } from '../rbac/require-permission.decorator';
 import { CurrentUser } from '../auth/decorators';
+import { SkipThrottle } from '@nestjs/throttler';
 
+@SkipThrottle()
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
 @Roles('admin')
@@ -107,8 +109,9 @@ export class RbacAdminController {
   async setPermissionOverride(
     @Param('id') userId: string,
     @Body() body: { permissionKey: string; granted: boolean },
+    @CurrentUser() caller: any,
   ) {
-    return this.rbacAdminService.setPermissionOverride(userId, body.permissionKey, body.granted);
+    return this.rbacAdminService.setPermissionOverride(userId, body.permissionKey, body.granted, caller.id);
   }
 
   @Delete('admins/:id/permissions/:key')
@@ -132,8 +135,9 @@ export class RbacAdminController {
   @RequirePermission('create_role')
   async createRole(
     @Body() body: { name: string; label: string; description?: string; permissionKeys?: string[] },
+    @CurrentUser() caller: any,
   ) {
-    return this.rbacAdminService.createRole(body);
+    return this.rbacAdminService.createRole(body, caller.id);
   }
 
   @Patch('roles/:id')
@@ -156,7 +160,8 @@ export class RbacAdminController {
   async setRolePermissions(
     @Param('id') id: string,
     @Body() body: { permissionKeys: string[] },
+    @CurrentUser() caller: any,
   ) {
-    return this.rbacAdminService.setRolePermissions(id, body.permissionKeys);
+    return this.rbacAdminService.setRolePermissions(id, body.permissionKeys, caller.id);
   }
 }

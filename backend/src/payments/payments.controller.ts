@@ -1,17 +1,25 @@
-import { Controller, Post, Get, Patch, Body, Logger, UseGuards, Request, Query, Headers, Req, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Body, Logger, UseGuards, Request, Query, Headers, Req, BadRequestException, Param, ForbiddenException } from '@nestjs/common';
+import { ExchangeRateService } from './exchange-rate.service';
 import type { RawBodyRequest } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { UsersService } from '../users/users.service';
 import { FlutterwaveService } from './flutterwave.service';
 import { StripeService } from './stripe.service';
 import { NotchPayService } from './notchpay.service';
+import { EdoctorPaymentService } from './edoctor-payment.service';
 import { MpesaService } from './mpesa.service';
 import { PaypalService } from './paypal.service';
 import { WaveService } from './wave.service';
+import { PaymentIntentService } from './payment-intent.service';
+import { PayoutService } from './payout.service';
+import { TipService } from './tip.service';
+import { SplitService } from './split.service';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
+import { extractCountryFromPhone } from '../common/phone-country';
 
 /**
  * Taux de change XAF → devise cible (1 XAF = X devise).
@@ -46,7 +54,7 @@ function convertFromFcfa(amountFcfa: number, currency: string): number {
   return Math.round(converted * 100) / 100;
 }
 
-type Provider = 'cinetpay' | 'flutterwave' | 'stripe' | 'notchpay' | 'mpesa' | 'paypal' | 'wave';
+type Provider = 'cinetpay' | 'flutterwave' | 'stripe' | 'notchpay' | 'mpesa' | 'paypal' | 'wave' | 'mock';
 
 @Controller('payments')
 export class PaymentsController {
@@ -57,11 +65,18 @@ export class PaymentsController {
     private flutterwave: FlutterwaveService,
     private stripe: StripeService,
     private notchpay: NotchPayService,
+    private edoctor: EdoctorPaymentService,
     private mpesa: MpesaService,
     private paypal: PaypalService,
     private wave: WaveService,
+    private paymentIntent: PaymentIntentService,
+    private payout: PayoutService,
+    private tip: TipService,
+    private split: SplitService,
     private prisma: PrismaService,
     private settings: SettingsService,
+    private usersService: UsersService,
+    private exchangeRate: ExchangeRateService,
   ) {}
 
   /**
@@ -127,19 +142,7 @@ export class PaymentsController {
       select: { phone: true },
     });
 
-    const PHONE_PREFIX_MAP: Record<string, string> = {
-      '+237': 'CM', '+221': 'SN', '+225': 'CI', '+242': 'CG',
-      '+241': 'GA', '+236': 'CF', '+235': 'TD', '+240': 'GQ',
-      '+254': 'KE', '+255': 'TZ', '+256': 'UG', '+234': 'NG',
-      '+233': 'GH', '+212': 'MA', '+216': 'TN', '+213': 'DZ',
-    };
-
-    let countryCode = 'CM';
-    if (user?.phone) {
-      for (const [prefix, code] of Object.entries(PHONE_PREFIX_MAP)) {
-        if (user.phone.startsWith(prefix)) { countryCode = code; break; }
-      }
-    }
+    const countryCode = (user?.phone ? extractCountryFromPhone(user.phone) : null) ?? 'CM';
 
     const country = await this.prisma.country.findUnique({
       where: { code: countryCode },
@@ -147,9 +150,9 @@ export class PaymentsController {
     });
 
     const DEFAULT_METHODS = [
-      { id: 'orange_money', label: 'Orange Money', icon: 'orange_money' },
-      { id: 'mtn_momo',     label: 'MTN MoMo',     icon: 'mtn_momo' },
-      { id: 'card',         label: 'Carte bancaire', icon: 'card' },
+      { id: 'orange_money_cm', label: 'Orange Money', icon: 'orange_money' },
+      { id: 'mtn_cm',          label: 'MTN MoMo',     icon: 'mtn_momo' },
+      { id: 'cash',            label: 'Espèces',       icon: 'cash' },
     ];
 
     const methods = Array.isArray(country?.paymentMethods) && (country.paymentMethods as any[]).length
@@ -217,6 +220,59 @@ export class PaymentsController {
       tripCount: result._count.id ?? 0,
       month: `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}`,
     };
+  }
+
+  /**
+   * POST /payments/purchase-pass
+   * Initie le paiement du pass d'accès passager via NotchPay.
+   * Référence format : PASS-{userId8}-{timestamp}
+   */
+  @Post('purchase-pass')
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  async purchasePass(@Request() req: any) {
+    const userId = req.user.id;
+
+    const passEnabled = await this.settings.get('access_pass_enabled', 'false');
+    if (passEnabled !== 'true') {
+      throw new ForbiddenException('Le pass d\'accès n\'est pas activé');
+    }
+
+    const [priceFcfaRaw, durationRaw] = await Promise.all([
+      this.settings.get('access_pass_price_fcfa', '2000'),
+      this.settings.get('access_pass_duration_days', '30'),
+    ]);
+    const amountFcfa = parseInt(priceFcfaRaw, 10) || 2000;
+    const duration   = parseInt(durationRaw, 10) || 30;
+
+    const userInfo  = await this.prisma.user.findUnique({ where: { id: userId } });
+    const reference = `PASS-${userId.slice(0, 8)}-${Date.now()}`;
+    const description = `Pass AeroCab ${duration} jours — ${amountFcfa.toLocaleString()} FCFA`;
+
+    await this.prisma.transaction.create({
+      data: {
+        walletId: (await this.prisma.wallet.upsert({
+          where:  { userId },
+          create: { userId, balance: 0 },
+          update: {},
+        })).id,
+        amount:    amountFcfa,
+        type:      'deposit',
+        status:    'pending',
+        reference,
+        metadata:  { type: 'access_pass', userId, durationDays: duration },
+      },
+    });
+
+    return this.notchpay.initiate({
+      transactionId: reference,
+      amount:        amountFcfa,
+      currency:      'XAF',
+      description,
+      customerName:  userInfo?.name  || 'Client',
+      customerPhone: userInfo?.phone || '',
+      customerEmail: userInfo?.email || 'client@aerogo24.com',
+    });
   }
 
   /**
@@ -388,6 +444,17 @@ export class PaymentsController {
       return { paymentUrl };
     }
 
+    // ── Mock (mode test uniquement) ──────────────────────────────────────────
+    if (provider === 'mock') {
+      const testMode = await this.settings.get('test_mode_enabled', 'false');
+      if (testMode !== 'true') {
+        throw new BadRequestException('Le provider mock est uniquement disponible en mode test');
+      }
+      await this.creditWalletFromTransaction(reference);
+      this.logger.log(`Mock payment: ${points} pts crédités directement pour ${userId}`);
+      return { success: true, mock: true, points, reference };
+    }
+
     // ── CinetPay (défaut) ────────────────────────────────────────────────────
     return this.payments.initiate({
       transactionId: reference,
@@ -479,12 +546,26 @@ export class PaymentsController {
 
     const eventType = String(body?.type ?? '');
     const txRef     = String(body?.data?.object?.metadata?.transaction_id ?? '');
+    const piId      = String(body?.data?.object?.id ?? '');
     this.logger.log(`Stripe webhook: ${eventType}`);
 
+    // Rechargement wallet (Checkout Session)
     if (eventType === 'checkout.session.completed' && txRef.startsWith('WALLET-STRIPE-')) {
       if (body?.data?.object?.payment_status === 'paid') {
         await this.creditWalletFromTransaction(txRef);
       }
+    }
+
+    // Pré-autorisation course (PaymentIntent, capture manuelle)
+    if (eventType === 'payment_intent.amount_capturable_updated' && piId) {
+      await this.paymentIntent.markAuthorizedByStripe(piId).catch((err) => {
+        this.logger.warn(`Stripe markAuthorized error: ${err.message}`);
+      });
+    }
+
+    // Pourboire PaymentIntent capturé par le passager
+    if (eventType === 'payment_intent.succeeded' && piId) {
+      await this.tip.captureByProviderRef(piId).catch(() => {});
     }
 
     return { received: true };
@@ -518,13 +599,50 @@ export class PaymentsController {
     const status       = String(merged?.transaction?.status ?? merged?.status ?? '').toLowerCase();
 
     this.logger.log(`NotchPay webhook: merchant=${merchantRef} notchRef=${notchpayRef} status=${status}`);
-    if (!merchantRef.startsWith('WALLET-NOTCHPAY-')) return { received: true };
+    const refToVerify = notchpayRef || merchantRef;
 
-    if (status === 'complete' || status === 'completed') {
-      // Vérification avec la référence NotchPay (trx.xxx), pas notre référence
-      const refToVerify = notchpayRef || merchantRef;
-      const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
-      if (verified === 'ACCEPTED') await this.creditWalletFromTransaction(merchantRef);
+    if (merchantRef.startsWith('WALLET-NOTCHPAY-')) {
+      if (status === 'complete' || status === 'completed') {
+        const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') await this.creditWalletFromTransaction(merchantRef);
+      }
+      return { received: true };
+    }
+
+    // Paiement de course (BOOKING-ORANGE_MONEY_CM-* ou BOOKING-MTN_CM-*)
+    if (merchantRef.startsWith('BOOKING-')) {
+      if (status === 'complete' || status === 'completed') {
+        const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') {
+          const bookingId = await this.resolveBookingFromRef(merchantRef);
+          if (bookingId) await this.paymentIntent.markAuthorizedByNotchPay(bookingId, notchpayRef);
+        }
+      }
+      return { received: true };
+    }
+
+    // Pourboire (TIP-*)
+    if (merchantRef.startsWith('TIP-')) {
+      if (status === 'complete' || status === 'completed') {
+        const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') await this.tip.captureByProviderRef(merchantRef);
+      }
+    }
+
+    // Frais d'inscription chauffeur (REGFEE-*)
+    if (merchantRef.startsWith('REGFEE-')) {
+      if (status === 'complete' || status === 'completed') {
+        const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') await this.confirmRegistrationFee(merchantRef);
+      }
+    }
+
+    // Pass d'accès passager (PASS-*)
+    if (merchantRef.startsWith('PASS-')) {
+      if (status === 'complete' || status === 'completed') {
+        const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+        if (verified === 'ACCEPTED') await this.confirmAccessPass(merchantRef);
+      }
     }
 
     return { received: true };
@@ -539,11 +657,31 @@ export class PaymentsController {
     const status      = String(query?.status ?? '').toLowerCase();
     this.logger.log(`NotchPay redirect GET: merchant=${merchantRef} status=${status}`);
 
+    const refToVerify = notchpayRef || merchantRef;
+
     if (merchantRef.startsWith('WALLET-NOTCHPAY-') && (status === 'complete' || status === 'completed')) {
-      const refToVerify = notchpayRef || merchantRef;
       const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
       if (verified === 'ACCEPTED') await this.creditWalletFromTransaction(merchantRef);
     }
+
+    if (merchantRef.startsWith('BOOKING-') && (status === 'complete' || status === 'completed')) {
+      const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+      if (verified === 'ACCEPTED') {
+        const bookingId = await this.resolveBookingFromRef(merchantRef);
+        if (bookingId) await this.paymentIntent.markAuthorizedByNotchPay(bookingId, notchpayRef);
+      }
+    }
+
+    if (merchantRef.startsWith('REGFEE-') && (status === 'complete' || status === 'completed')) {
+      const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+      if (verified === 'ACCEPTED') await this.confirmRegistrationFee(merchantRef);
+    }
+
+    if (merchantRef.startsWith('PASS-') && (status === 'complete' || status === 'completed')) {
+      const verified = await this.notchpay.verify(refToVerify).catch(() => 'PENDING' as const);
+      if (verified === 'ACCEPTED') await this.confirmAccessPass(merchantRef);
+    }
+
     return { received: true, status };
   }
 
@@ -707,5 +845,303 @@ export class PaymentsController {
     @Body('amount') amount: number,
   ) {
     return this.payments.refund(transactionId, amount);
+  }
+
+  // ── F4 — Paiement de course ───────────────────────────────────────────────
+
+  /**
+   * POST /payments/booking/:bookingId/initiate
+   * Initie le paiement d'une course (Mobile Money, Carte, Cash).
+   * Retourne paymentUrl (Mobile Money) ou clientSecret (Stripe).
+   */
+  @Post('booking/:bookingId/initiate')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @UseGuards(JwtAuthGuard)
+  async initiateBookingPayment(
+    @Param('bookingId') bookingId: string,
+    @Request() req: any,
+    @Body() body: {
+      provider: 'orange_money_cm' | 'mtn_cm' | 'card' | 'cash';
+      currency?: string;
+    },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where:  { id: req.user.id },
+      select: { name: true, phone: true, email: true },
+    });
+
+    const booking = await this.prisma.booking.findUnique({
+      where:  { id: bookingId },
+      select: { estimatedPrice: true, currency: true, operatingCountry: true, passengerId: true },
+    });
+    if (!booking) throw new BadRequestException('Booking introuvable');
+    if (booking.passengerId !== req.user.id) throw new BadRequestException('Non autorisé');
+
+    return this.paymentIntent.create({
+      bookingId,
+      provider:         body.provider,
+      amount:           booking.estimatedPrice,
+      currency:         body.currency ?? booking.currency ?? 'XAF',
+      operatingCountry: booking.operatingCountry ?? 'CM',
+      passengerName:    user?.name  ?? '',
+      passengerPhone:   user?.phone ?? '',
+      passengerEmail:   user?.email ?? '',
+    });
+  }
+
+  /**
+   * GET /payments/booking/:bookingId/status
+   * Retourne le statut du PaymentIntent d'une course.
+   */
+  @Get('booking/:bookingId/status')
+  @UseGuards(JwtAuthGuard)
+  async getBookingPaymentStatus(@Param('bookingId') bookingId: string, @Request() req: any) {
+    // Sync EdoctorPay si le paiement est en attente via edoctor
+    await this.paymentIntent.syncEdoctorStatus(bookingId).catch(() => {});
+
+    const intent = await this.paymentIntent.findByBooking(bookingId);
+    if (!intent) return { status: 'not_found' };
+    return {
+      intentId:    intent.id,
+      status:      intent.status,
+      provider:    intent.provider,
+      amount:      intent.amount,
+      currency:    intent.currency,
+      authorizedAt: intent.authorizedAt,
+      capturedAt:   intent.capturedAt,
+    };
+  }
+
+  /** POST /payments/webhook/edoctor — callback statut depuis le serveur edoctor */
+  @Post('webhook/edoctor')
+  @SkipThrottle()
+  async handleEdoctorWebhook(@Body() body: Record<string, any>) {
+    const paymentId = String(body?.id ?? body?.payment_id ?? '');
+    const status    = String(body?.status ?? '');
+    this.logger.log(`EdoctorPay webhook: id=${paymentId} status=${status}`);
+
+    if (!paymentId) return { received: true };
+
+    // Retrouver le PaymentIntent par providerRef
+    const intent = await this.prisma.paymentIntent.findFirst({
+      where: { providerRef: paymentId },
+    });
+
+    if (intent && intent.status === 'pending') {
+      const mapped = (status === 'success' || status === 'successful') ? 'captured'
+        : (status === 'failed' || status === 'cancelled') ? 'failed' : null;
+
+      if (mapped === 'captured') {
+        await this.prisma.paymentIntent.update({
+          where: { id: intent.id },
+          data: { status: 'captured', authorizedAt: new Date(), capturedAt: new Date() },
+        });
+      } else if (mapped === 'failed') {
+        await this.prisma.paymentIntent.update({
+          where: { id: intent.id },
+          data: { status: 'failed', failedAt: new Date() },
+        });
+      }
+    }
+
+    return { received: true };
+  }
+
+  /**
+   * POST /payments/booking/:bookingId/tip
+   * Initie un pourboire pour le chauffeur après la course.
+   */
+  @Post('booking/:bookingId/tip')
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  @UseGuards(JwtAuthGuard)
+  async initiateTip(
+    @Param('bookingId') bookingId: string,
+    @Request() req: any,
+    @Body() body: { amount: number; currency?: string; provider: string },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where:  { id: req.user.id },
+      select: { name: true, phone: true, email: true },
+    });
+
+    return this.tip.initiate({
+      bookingId,
+      payerId:       req.user.id,
+      amount:        body.amount,
+      currency:      body.currency ?? 'XAF',
+      provider:      body.provider,
+      passengerName:  user?.name  ?? '',
+      passengerPhone: user?.phone ?? '',
+      passengerEmail: user?.email ?? '',
+    });
+  }
+
+  /**
+   * POST /payments/booking/:bookingId/split
+   * Initie un paiement fractionné — envoie des liens SMS aux co-payeurs.
+   */
+  @Post('booking/:bookingId/split')
+  @UseGuards(JwtAuthGuard)
+  async initiateSplitPayment(
+    @Param('bookingId') bookingId: string,
+    @Request() req: any,
+    @Body() body: {
+      participants: Array<{ phone: string; name?: string; shareAmount: number; shareCurrency: string }>;
+    },
+  ) {
+    return this.split.initiateSplit({
+      bookingId,
+      participants:  body.participants,
+      initiatorId:   req.user.id,
+    });
+  }
+
+  /**
+   * GET /payments/split/:token
+   * Retourne les infos d'un lien de paiement fractionné (public, sans auth).
+   */
+  @Get('split/:token')
+  @SkipThrottle()
+  async getSplitLink(@Param('token') token: string) {
+    const link = await this.prisma.paymentLink.findUnique({
+      where:   { token },
+      include: { booking: { select: { destination: true, estimatedPrice: true, currency: true } } },
+    });
+    if (!link) throw new BadRequestException('Lien introuvable');
+    if (link.status === 'expired' || link.expiresAt < new Date()) return { expired: true };
+    return {
+      token,
+      amount:      link.amount,
+      currency:    link.currency,
+      destination: link.booking?.destination,
+      status:      link.status,
+      expiresAt:   link.expiresAt,
+    };
+  }
+
+  /**
+   * POST /payments/split/:token/pay
+   * Paiement d'une part fractionnée via lien (sans nécessiter de compte).
+   */
+  @Post('split/:token/pay')
+  @SkipThrottle()
+  async payByToken(
+    @Param('token') token: string,
+    @Body() body: {
+      provider: 'orange_money_cm' | 'mtn_cm' | 'card';
+      payerName: string;
+      payerPhone: string;
+      payerEmail?: string;
+    },
+  ) {
+    return this.split.payByToken({
+      inviteToken:  token,
+      provider:     body.provider,
+      payerName:    body.payerName,
+      payerPhone:   body.payerPhone,
+      payerEmail:   body.payerEmail ?? '',
+    });
+  }
+
+  // ── Gains chauffeur ───────────────────────────────────────────────────────
+
+  /**
+   * GET /payments/earnings
+   * Retourne le solde du DriverEarningsWallet du chauffeur connecté.
+   */
+  @Get('earnings')
+  @UseGuards(JwtAuthGuard)
+  async getDriverEarnings(@Request() req: any) {
+    const profile = await this.prisma.driverProfile.findFirst({
+      where:  { userId: req.user.id },
+      select: { id: true },
+    });
+    if (!profile) throw new BadRequestException('Profil chauffeur introuvable');
+    return this.payout.getBalance(profile.id);
+  }
+
+  /**
+   * POST /payments/withdraw
+   * Demande de virement vers le compte Mobile Money du chauffeur.
+   */
+  @Post('withdraw')
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  @UseGuards(JwtAuthGuard)
+  async requestWithdrawal(
+    @Request() req: any,
+    @Body() body: { amount: number },
+  ) {
+    const profile = await this.prisma.driverProfile.findFirst({
+      where:  { userId: req.user.id },
+      select: { id: true },
+    });
+    if (!profile) throw new BadRequestException('Profil chauffeur introuvable');
+    return this.payout.disburse({ driverProfileId: profile.id, amount: body.amount });
+  }
+
+  // ── Taux de change public (aucune auth requise) ──────────────────────────
+
+  /**
+   * GET /payments/exchange-rate?from=XAF&to=EUR
+   * Retourne le taux de conversion entre deux devises.
+   * Endpoint public — utilisé par les apps mobile pour l'affichage multi-devises.
+   */
+  @Get('exchange-rate')
+  @SkipThrottle()
+  async getExchangeRate(
+    @Query('from') from = 'XAF',
+    @Query('to')   to   = 'EUR',
+  ) {
+    const fromUpper = from.toUpperCase();
+    const toUpper   = to.toUpperCase();
+    const rate = await this.exchangeRate.getRate(fromUpper, toUpper);
+    return { from: fromUpper, to: toUpper, rate, timestamp: Date.now() };
+  }
+
+  // ── Helper : retrouve un bookingId depuis une référence de paiement ────────
+
+  private async resolveBookingFromRef(ref: string): Promise<string | null> {
+    const intent = await this.prisma.paymentIntent.findFirst({ where: { providerRef: ref } });
+    return intent?.bookingId ?? null;
+  }
+
+  private async confirmAccessPass(merchantRef: string): Promise<void> {
+    // Look up userId via transaction → wallet → user
+    const tx = await this.prisma.transaction.findFirst({
+      where: { reference: merchantRef },
+      select: { wallet: { select: { userId: true } } },
+    });
+    if (!tx?.wallet?.userId) {
+      this.logger.warn(`confirmAccessPass: transaction introuvable pour ref ${merchantRef}`);
+      return;
+    }
+    const userId = tx.wallet.userId;
+    await this.prisma.transaction.updateMany({
+      where: { reference: merchantRef },
+      data:  { status: 'completed' },
+    });
+    await this.usersService.confirmPass(userId);
+    this.logger.log(`Pass d'accès confirmé: userId=${userId} ref=${merchantRef}`);
+  }
+
+  private async confirmRegistrationFee(providerRef: string): Promise<void> {
+    const regPayment = await this.prisma.driverRegistrationPayment.findFirst({ where: { providerRef } });
+    if (!regPayment || regPayment.status === 'paid') return;
+    await this.prisma.$transaction([
+      this.prisma.driverRegistrationPayment.update({
+        where: { id: regPayment.id },
+        data:  { status: 'paid', paidAt: new Date() },
+      }),
+      this.prisma.driverProfile.update({
+        where: { id: regPayment.driverProfileId },
+        data:  {
+          registrationFeePaid:   true,
+          registrationFeeAmount: regPayment.totalAmount,
+          registrationFeePaidAt: new Date(),
+          cashDepositBalance:    { increment: regPayment.depositAmount },
+        },
+      }),
+    ]);
+    this.logger.log(`Frais inscription confirmés via webhook: driverId=${regPayment.driverProfileId}`);
   }
 }

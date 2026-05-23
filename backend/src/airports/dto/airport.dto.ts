@@ -29,6 +29,10 @@ export class CreateAirportDto {
   @IsNumber()
   longitude: number;
 
+  @IsNumber()
+  @IsOptional()
+  detectionRadius?: number;
+
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
@@ -69,6 +73,10 @@ export class UpdateAirportDto {
   @IsNumber()
   @IsOptional()
   longitude?: number;
+
+  @IsNumber()
+  @IsOptional()
+  detectionRadius?: number;
 
   @IsBoolean()
   @IsOptional()

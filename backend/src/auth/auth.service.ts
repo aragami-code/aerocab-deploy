@@ -100,10 +100,12 @@ export class AuthService {
       await this.redis.expire(rateKey, OTP_RATE_LIMIT_TTL);
     }
 
-    // Send SMS
-    const sent = await this.sms.sendOtp(phone, code, lang);
-    if (!sent) {
-      throw new BadRequestException("Echec d'envoi du SMS. Reessayez.");
+    // Send SMS (skip in test mode — code already stored in Redis)
+    if (!isTestMode) {
+      const sent = await this.sms.sendOtp(phone, code, lang);
+      if (!sent) {
+        throw new BadRequestException("Echec d'envoi du SMS. Reessayez.");
+      }
     }
 
     return { message: 'OTP envoye avec succes', expiresIn: OTP_TTL };
@@ -152,8 +154,13 @@ export class AuthService {
       </div>
     `;
 
+    const forceLog = this.config.get<string>('FORCE_OTP_LOG') === 'true';
+    if (forceLog) {
+      this.logger.log(`[OTP-EMAIL-DEV] Code pour ${emailAddr} : ${code}`);
+    }
+
     const sent = await this.email.send(emailAddr, subject, html);
-    if (!sent) {
+    if (!sent && !forceLog) {
       throw new BadRequestException("Échec d'envoi de l'email. Réessayez.");
     }
 

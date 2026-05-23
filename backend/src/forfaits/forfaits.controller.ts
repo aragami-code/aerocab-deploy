@@ -2,9 +2,9 @@ import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query,
   UseGuards, ParseUUIDPipe,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
+import { SkipThrottle } from '@nestjs/throttler';
+import { JwtAuthGuard, RolesGuard } from '../auth/guards';
+import { Roles } from '../auth/decorators';
 import { ForfaitsService } from './forfaits.service';
 import { CreateForfaitDto } from './dto/create-forfait.dto';
 import { UpdateForfaitDto } from './dto/update-forfait.dto';
@@ -17,12 +17,17 @@ export class ForfaitsController {
   // ── Public ────────────────────────────────────────────────────────────────────
 
   @Get('airport/:code')
-  findByAirport(@Param('code') code: string) {
+  async findByAirport(@Param('code') code: string) {
     return this.forfaitsService.findByAirport(code);
   }
 
+  @Get('country/:code')
+  async findByCountry(@Param('code') code: string) {
+    return this.forfaitsService.findByCountry(code);
+  }
+
   @Get('match')
-  match(@Query() dto: MatchForfaitDto) {
+  async match(@Query() dto: MatchForfaitDto) {
     return this.forfaitsService.match(
       dto.airportCode,
       dto.destLat,
@@ -34,31 +39,35 @@ export class ForfaitsController {
 
   // ── Admin ─────────────────────────────────────────────────────────────────────
 
+  @SkipThrottle()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('super_admin', 'admin')
+  @Roles('super_admin', 'admin', 'operator')
   @Get('admin')
-  findAll(@Query('countryCode') countryCode?: string) {
+  async findAll(@Query('countryCode') countryCode?: string) {
     return this.forfaitsService.findAll(countryCode);
   }
 
+  @SkipThrottle()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('super_admin', 'admin')
   @Post('admin')
-  create(@Body() dto: CreateForfaitDto) {
+  async create(@Body() dto: CreateForfaitDto) {
     return this.forfaitsService.create(dto);
   }
 
+  @SkipThrottle()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('super_admin', 'admin')
   @Patch('admin/:id')
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateForfaitDto) {
+  async update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateForfaitDto) {
     return this.forfaitsService.update(id, dto);
   }
 
+  @SkipThrottle()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('super_admin', 'admin')
   @Delete('admin/:id')
-  remove(@Param('id', ParseUUIDPipe) id: string) {
+  async remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.forfaitsService.remove(id);
   }
 }

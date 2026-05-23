@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { PermissionsService } from '../rbac/permissions.service';
@@ -138,11 +139,33 @@ export class RbacAdminService {
     return { success: true };
   }
 
+  // ── Anti-escalade ─────────────────────────────────────
+  //
+  // Règle : on ne peut accorder que des permissions qu'on possède soi-même.
+  // Le super_admin possède tout → peut tout accorder.
+  // Un admin avec assign_permission ne peut accorder que son propre sous-ensemble.
+
+  private async assertCanGrant(callerId: string, permissionKeys: string[]): Promise<void> {
+    if (!permissionKeys.length) return;
+    const callerPerms = new Set(await this.permissionsService.getEffectivePermissions(callerId));
+    const forbidden = permissionKeys.filter(k => !callerPerms.has(k));
+    if (forbidden.length > 0) {
+      throw new ForbiddenException(
+        `Escalade de privilèges refusée : vous ne pouvez pas accorder des permissions que vous ne possédez pas (${forbidden.join(', ')}). Seul un super_admin peut les accorder.`,
+      );
+    }
+  }
+
   // ── Permission overrides ──────────────────────────────
 
-  async setPermissionOverride(userId: string, permissionKey: string, granted: boolean) {
+  async setPermissionOverride(userId: string, permissionKey: string, granted: boolean, callerId: string) {
     const perm = await this.prisma.permission.findUnique({ where: { key: permissionKey } });
     if (!perm) throw new NotFoundException('Permission introuvable');
+
+    // Anti-escalade : on ne peut accorder que ce qu'on possède soi-même
+    if (granted) {
+      await this.assertCanGrant(callerId, [permissionKey]);
+    }
 
     await this.prisma.userPermission.upsert({
       where: { userId_permissionId: { userId, permissionId: perm.id } },
@@ -170,9 +193,14 @@ export class RbacAdminService {
     });
   }
 
-  async createRole(dto: { name: string; label: string; description?: string; permissionKeys?: string[] }) {
+  async createRole(dto: { name: string; label: string; description?: string; permissionKeys?: string[] }, callerId: string) {
     const existing = await this.prisma.adminRole.findFirst({ where: { name: dto.name } });
     if (existing) throw new ConflictException('Un rôle avec ce nom existe déjà');
+
+    // Anti-escalade : les permissions initiales du rôle doivent être dans le périmètre du caller
+    if (dto.permissionKeys?.length) {
+      await this.assertCanGrant(callerId, dto.permissionKeys);
+    }
 
     const role = await this.prisma.adminRole.create({
       data: { name: dto.name, label: dto.label, description: dto.description, isSystem: false },
@@ -208,9 +236,14 @@ export class RbacAdminService {
     return { success: true };
   }
 
-  async setRolePermissions(roleId: string, permissionKeys: string[]) {
+  async setRolePermissions(roleId: string, permissionKeys: string[], callerId: string) {
     const role = await this.prisma.adminRole.findUnique({ where: { id: roleId } });
     if (!role) throw new NotFoundException('Rôle introuvable');
+
+    // Anti-escalade : impossible d'ajouter à un rôle des permissions qu'on ne possède pas soi-même
+    if (permissionKeys.length > 0) {
+      await this.assertCanGrant(callerId, permissionKeys);
+    }
 
     const perms = await this.prisma.permission.findMany({ where: { key: { in: permissionKeys } } });
 

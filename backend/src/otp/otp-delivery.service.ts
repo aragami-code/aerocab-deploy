@@ -50,8 +50,8 @@ export class OtpDeliveryService {
    */
   async sendOtp(contact: string, code: string, lang = 'fr'): Promise<boolean> {
     const channel = await this.settings.get('otp_channel') ?? 'sms';
-    const expiryRaw = await this.settings.get('otp_expiry_minutes') ?? '5';
-    const expiry = expiryRaw;
+    const expiryRaw = await this.settings.get('otp_expiry_minutes');
+    const expiry = expiryRaw || '5';
 
     const locale = TEMPLATES[lang] ? lang : 'fr';
     const tpl = TEMPLATES[locale].otp;

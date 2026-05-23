@@ -65,6 +65,42 @@ export class BookingsController {
 
   // ── Driver ──────────────────────────────────────────────────────────────────
 
+  @Get('driver/heatmap')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getHeatmap() {
+    return this.bookingsService.getHeatmapZones();
+  }
+
+  @Get('driver/history')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getDriverHistory(
+    @CurrentUser('id') userId: string,
+    @Query('filter') filter?: string,
+    @Query('page') page?: string,
+  ) {
+    return this.bookingsService.getDriverRideHistory(
+      userId,
+      (filter as any) || 'all',
+      page ? parseInt(page) : 1,
+    );
+  }
+
+  @Get(':id/driver-detail')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getDriverRideDetail(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.getDriverRideDetail(userId, id);
+  }
+
+  @Get(':id/receipt')
+  @UseGuards(RolesGuard)
+  @Roles('driver')
+  getDriverRideReceipt(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.bookingsService.getDriverRideReceipt(userId, id);
+  }
+
   @Get('driver/pending')
   @UseGuards(RolesGuard)
   @Roles('driver')
@@ -153,44 +189,24 @@ export class BookingsController {
     return this.bookingsService.respondDestinationChange(userId, id, accepted);
   }
 
-  // ── Consigne du véhicule ────────────────────────────────────────────────────
-
-  @Patch(':id/consigne/start')
-  @UseGuards(RolesGuard)
-  @Roles('driver')
-  startConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
-    return this.bookingsService.startConsigne(id, userId);
-  }
-
-  @Patch(':id/consigne/end')
-  @UseGuards(RolesGuard)
-  @Roles('driver')
-  endConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
-    return this.bookingsService.endConsigne(id, userId);
-  }
-
-  @Delete(':id/consigne')
-  @UseGuards(RolesGuard)
-  @Roles('passenger')
-  cancelConsigne(@CurrentUser('id') userId: string, @Param('id') id: string) {
-    return this.bookingsService.cancelConsigne(id, userId);
-  }
-
-  @Patch(':id/consigne/rating')
-  @UseGuards(RolesGuard)
-  @Roles('passenger')
-  rateConsigne(
-    @CurrentUser('id') userId: string,
-    @Param('id') id: string,
-    @Body('rating') rating: number,
-  ) {
-    return this.bookingsService.rateConsigne(id, userId, Number(rating));
-  }
-
   // Admin
   @Get(':id/positions')
   getPositions(@Request() req: any, @Param('id') bookingId: string) {
     return this.bookingsService.getBookingPositions(req.user.id, bookingId);
+  }
+
+  @Post(':id/initiate-call')
+  initiateCall(@Request() req: any, @Param('id') bookingId: string) {
+    return this.bookingsService.initiateCall(req.user.id, bookingId);
+  }
+
+  @Post(':id/tip')
+  addTip(
+    @Request() req: any,
+    @Param('id') bookingId: string,
+    @Body('amount') amount: number,
+  ) {
+    return this.bookingsService.addTip(req.user.id, bookingId, amount);
   }
 
   @Get('admin/all')

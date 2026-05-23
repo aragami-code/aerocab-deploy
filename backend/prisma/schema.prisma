@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -25,6 +26,24 @@ model User {
   referredBy             String?             @map("referred_by") @db.Uuid
   referrer               User?               @relation("Referrals", fields: [referredBy], references: [id])
   referrals              User[]              @relation("Referrals")
+
+  // ── KYC Passager (F1) ─────────────────────────────────────────────────────
+  kycStatus              KycStatus           @default(not_started) @map("kyc_status")
+  kycVerifiedAt          DateTime?           @map("kyc_verified_at")
+
+  // ── Fidélité (F8) ─────────────────────────────────────────────────────────
+  loyaltyTier            LoyaltyTierLevel    @default(bronze) @map("loyalty_tier")
+  trustScore             Float               @default(5.0) @map("trust_score")
+
+  // ── Pass d'accès passager ─────────────────────────────────────────────────
+  passExpiresAt          DateTime?           @map("pass_expires_at")
+  passType               String              @default("none") @map("pass_type")
+  suspendedUntil         DateTime?           @map("suspended_until")
+
+  // ── Localisation (international) ──────────────────────────────────────────
+  countryCode            String?             @map("country_code") @db.VarChar(2)
+  currency               String              @default("XAF")
+
   bookings               Booking[]
   driverConversations    Conversation[]      @relation("DriverConversations")
   passengerConversations Conversation[]      @relation("PassengerConversations")
@@ -42,6 +61,8 @@ model User {
   promoUsages            PromoUsage[]
   adminRoles             UserAdminRole[]
   adminPermissions       UserPermission[]
+  kycDocuments           KycDocument[]
+  emergencyContacts      EmergencyContact[]
 
   @@map("users")
 }
@@ -68,15 +89,36 @@ model DriverProfile {
   locationUpdatedAt DateTime?                @map("location_updated_at")
   lastActive        DateTime?                @map("last_active")
   verifiedAt        DateTime?                @map("verified_at")
-  driverType        String                   @default("external") @map("driver_type") // "internal" = flotte AeroGo, "external" = partenaire
-  consigneEnabled   Boolean                  @default(false) @map("consigne_enabled") // true = ce chauffeur accepte les demandes de consigne
+  driverType        String                   @default("external") @map("driver_type")
   createdAt         DateTime                 @default(now()) @map("created_at")
   updatedAt         DateTime                 @updatedAt @map("updated_at")
-  bookings          Booking[]
-  documents         DriverDocument[]
-  positions         DriverPosition[]
-  consigneDays      ConsigneDay[]
-  user              User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ── Paiement & Retrait (F4) ───────────────────────────────────────────────
+  payoutPhone          String?   @map("payout_phone")
+  payoutMethod         String?   @map("payout_method")        // orange_money | mtn_momo | bank_transfer
+  payoutName           String?   @map("payout_name")          // nom exact sur compte Mobile Money
+  payoutVerified       Boolean   @default(false) @map("payout_verified")
+
+  // ── Commission Cash (F4) ──────────────────────────────────────────────────
+  cashDepositBalance   Float     @default(0) @map("cash_deposit_balance")
+  cashCommissionDebt   Float     @default(0) @map("cash_commission_debt")
+  cashRidesAllowed     Boolean   @default(true) @map("cash_rides_allowed")
+
+  // ── Inscription (F9 + Section 5 CDC) ─────────────────────────────────────
+  registrationFeePaid   Boolean   @default(false) @map("registration_fee_paid")
+  registrationFeeAmount Float?    @map("registration_fee_amount")
+  registrationFeePaidAt DateTime? @map("registration_fee_paid_at")
+  countryCode           String?   @map("country_code") @db.VarChar(2)  // pays d'opération du chauffeur
+
+  bookings             Booking[]
+  documents            DriverDocument[]
+  positions            DriverPosition[]
+  bookingPayouts        BookingPayout[]
+  tipTransactions       TipTransaction[]
+  earningsWallet        DriverEarningsWallet?
+  registrationPayment   DriverRegistrationPayment?
+  countryChangeRequests CountryChangeRequest[]
+  user                  User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([isAvailable, latitude, longitude])
   @@index([status])
@@ -97,6 +139,25 @@ model DriverDocument {
 
   @@unique([driverProfileId, type])
   @@map("driver_documents")
+}
+
+model CountryChangeRequest {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  driverProfileId String        @map("driver_profile_id") @db.Uuid
+  currentCountry  String        @map("current_country") @db.VarChar(2)
+  requestedCountry String       @map("requested_country") @db.VarChar(2)
+  reason          String
+  status          String        @default("pending") // pending | approved | rejected
+  adminNote       String?       @map("admin_note")
+  reviewedBy      String?       @map("reviewed_by") @db.Uuid
+  reviewedAt      DateTime?     @map("reviewed_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([driverProfileId])
+  @@map("country_change_requests")
 }
 
 model Flight {
@@ -135,6 +196,7 @@ model Booking {
   status           BookingStatus  @default(pending)
   driverEtaMinutes Int?           @default(10) @map("driver_eta_minutes")
   shareTripEnabled Boolean        @default(false) @map("share_trip_enabled")
+  shareToken       String?        @unique @map("share_token")
   type             BookingType    @default(ARRIVAL)
   completedAt      DateTime?      @map("completed_at")
   cancelledAt      DateTime?      @map("cancelled_at")
@@ -146,39 +208,47 @@ model Booking {
   pickupLat        Float?         @map("pickup_lat")
   pickupLng        Float?         @map("pickup_lng")
 
-  // ── Consigne du véhicule ────────────────────────────────────────────────────
-  withConsigne         Boolean   @default(false) @map("with_consigne")
-  consigneDays         Int?      @map("consigne_days")
-  consigneDailyRate    Float?    @map("consigne_daily_rate")    // FCFA/jour
-  consigneVehicleType  String?   @map("consigne_vehicle_type")
-  consigneTotal        Float?    @map("consigne_total")         // Devis initial (FCFA)
-  consigneStatus       String?   @map("consigne_status")        // null | "active" | "completed" | "cancelled"
-  consigneStartedAt    DateTime? @map("consigne_started_at")
-  consigneEndedAt      DateTime? @map("consigne_ended_at")
-  consigneActualDays   Int?      @map("consigne_actual_days")   // Jours réels (peut > consigneDays si retard)
-  consigneFinalTotal   Float?    @map("consigne_final_total")   // Montant final débité (FCFA)
-  consigneRating       Int?      @map("consigne_rating")        // Note globale séjour 1-5 (par le passager)
-  consigneMode         String?   @map("consigne_mode")           // "full_day" | "on_demand"
-  consigneEndDate      DateTime? @map("consigne_end_date")       // date retour passager
-  consigneSuspended    Boolean   @default(false) @map("consigne_suspended") // facturation suspendue
-  consigneDays_rel     ConsigneDay[]
+  // ── Métriques course ───────────────────────────────────────────────────────
+  startedAt            DateTime? @map("started_at")
+  estimatedDistanceKm  Float?    @map("estimated_distance_km")
+  estimatedDurationMin Int?      @map("estimated_duration_min")
+  baseFare             Float?    @map("base_fare")
+  airportFee           Float?    @map("airport_fee")
 
-  // ── Surcharges dynamiques ───────────────────────────────────────────────────
-  surgeMultiplier  Float  @default(1.0) @map("surge_multiplier")
-  nightSurge       Boolean @default(false) @map("night_surge")    // 22h–05h
-  rainSurge        Boolean @default(false) @map("rain_surge")
-  rushHourSurge    Boolean @default(false) @map("rush_hour_surge")
+  forfaitId      String?  @map("forfait_id") @db.Uuid
+  pricingZoneId  String?  @map("pricing_zone_id") @db.Uuid
+  pricingMode    PricingMode @default(zone) @map("pricing_mode")
+  forfait        Forfait?     @relation(fields: [forfaitId], references: [id])
+  pricingZone    PricingZone? @relation(fields: [pricingZoneId], references: [id])
 
-  forfaitId    String?  @map("forfait_id") @db.Uuid
-  pricingMode  PricingMode @default(kilometrage) @map("pricing_mode")
-  forfait      Forfait? @relation(fields: [forfaitId], references: [id])
+  // ── Paiement F4 ───────────────────────────────────────────────────────────
+  currency           String        @default("XAF")
+  operatingCountry   String        @default("CM") @map("operating_country")
+  paymentStatus      PaymentStatus @default(not_required) @map("payment_status")
+  tipAmount          Float         @default(0) @map("tip_amount")
+  discountFromPoints Float         @default(0) @map("discount_from_points")
+  isSplitPayment     Boolean       @default(false) @map("is_split_payment")
+  receiptSentAt      DateTime?     @map("receipt_sent_at")
+  scheduledAt        DateTime?     @map("scheduled_at")
+
+  // ── Devise d'affichage (multi-pays) ───────────────────────────────────────
+  displayCurrency    String?       @map("display_currency")      // devise vue par le passager (ex: EUR, MAD)
+  displayAmount      Float?        @map("display_amount")         // montant converti affiché au passager
+  exchangeRateUsed   Float?        @map("exchange_rate_used")     // taux XAF→displayCurrency au moment de la réservation
 
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
   positions        DriverPosition[]
+  paymentIntent    PaymentIntent?
+  participants     BookingParticipant[]
+  payout           BookingPayout?
+  tips             TipTransaction[]
+  receipt          RideReceipt?
+  paymentLinks     PaymentLink[]
 
   @@index([passengerId, status])
   @@index([status])
+  @@index([paymentStatus])
   @@map("bookings")
 }
 
@@ -204,7 +274,9 @@ model Message {
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   conversationId String       @map("conversation_id") @db.Uuid
   senderId       String       @map("sender_id") @db.Uuid
-  content        String
+  content        String       @default("")
+  mediaUrl       String?      @map("media_url")
+  mediaType      String?      @map("media_type")
   readAt         DateTime?    @map("read_at")
   createdAt      DateTime     @default(now()) @map("created_at")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -219,6 +291,9 @@ model Rating {
   fromUserId     String       @map("from_user_id") @db.Uuid
   toUserId       String       @map("to_user_id") @db.Uuid
   conversationId String       @map("conversation_id") @db.Uuid
+  // F5.5 — Un rating par booking (au lieu d'un seul par conversation).
+  // Un même passager+driver peut avoir 10 courses dans la même conversation et chacune notée.
+  bookingId      String?      @map("booking_id") @db.Uuid
   score          Int
   comment        String?
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -226,7 +301,8 @@ model Rating {
   fromUser       User         @relation("RatingsGiven", fields: [fromUserId], references: [id])
   toUser         User         @relation("RatingsReceived", fields: [toUserId], references: [id])
 
-  @@unique([fromUserId, conversationId])
+  @@unique([fromUserId, bookingId])
+  @@index([conversationId])
   @@map("ratings")
 }
 
@@ -386,6 +462,11 @@ model Airport {
   longitude       Float
   detectionRadius Float    @default(3.0) @map("detection_radius")
   isActive    Boolean  @default(true) @map("is_active")
+  isOperated  Boolean  @default(false) @map("is_operated")
+  // Durée moyenne (minutes) entre l'atterrissage et la sortie effective du passager.
+  // Permet un ETA chauffeur réaliste par aéroport : DLA petit → 15 min,
+  // CDG ou JFK avec immigration+bagages → 40-50 min.
+  exitDelayMinutes Int @default(15) @map("exit_delay_minutes")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -397,9 +478,12 @@ model Forfait {
   name            String
   airportCode     String        @map("airport_code") @db.VarChar(3)
   destinationName String        @map("destination_name")
-  destLat         Float         @map("dest_lat")
-  destLng         Float         @map("dest_lng")
-  destRadius      Float         @default(2.0) @map("dest_radius")
+  minDistKm       Float         @default(0)   @map("min_dist_km")
+  maxDistKm       Float         @default(999) @map("max_dist_km")
+  // deprecated — conservés nullable pour compatibilité avec l'ancienne migration
+  destLat         Float?        @map("dest_lat")
+  destLng         Float?        @map("dest_lng")
+  destRadius      Float?        @default(2.0) @map("dest_radius")
   priceAmount     Float         @map("price_amount")
   currency        String        @default("XAF")
   countryCode     String        @map("country_code") @db.VarChar(2)
@@ -407,9 +491,6 @@ model Forfait {
   bookingTypes    BookingType[] @map("booking_types") @default([])
   driverPercent   Float         @default(85) @map("driver_percent")
   companyPercent  Float         @default(15) @map("company_percent")
-  nightSurgeRate    Float?        @map("night_surge_rate")
-  rainSurgeRate     Float?        @map("rain_surge_rate")
-  rushHourSurgeRate Float?        @map("rush_hour_surge_rate")
   isActive        Boolean       @default(true) @map("is_active")
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -419,6 +500,28 @@ model Forfait {
   @@index([airportCode, isActive])
   @@index([countryCode, isActive])
   @@map("forfaits")
+}
+
+model PricingZone {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String
+  minDistKm   Float    @default(0)   @map("min_dist_km")
+  maxDistKm   Float    @default(999) @map("max_dist_km")
+  // Prix en points par type de véhicule : { "eco": 800, "standard": 1000, "confort": 1800 }
+  prices      Json     @default("{}")
+  // Pays auquel cette zone s'applique. null = zone globale (fallback pour pays sans zones spécifiques).
+  // Cascade matching : findForCountry('NG') → cherche d'abord countryCode='NG', sinon fallback null.
+  countryCode String?  @map("country_code") @db.VarChar(2)
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0)   @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt     @map("updated_at")
+
+  bookings    Booking[]
+
+  @@index([isActive, minDistKm])
+  @@index([countryCode, isActive, sortOrder])
+  @@map("pricing_zones")
 }
 
 model DriverPosition {
@@ -460,6 +563,17 @@ enum DocumentType {
   license
   registration
   vehicle_photo
+  insurance
+  technical_control
+  vtc_license
+  passport
+  portrait
+  criminal_record
+  proof_of_address
+  medical_certificate
+  vaccination_card
+  border_pass
+  selfie
 }
 
 enum DocumentStatus {
@@ -483,9 +597,11 @@ enum BookingType {
 enum PricingMode {
   kilometrage
   forfait
+  zone
 }
 
 enum BookingStatus {
+  scheduled
   pending
   confirmed
   in_progress
@@ -521,6 +637,7 @@ enum PointsSource {
   cashback
   refund
   payment
+  penalty
 }
 
 enum TransactionType {
@@ -547,6 +664,44 @@ enum WithdrawalStatus {
   approved
   rejected
   paid
+}
+
+enum PaymentStatus {
+  not_required
+  pending
+  authorized
+  partially_authorized
+  captured
+  refunded
+  failed
+  voided
+}
+
+enum PayoutStatus {
+  pending
+  paid
+  failed
+}
+
+enum KycStatus {
+  not_started
+  submitted
+  approved
+  rejected
+}
+
+enum KycDocType {
+  cni_front
+  cni_back
+  passport
+  selfie
+}
+
+enum LoyaltyTierLevel {
+  bronze
+  silver
+  gold
+  platinum
 }
 
 // ── RBAC ────────────────────────────────────────────────────────────────────
@@ -619,6 +774,21 @@ model TariffSnapshot {
 }
 
 
+// F5.3 — File de retry pour les reçus de course (SMS + Email).
+// Job pické toutes les minutes par un cron tant que status='pending' et attempts < max.
+model ReceiptJob {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId  String   @unique @map("booking_id") @db.Uuid
+  status     String   @default("pending")   // pending | sent | failed
+  attempts   Int      @default(0)
+  lastError  String?  @map("last_error")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([status, attempts])
+  @@map("receipt_jobs")
+}
+
 model AuditLog {
   id         String   @id @default(cuid())
   action     String
@@ -637,23 +807,195 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-model ConsigneDay {
+// ── F4 — Paiement ────────────────────────────────────────────────────────────
+
+model PaymentIntent {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId     String        @unique @map("booking_id") @db.Uuid
+  participantId String?       @map("participant_id") @db.Uuid
+  provider      String        // orange_money_cm | mtn_cm | card | cash
+  providerRef   String?       @unique @map("provider_ref")
+  amount        Float
+  currency      String
+  amountBase    Float         @map("amount_base")
+  baseCurrency  String        @map("base_currency")
+  exchangeRate  Float         @default(1) @map("exchange_rate")
+  status        PaymentStatus @default(pending)
+  authorizedAt  DateTime?     @map("authorized_at")
+  capturedAt    DateTime?     @map("captured_at")
+  refundedAt    DateTime?     @map("refunded_at")
+  failedAt      DateTime?     @map("failed_at")
+  adminNote     String?       @map("admin_note")
+  metadata      Json?
+  createdAt     DateTime      @default(now()) @map("created_at")
+  booking       Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([provider, status])
+  @@map("payment_intents")
+}
+
+model BookingParticipant {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   bookingId       String    @map("booking_id") @db.Uuid
-  driverProfileId String    @map("driver_profile_id") @db.Uuid
-  date            DateTime  @map("date") @db.Date
-  mode            String    @map("mode")                   // "full_day" | "on_demand"
-  dailyRate       Float     @map("daily_rate")
-  hasCourse       Boolean   @default(false) @map("has_course")
-  billed          Boolean   @default(false) @map("billed")
-  billedAmount    Float?    @map("billed_amount")
+  userId          String?   @map("user_id") @db.Uuid
+  name            String?
+  phone           String
+  shareAmount     Float     @map("share_amount")
+  shareCurrency   String    @map("share_currency")
+  status          String    @default("pending") // pending|accepted|declined|paid|refunded
+  inviteToken     String    @unique @map("invite_token")
+  inviteExpiresAt DateTime  @map("invite_expires_at")
+  inviteSentAt    DateTime? @map("invite_sent_at")
+  acceptedAt      DateTime? @map("accepted_at")
   createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  booking         Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  @@index([bookingId])
+  @@index([inviteToken])
+  @@map("booking_participants")
+}
+
+model BookingPayout {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId        String        @unique @map("booking_id") @db.Uuid
+  driverProfileId  String        @map("driver_profile_id") @db.Uuid
+  grossAmount      Float         @map("gross_amount")
+  commissionRate   Float         @map("commission_rate")
+  commissionAmount Float         @map("commission_amount")
+  providerFeeRate  Float         @default(0.02) @map("provider_fee_rate")
+  providerFeeAmount Float        @default(0) @map("provider_fee_amount")
+  netAmount        Float         @map("net_amount")
+  tipAmount        Float         @default(0) @map("tip_amount")
+  currency         String        @default("XAF")
+  payoutProvider   String?       @map("payout_provider")
+  status           PayoutStatus  @default(pending)
+  isCash           Boolean       @default(false) @map("is_cash")
+  initiatedAt      DateTime?     @map("initiated_at")
+  paidAt           DateTime?     @map("paid_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  booking          Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  driverProfile    DriverProfile @relation(fields: [driverProfileId], references: [id])
+
+  @@index([driverProfileId, status])
+  @@map("booking_payouts")
+}
+
+model TipTransaction {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId       String    @map("booking_id") @db.Uuid
+  payerId         String    @map("payer_id") @db.Uuid
+  driverProfileId String    @map("driver_profile_id") @db.Uuid
+  amount          Float
+  currency        String    @default("XAF")
+  provider        String
+  providerRef     String?   @unique @map("provider_ref")
+  status          String    @default("pending") // pending|captured|failed
+  capturedAt      DateTime? @map("captured_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  booking         Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id])
 
-  @@unique([bookingId, date])
   @@index([bookingId])
-  @@map("consigne_days")
+  @@map("tip_transactions")
+}
+
+model RideReceipt {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId   String    @unique @map("booking_id") @db.Uuid
+  emailSentAt DateTime? @map("email_sent_at")
+  smsSentAt   DateTime? @map("sms_sent_at")
+  isCash      Boolean   @default(false) @map("is_cash")
+  data        Json
+  createdAt   DateTime  @default(now()) @map("created_at")
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("ride_receipts")
+}
+
+model PaymentLink {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  token         String    @unique
+  bookingId     String    @map("booking_id") @db.Uuid
+  participantId String?   @map("participant_id") @db.Uuid
+  source        String    // split | whatsapp_bot | sms
+  amount        Float
+  currency      String
+  expiresAt     DateTime  @map("expires_at")
+  usedAt        DateTime? @map("used_at")
+  status        String    @default("pending") // pending|paid|expired|cancelled
+  createdAt     DateTime  @default(now()) @map("created_at")
+  booking       Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([bookingId])
+  @@map("payment_links")
+}
+
+// ── F9 — Inscription Chauffeur ────────────────────────────────────────────────
+
+model DriverRegistrationPayment {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  driverProfileId String        @unique @map("driver_profile_id") @db.Uuid
+  totalAmount     Float         @map("total_amount")
+  revenueAmount   Float         @map("revenue_amount")
+  depositAmount   Float         @map("deposit_amount")
+  provider        String        // orange_money_cm | mtn_cm | cash
+  providerRef     String?       @unique @map("provider_ref")
+  status          String        @default("pending") // pending|paid|failed
+  paidAt          DateTime?     @map("paid_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@map("driver_registration_payments")
+}
+
+// ── Wallet Gains Chauffeur (argent réel) ──────────────────────────────────────
+
+model DriverEarningsWallet {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  driverProfileId String        @unique @map("driver_profile_id") @db.Uuid
+  balance         Float         @default(0)
+  pendingBalance  Float         @default(0) @map("pending_balance")
+  currency        String        @default("XAF")
+  totalEarned     Float         @default(0) @map("total_earned")
+  totalWithdrawn  Float         @default(0) @map("total_withdrawn")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  driverProfile   DriverProfile @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@map("driver_earnings_wallets")
+}
+
+// ── F1 — KYC Passager ────────────────────────────────────────────────────────
+
+model KycDocument {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  type            KycDocType
+  fileUrl         String        @map("file_url")
+  status          DocumentStatus @default(pending)
+  aiScore         Float?        @map("ai_score")
+  aiVerified      Boolean       @default(false) @map("ai_verified")
+  rejectionReason String?       @map("rejection_reason")
+  verifiedAt      DateTime?     @map("verified_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@map("kyc_documents")
+}
+
+// ── F7 — Contacts d'urgence ───────────────────────────────────────────────────
+
+model EmergencyContact {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  phone     String
+  relation  String?
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("emergency_contacts")
 }

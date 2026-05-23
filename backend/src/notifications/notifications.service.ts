@@ -32,7 +32,14 @@ export class NotificationsService implements OnModuleInit {
         credential = admin.credential.cert({ projectId, privateKey, clientEmail });
       } else if (serviceAccountEnv) {
         // Option 2 : JSON complet en une seule var
-        credential = admin.credential.cert(JSON.parse(serviceAccountEnv));
+        // Écriture dans un fichier temp car admin.credential.cert() interprète
+        // une string comme un chemin de fichier (ENAMETOOLONG sinon)
+        const parsed = typeof JSON.parse(serviceAccountEnv) === 'string'
+          ? JSON.parse(JSON.parse(serviceAccountEnv))
+          : JSON.parse(serviceAccountEnv);
+        const tmpPath = path.join('/tmp', 'firebase-sa.json');
+        fs.writeFileSync(tmpPath, JSON.stringify(parsed));
+        credential = admin.credential.cert(tmpPath);
       } else if (fs.existsSync(serviceAccountPath)) {
         // Option 3 : fichier local — INTERDIT en production
         if (process.env.NODE_ENV === 'production') {
@@ -72,6 +79,16 @@ export class NotificationsService implements OnModuleInit {
 
     if (!user?.fcmToken) return;
     await this.sendPush(user.fcmToken, title, body, data);
+  }
+
+  async sendToAdmins(title: string, body: string, data?: Record<string, string>) {
+    const admins = await this.prisma.user.findMany({
+      where: { role: 'admin', fcmToken: { not: null } },
+      select: { fcmToken: true },
+    });
+    await Promise.allSettled(
+      admins.map((a) => this.sendPush(a.fcmToken!, title, body, data)),
+    );
   }
 
   async sendPush(token: string, title: string, body: string, data?: Record<string, string>) {

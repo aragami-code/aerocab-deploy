@@ -11,20 +11,7 @@ export interface VehicleTariff {
   label?: string;       // Nom affiché (ex: "Berline Confort")
   isActive?: boolean;   // false = masqué dans l'app passager
   maxPassengers?: number; // Capacité max (optionnel)
-}
-
-export interface VehicleConsigneTariff {
-  dailyRate: number; // FCFA/jour
-}
-
-export interface SurgeConfig {
-  nightMultiplier: number;    // Multiplicateur nuit (22h-05h), défaut 1.3
-  rainMultiplier: number;     // Multiplicateur pluie, défaut 1.2
-  rushHourMultiplier: number; // Multiplicateur heure de pointe, défaut 1.25
-  rushHourStart: string;      // ex: "07:00"
-  rushHourEnd: string;        // ex: "09:00"
-  rushHourStart2: string;     // ex: "17:00"
-  rushHourEnd2: string;       // ex: "19:00"
+  commissionRate?: number; // 0.0–1.0 ; si absent → taux global (commission_rate setting)
 }
 
 export interface ReferralBonus {
@@ -41,10 +28,7 @@ export interface TariffsConfig {
   pricePerMinute: number;
   currency?: string;
   currencySymbol?: string;
-  consigneEnabled: boolean;  // true = service consigne disponible dans ce pays
   vehicles: Record<string, VehicleTariff>;
-  consigne: Record<string, VehicleConsigneTariff>;
-  surge: SurgeConfig;
 
   // ── Système de points ─────────────────────────────────────────────────────
   pointValue: number;         // Valeur d'1 point en monnaie locale (ex: 1 FCFA, 0.01 EUR)
@@ -72,30 +56,12 @@ export const DEFAULT_TARIFFS: TariffsConfig = {
     newUserBonus: 300,       // pts offerts au nouvel utilisateur à l'inscription
   },
 
-  consigneEnabled: true,     // true = service consigne disponible dans ce pays
-
   vehicles: {
     eco:          { basePricePerKm: 250, minFare: 3000,  coefficient: 1.0, label: 'Eco',          isActive: true, maxPassengers: 4 },
     eco_plus:     { basePricePerKm: 250, minFare: 3500,  coefficient: 1.2, label: 'Eco+',         isActive: true, maxPassengers: 4 },
     standard:     { basePricePerKm: 250, minFare: 5000,  coefficient: 1.4, label: 'Standard',     isActive: true, maxPassengers: 5 },
     confort:      { basePricePerKm: 250, minFare: 8000,  coefficient: 2.0, label: 'Confort',      isActive: true, maxPassengers: 5 },
     confort_plus: { basePricePerKm: 250, minFare: 12000, coefficient: 2.5, label: 'Confort Plus', isActive: true, maxPassengers: 7 },
-  },
-  consigne: {
-    eco:          { dailyRate: 5000  },
-    eco_plus:     { dailyRate: 6000  },
-    standard:     { dailyRate: 8000  },
-    confort:      { dailyRate: 12000 },
-    confort_plus: { dailyRate: 18000 },
-  },
-  surge: {
-    nightMultiplier:    1.3,
-    rainMultiplier:     1.2,
-    rushHourMultiplier: 1.25,
-    rushHourStart:  '07:00',
-    rushHourEnd:    '09:00',
-    rushHourStart2: '17:00',
-    rushHourEnd2:   '19:00',
   },
 };
 
@@ -119,6 +85,16 @@ export class SettingsService {
     });
     // 0.B1 — Invalider le cache /config activement
     await this.redis.del(CONFIG_CACHE_KEY);
+  }
+
+  async getDataRetentionMonths(): Promise<number> {
+    const val = await this.get('data_retention_months', '12');
+    const parsed = parseInt(val, 10);
+    return isNaN(parsed) || parsed < 1 ? 12 : parsed;
+  }
+
+  async setDataRetentionMonths(months: number): Promise<void> {
+    await this.set('data_retention_months', String(Math.max(1, months)));
   }
 
   async isProximityAssignmentEnabled(): Promise<boolean> {
@@ -164,14 +140,24 @@ export class SettingsService {
     return DEFAULT_TARIFFS;
   }
 
+  /**
+   * Vérifie si un pays est supporté (config tarifaire définie en DB).
+   * CM (Cameroun) est toujours supporté car c'est le pays par défaut.
+   * null = pas de pays détecté → on laisse passer sans bloquer.
+   */
+  async isCountrySupported(countryCode: string | null): Promise<boolean> {
+    if (!countryCode) return true;
+    const upper = countryCode.toUpperCase();
+    if (upper === 'CM') return true; // pays par défaut, toujours supporté
+    const raw = await this.get(`tariffs_config:${upper}`, '');
+    return !!raw;
+  }
+
   private mergeTariffs(parsed: Partial<TariffsConfig>): TariffsConfig {
     return {
       ...DEFAULT_TARIFFS,
       ...parsed,
       vehicles:      { ...DEFAULT_TARIFFS.vehicles,      ...(parsed.vehicles      ?? {}) },
-      consigneEnabled: parsed.consigneEnabled ?? DEFAULT_TARIFFS.consigneEnabled,
-      consigne:      { ...DEFAULT_TARIFFS.consigne,      ...(parsed.consigne      ?? {}) },
-      surge:         { ...DEFAULT_TARIFFS.surge,         ...(parsed.surge         ?? {}) },
       referralBonus: { ...DEFAULT_TARIFFS.referralBonus, ...(parsed.referralBonus ?? {}) },
     };
   }

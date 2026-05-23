@@ -72,6 +72,10 @@ const PERMISSIONS: Array<{ key: string; group: string; description: string }> = 
   { key: 'manage_feature_flags',      group: 'features',   description: 'Activer / désactiver les fonctionnalités passager et chauffeur' },
   // financial (1)
   { key: 'manage_financial_settings', group: 'settings',   description: 'Modifier commission, cashback, bonus (paramètres financiers)' },
+  // payments (3)
+  { key: 'view_payment_providers',    group: 'payments',   description: 'Voir les fournisseurs de paiement et leur état de configuration' },
+  { key: 'manage_payment_providers',  group: 'payments',   description: 'Activer/désactiver les providers, configurer les clés API paiement' },
+  { key: 'manage_payment_security',   group: 'payments',   description: 'Modifier les plafonds de recharge, limites et délais de retrait' },
   // withdrawals (2)
   { key: 'view_withdrawals',          group: 'withdrawals',description: 'Voir les demandes de retrait chauffeurs' },
   { key: 'manage_withdrawals',        group: 'withdrawals',description: 'Approuver / Rejeter les demandes de retrait' },
@@ -97,6 +101,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_referrals',
     'view_audit_logs',
     'view_settings','edit_settings','manage_otp_templates','test_otp_provider','manage_financial_settings',
+    'view_payment_providers','manage_payment_providers','manage_payment_security',
     'view_withdrawals','manage_withdrawals',
     'export_data',
     'manage_feature_flags',
@@ -111,6 +116,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_reports','handle_report',
     'view_referrals',
     'view_withdrawals',
+    'view_payment_providers',  // lecture seule : voir quels providers sont actifs
   ],
   support: [
     'view_stats',
@@ -121,6 +127,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_reports',
     'view_referrals',
     'view_withdrawals',
+    'view_payment_providers',  // lecture seule
   ],
 };
 
@@ -175,7 +182,7 @@ async function main() {
     console.log(`  ✓ ${roleName} → ${permKeys.length} permissions`);
   }
 
-  console.log('\n✅ RBAC seedé : 51 permissions, 4 rôles système.');
+  console.log('\n✅ RBAC seedé : 54 permissions, 4 rôles système.');
 }
 
 main()

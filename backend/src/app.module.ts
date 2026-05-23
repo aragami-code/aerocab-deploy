@@ -25,7 +25,11 @@ import { AuditModule } from './audit/audit.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { CleanupModule } from './cleanup/cleanup.module';
 import { ForfaitsModule } from './forfaits/forfaits.module';
+import { ZonesModule } from './zones/zones.module';
 import { BotModule } from './bot/bot.module';
+import { KycModule } from './kyc/kyc.module';
+import { SosModule } from './sos/sos.module';
+import { CallsModule } from './calls/calls.module';
 
 @Module({
   imports: [
@@ -62,7 +66,11 @@ import { BotModule } from './bot/bot.module';
     UploadsModule,
     CleanupModule,
     ForfaitsModule,
+    ZonesModule,
     BotModule,
+    KycModule,
+    SosModule,
+    CallsModule,
   ],
   controllers: [AppController],
   providers: [

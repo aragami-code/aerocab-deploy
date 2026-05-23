@@ -18,6 +18,30 @@ const PUBLIC_SETTING_KEYS = [
   'booking_passenger_timeout_ms',
   'passenger_confirm_timeout_min',
   'otp_channel',
+  'google_maps_key',
+  'workflow_arrival_enabled',
+  'workflow_departure_enabled',
+  'workflow_international_enabled',
+  // Feature flags
+  'feature_referral_enabled',
+  'feature_cashback_enabled',
+  'feature_points_purchase_enabled',
+  'feature_promo_enabled',
+  'feature_chat_enabled',
+  'feature_sos_enabled',
+  'feature_destination_change_enabled',
+  'feature_rating_enabled',
+  'feature_driver_withdrawal_enabled',
+  'feature_breakdown_report_enabled',
+  'driver_document_config',
+  'bot_enabled',
+  'test_mode_enabled',
+  'tariffs_config',
+  'gps_timeout_ms',
+  'arrival_detection_radius_km',
+  'max_destination_km',
+  'airport_neighborhoods',
+  'airport_neighborhood_coords',
 ];
 
 @Controller()
@@ -50,8 +74,9 @@ export class AppController {
     }
 
     // Construire la réponse
-    const [airportList, ...settingValues] = await Promise.all([
+    const [airportList, operatedList, ...settingValues] = await Promise.all([
       this.airports.findAll(),
+      this.airports.findAllOperated(),
       ...PUBLIC_SETTING_KEYS.map((k) => this.settings.get(k)),
     ]);
 
@@ -60,7 +85,15 @@ export class AppController {
       publicSettings[k] = settingValues[i] as string;
     });
 
-    const payload = { airports: airportList, settings: publicSettings };
+    // Liste des codes IATA opérés — utilisée par les apps pour appliquer le Filtre 1
+    // (UX : bloquer ARRIVAL/DEPARTURE si l'aéroport détecté n'est pas desservi).
+    const operatedAirportCodes = operatedList.map((a) => a.iataCode);
+
+    const payload = {
+      airports: airportList,
+      operatedAirports: operatedAirportCodes,
+      settings: publicSettings,
+    };
 
     // Mettre en cache
     await this.redis.set(CONFIG_CACHE_KEY, JSON.stringify(payload), CONFIG_CACHE_TTL);

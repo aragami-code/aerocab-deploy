@@ -26,9 +26,13 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'max_route_distance_km',          value: '80',     description: 'Distance max trajet acceptée (km)' },
 
   // ─── Timeouts & Timings ───────────────────────────────────────────────────
-  { key: 'booking_assignment_timeout_min', value: '10',     description: 'Timeout assignation chauffeur (minutes)' },
-  { key: 'booking_passenger_timeout_ms',   value: '60000',  description: 'Délai annulation gratuite passager (ms)' },
-  { key: 'passenger_confirm_timeout_min',  value: '5',      description: 'Délai confirmation passager après arrivée (min)' },
+  { key: 'booking_assignment_timeout_min',  value: '10',    description: 'Timeout assignation chauffeur (minutes)' },
+  { key: 'booking_passenger_timeout_ms',    value: '60000', description: 'Délai annulation gratuite passager (ms)' },
+  { key: 'passenger_confirm_timeout_min',   value: '5',     description: 'Délai confirmation passager après arrivée (min)' },
+  { key: 'dispatch_scheduled_advance_min',  value: '60',    description: 'Avance (minutes) pour dispatcher les réservations programmées avant l\'heure' },
+
+  // ─── Objectifs journaliers chauffeur ──────────────────────────────────────
+  { key: 'daily_goals', value: JSON.stringify({ rides: 5, earnings: 25000, rating: 4.5 }), description: 'Objectifs journaliers chauffeur (JSON : rides, earnings en FCFA, rating)' },
 
   // ─── Vols ─────────────────────────────────────────────────────────────────
   { key: 'flight_sync_interval_minutes',   value: '10',     description: 'Intervalle synchronisation statuts vols (min)' },
@@ -98,6 +102,13 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'sms_routing_rules',              value: '{"+237":"mock","+221":"mock","default":"mock"}', description: 'Règles routage SMS par préfixe pays E.164 avec + (JSON). Ex: {"+237":"orange-cm","+221":"africas-talking","default":"twilio"}' },
   { key: 'email_provider',                 value: 'mock',   description: 'Fournisseur email : mock | sendgrid | smtp' },
 
+  // ─── SMTP (configurable admin, fallback env vars) ─────────────────────────
+  { key: 'smtp_host',       value: '', description: 'Serveur SMTP (ex: smtp.gmail.com, smtp.sendgrid.net)' },
+  { key: 'smtp_port',       value: '587', description: 'Port SMTP : 587 (TLS), 465 (SSL), 25 (non chiffré)' },
+  { key: 'smtp_user',       value: '', description: 'Identifiant SMTP (adresse email ou login)' },
+  { key: 'smtp_pass',       value: '', description: 'Mot de passe SMTP ou mot de passe d\'application' },
+  { key: 'smtp_from_email', value: '', description: 'Adresse expéditeur (ex: noreply@aerocab.com)' },
+
   // ─── Templates OTP multilingues ───────────────────────────────────────────
   { key: 'otp_email_subject',              value: 'Votre code AeroGo 24', description: 'Sujet email OTP' },
   { key: 'otp_template_fr',               value: 'Votre code de vérification AeroGo 24 est {{code}}. Valable {{expiry}} min.', description: 'Template SMS/email OTP en français' },
@@ -121,13 +132,46 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'payment_mpesa_enabled',          value: 'false',  description: 'Activer M-Pesa comme fournisseur de paiement' },
   { key: 'payment_paypal_enabled',         value: 'false',  description: 'Activer PayPal comme fournisseur de paiement' },
   { key: 'payment_wave_enabled',           value: 'false',  description: 'Activer Wave comme fournisseur de paiement' },
+  { key: 'payment_edoctor_enabled',        value: 'false',  description: 'Activer EdoctorPay comme fournisseur de paiement' },
+
+  // ── Forfaits de recharge de points ──────────────────────────────────────────
+  { key: 'points_recharge_packages', value: '[1000,3000,5000,10000]', description: 'Forfaits de recharge de points disponibles (tableau JSON de nombres entiers)' },
+
+  // ── Configuration documents chauffeur ───────────────────────────────────────
+  { key: 'driver_document_config', value: JSON.stringify([
+    { type: 'cni_front',          label: 'CNI — Recto',              description: 'Face avant de votre carte nationale',        required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'cni_back',           label: 'CNI — Verso',              description: "Face arrière de votre carte nationale",      required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'license',            label: 'Permis de conduire',       description: 'Permis en cours de validité',                required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'registration',       label: 'Carte grise',              description: "Document d'immatriculation du véhicule",    required: true,  enabled: true,  acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vehicle_photo',      label: 'Photo du véhicule',        description: 'Vue de face du véhicule',                    required: true,  enabled: true,  acceptedExtensions: ['jpg','png'] },
+    { type: 'insurance',          label: "Attestation d'assurance",  description: 'Attestation couvrant le transport de personnes', required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'technical_control',  label: 'Visite technique',         description: 'Contrôle technique en cours de validité',   required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vtc_license',        label: 'Autorisation VTC',         description: 'Autorisation officielle de transport VTC',  required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'passport',           label: 'Passeport',                description: 'Passeport en cours de validité',             required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'portrait',           label: 'Photo portrait',           description: 'Selfie face caméra, fond neutre',            required: false, enabled: false, acceptedExtensions: ['jpg','png'] },
+    { type: 'criminal_record',    label: 'Casier judiciaire',        description: 'Bulletin n°3 daté de moins de 3 mois',      required: false, enabled: false, acceptedExtensions: ['pdf'] },
+    { type: 'proof_of_address',   label: 'Justificatif de domicile', description: 'Facture ou relevé de moins de 3 mois',      required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'medical_certificate',label: 'Certificat médical',       description: "Attestation d'aptitude à la conduite",      required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'vaccination_card',   label: 'Carte de vaccination',     description: 'Carnet de vaccination à jour',               required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+    { type: 'border_pass',        label: 'Laissez-passer frontalier',description: 'Document frontalier valide',                 required: false, enabled: false, acceptedExtensions: ['jpg','png','pdf'] },
+  ]), description: 'Configuration des documents chauffeur (JSON) : liste {type, label, description, required, enabled, acceptedExtensions}' },
+
+  // ── Pass d'accès passager (configurable admin) ──────────────────────────────
+  { key: 'access_pass_enabled',        value: 'false',  description: 'Activer le pass d\'accès payant pour les passagers (true/false)' },
+  { key: 'access_pass_price_fcfa',     value: '2000',   description: 'Prix du pass en FCFA (ex: 2000 = 2 000 FCFA/mois)' },
+  { key: 'access_pass_duration_days',  value: '30',     description: 'Durée de validité du pass en jours (ex: 30 = mensuel, 7 = hebdomadaire)' },
+  { key: 'access_pass_trial_days',     value: '7',      description: 'Jours d\'essai gratuit pour les nouveaux passagers (0 = pas d\'essai)' },
+  { key: 'access_pass_grace_days',     value: '2',      description: 'Jours de grâce après expiration avant blocage complet' },
 
   // ── Bot Assistant ────────────────────────────────────────────────────────────
-  { key: 'bot_enabled',        value: 'false', description: 'Activer le bot assistant IA (true/false)' },
-  { key: 'bot_claude_api_key', value: '',       description: 'Clé API Anthropic (sk-ant-...)' },
-  { key: 'bot_model',          value: 'claude-haiku-4-5-20251001', description: 'Modèle Claude à utiliser' },
-  { key: 'bot_max_tokens',     value: '500',    description: 'Nombre max de tokens dans la réponse du bot' },
-  { key: 'bot_system_prompt',  value: 'Tu es l\'assistant AeroCab. Réponds en français, de façon concise et amicale. Si tu ne sais pas, propose de contacter le support.', description: 'System prompt du bot (personnalisable sans redéploiement)' },
+  { key: 'bot_enabled',          value: 'false',  description: 'Activer le bot assistant IA (true/false)' },
+  { key: 'bot_provider',         value: 'claude', description: 'Fournisseur IA actif : claude | openai | zhipu' },
+  { key: 'bot_claude_api_key',   value: '',       description: 'Clé API Anthropic (sk-ant-...) — utilisée si bot_provider=claude' },
+  { key: 'bot_openai_api_key',   value: '',       description: 'Clé API OpenAI (sk-...) — utilisée si bot_provider=openai' },
+  { key: 'bot_zhipu_api_key',    value: '',       description: 'Clé API ZhipuAI (GLM) — utilisée si bot_provider=zhipu' },
+  { key: 'bot_model',            value: 'claude-haiku-4-5-20251001', description: 'Modèle IA à utiliser (ex: claude-haiku-4-5-20251001 | gpt-4o-mini | glm-4-flash)' },
+  { key: 'bot_max_tokens',       value: '500',    description: 'Nombre max de tokens dans la réponse du bot' },
+  { key: 'bot_system_prompt',    value: 'Tu es l\'assistant AeroCab. Réponds en français, de façon concise et amicale. Si tu ne sais pas, propose de contacter le support.', description: 'System prompt du bot (personnalisable sans redéploiement)' },
 ];
 
 async function main() {

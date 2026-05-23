@@ -5,7 +5,7 @@
   "description": "AeroGo 24 Connect - API Backend (NestJS)",
   "scripts": {
     "dev": "nest start --watch",
-    "build": "npx prisma generate && nest build",
+    "build": "prisma generate && nest build",
     "start": "node dist/main",
     "start:prod": "npx prisma db push --accept-data-loss && node dist/main",
     "lint": "eslint . --ext .ts",
@@ -37,6 +37,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "expo-server-sdk": "^3.10.0",
     "firebase-admin": "^13.7.0",
     "helmet": "^8.1.0",
@@ -46,6 +47,7 @@
     "nodemailer": "^8.0.5",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdfkit": "^0.18.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.0",
     "socket.io": "^4.7.0"
@@ -65,9 +67,11 @@
     "@types/uuid": "^11.0.0",
     "jest": "^30.3.0",
     "prisma": "^6.0.0",
+    "socket.io-client": "^4.8.3",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
     "ts-loader": "^9.5.0",
+    "ts-node": "^10.9.2",
     "tsc-alias": "^1.8.16",
     "typescript": "^5.7.0",
     "uuid": "^14.0.0"

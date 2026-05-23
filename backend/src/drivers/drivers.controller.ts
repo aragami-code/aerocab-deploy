@@ -21,6 +21,8 @@ import {
   UpdateDriverDto,
   UpdateLocationDto,
 } from './dto';
+import { CreateCountryChangeRequestDto } from './dto/country-change-request.dto';
+import { SkipThrottle } from '@nestjs/throttler';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser, Roles } from '../auth/decorators';
 
@@ -29,6 +31,7 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
+@SkipThrottle()
 @Controller('drivers')
 export class DriversController {
   constructor(private driversService: DriversService) {}
@@ -116,6 +119,25 @@ export class DriversController {
     return this.driversService.submitForReview(userId);
   }
 
+  // ── Country Change Request ──────────────────────────────
+
+  @Post('me/country-change-request')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  async requestCountryChange(
+    @CurrentUser('id') userId: string,
+    @Body() dto: CreateCountryChangeRequestDto,
+  ) {
+    return this.driversService.requestCountryChange(userId, dto.requestedCountry, dto.reason);
+  }
+
+  @Get('me/country-change-request')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('driver')
+  async getCountryChangeRequest(@CurrentUser('id') userId: string) {
+    return this.driversService.getCountryChangeRequest(userId);
+  }
+
   // ── Location & Availability ──────────────────────────
 
   @Patch('location')
@@ -200,5 +222,28 @@ export class DriversController {
   @UseGuards(JwtAuthGuard)
   async getDriverById(@Param('id') id: string) {
     return this.driversService.getDriverById(id);
+  }
+
+  // ── Frais d'inscription ──────────────────────────────────────────────────
+
+  @Get('registration-fee/status')
+  @UseGuards(JwtAuthGuard)
+  async getRegistrationFeeStatus(@CurrentUser() user: any) {
+    return this.driversService.getRegistrationFeeStatus(user.id);
+  }
+
+  @Post('registration-fee/initiate')
+  @UseGuards(JwtAuthGuard)
+  async initiateRegistrationFee(
+    @CurrentUser() user: any,
+    @Body() body: { provider: 'orange_money_cm' | 'mtn_cm' | 'cash' },
+  ) {
+    return this.driversService.initiateRegistrationFee(user.id, body.provider);
+  }
+
+  @Get('daily-goals/progress')
+  @UseGuards(JwtAuthGuard)
+  async getDailyGoalsProgress(@CurrentUser() user: any) {
+    return this.driversService.getDailyGoalsProgress(user.id);
   }
 }

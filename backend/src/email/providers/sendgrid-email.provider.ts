@@ -1,20 +1,29 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IEmailProvider } from '../interfaces/email-provider.interface';
+import { SettingsService } from '../../settings/settings.service';
 
 @Injectable()
 export class SendgridEmailProvider implements IEmailProvider {
   readonly name = 'sendgrid';
   private readonly logger = new Logger(SendgridEmailProvider.name);
 
-  constructor(private config: ConfigService) {}
+  constructor(
+    private config: ConfigService,
+    private settings: SettingsService,
+  ) {}
 
   async send(to: string, subject: string, html: string): Promise<boolean> {
-    const apiKey = this.config.get<string>('SENDGRID_API_KEY');
-    const from   = this.config.get<string>('SENDGRID_FROM_EMAIL');
+    // Priorité : AppSetting (admin) → env var (fallback)
+    const [keyDb, fromDb] = await Promise.all([
+      this.settings.get('sendgrid_api_key'),
+      this.settings.get('sendgrid_from_email'),
+    ]);
+    const apiKey = keyDb  || this.config.get<string>('SENDGRID_API_KEY', '');
+    const from   = fromDb || this.config.get<string>('SENDGRID_FROM_EMAIL', '');
 
     if (!apiKey || !from) {
-      this.logger.error('SendGrid credentials manquants (SENDGRID_API_KEY, SENDGRID_FROM_EMAIL)');
+      this.logger.error('SendGrid credentials manquants — configurez via admin > Configuration > Email');
       return false;
     }
 

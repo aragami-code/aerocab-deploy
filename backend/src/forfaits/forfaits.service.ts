@@ -34,9 +34,8 @@ export class ForfaitsService {
         name:             dto.name,
         airportCode:      dto.airportCode.toUpperCase(),
         destinationName:  dto.destinationName,
-        destLat:          dto.destLat,
-        destLng:          dto.destLng,
-        destRadius:       dto.destRadius ?? 2.0,
+        minDistKm:        dto.minDistKm ?? 0,
+        maxDistKm:        dto.maxDistKm,
         priceAmount:      dto.priceAmount,
         currency:         dto.currency ?? 'XAF',
         countryCode:      dto.countryCode.toUpperCase(),
@@ -44,9 +43,6 @@ export class ForfaitsService {
         bookingTypes:     (dto.bookingTypes as any[]) ?? [],
         driverPercent:    dto.driverPercent ?? 85,
         companyPercent:   dto.companyPercent ?? 15,
-        nightSurgeRate:   dto.nightSurgeRate ?? null,
-        rainSurgeRate:    dto.rainSurgeRate ?? null,
-        rushHourSurgeRate: dto.rushHourSurgeRate ?? null,
         isActive:         dto.isActive ?? true,
       },
     });
@@ -58,6 +54,13 @@ export class ForfaitsService {
     return this.prisma.forfait.findMany({
       where: countryCode ? { countryCode: countryCode.toUpperCase() } : undefined,
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findByCountry(countryCode: string) {
+    return this.prisma.forfait.findMany({
+      where: { countryCode: countryCode.toUpperCase(), isActive: true },
+      orderBy: [{ airportCode: 'asc' }, { priceAmount: 'asc' }],
     });
   }
 
@@ -98,7 +101,7 @@ export class ForfaitsService {
 
     const forfaits = await this.prisma.forfait.findMany({
       where: { airportCode: airportCode.toUpperCase(), isActive: true },
-      orderBy: { priceAmount: 'asc' },
+      orderBy: { minDistKm: 'asc' },
     });
 
     await this.redis.set(cacheKey, JSON.stringify(forfaits), CACHE_TTL);
@@ -112,27 +115,37 @@ export class ForfaitsService {
     vehicleType?: string,
     bookingType?: string,
   ) {
-    const forfaits = await this.findByAirport(airportCode);
+    const [forfaits, airport] = await Promise.all([
+      this.findByAirport(airportCode),
+      this.prisma.airport.findUnique({
+        where: { iataCode: airportCode.toUpperCase() },
+        select: { latitude: true, longitude: true },
+      }),
+    ]);
 
-    for (const f of forfaits) {
-      const dist = haversineKm(destLat, destLng, f.destLat, f.destLng);
-      if (dist > f.destRadius) continue;
+    if (!airport) return null;
+
+    const haversine = haversineKm(airport.latitude, airport.longitude, destLat, destLng);
+    // Road distance correction: actual road distance in Cameroonian cities is ~2.2× straight-line
+    const distFromAirport = haversine * 2.2;
+
+    // Trier par zone la plus précise (maxDistKm la plus petite en premier)
+    const sorted = [...forfaits].sort((a, b) => a.maxDistKm - b.maxDistKm);
+
+    for (const f of sorted) {
+      if (distFromAirport < f.minDistKm || distFromAirport > f.maxDistKm) continue;
       if (vehicleType && f.vehicleTypes.length > 0 && !f.vehicleTypes.includes(vehicleType)) continue;
       if (bookingType && f.bookingTypes.length > 0 && !(f.bookingTypes as string[]).includes(bookingType)) continue;
-      return f;
+      return { ...f, matchedDistKm: Math.round(distFromAirport * 10) / 10 };
     }
     return null;
   }
 
-  calculatePrice(
-    forfait: { priceAmount: number; nightSurgeRate: number | null; rainSurgeRate: number | null; rushHourSurgeRate: number | null },
-    surges: { night: boolean; rain: boolean; rushHour: boolean },
-  ): number {
-    let price = forfait.priceAmount;
-    if (surges.night    && forfait.nightSurgeRate    !== null) price *= forfait.nightSurgeRate!;
-    if (surges.rain     && forfait.rainSurgeRate     !== null) price *= forfait.rainSurgeRate!;
-    if (surges.rushHour && forfait.rushHourSurgeRate !== null) price *= forfait.rushHourSurgeRate!;
-    return Math.round(price);
+  /**
+   * Prix forfait fixe garanti (modèle Blacklane) — aucune surcharge contextuelle.
+   */
+  calculatePrice(forfait: { priceAmount: number }): number {
+    return Math.round(forfait.priceAmount);
   }
 
   private async invalidateCache(airportCode: string) {

@@ -8,6 +8,9 @@ import { PointsService } from '../points/points.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../redis/redis.service';
 import { FlutterwaveService } from '../payments/flutterwave.service';
+import { DispatchService } from './dispatch.service';
+import { PayoutService } from '../payments/payout.service';
+import { ReceiptService } from '../payments/receipt.service';
 import { makeTransaction } from '../../test/factories';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -38,6 +41,9 @@ const mockPoints = { addPoints: jest.fn().mockResolvedValue(undefined) };
 const mockAudit  = { log: jest.fn().mockResolvedValue(undefined) };
 const mockRedis  = { scan: jest.fn().mockResolvedValue([]), get: jest.fn(), del: jest.fn(), set: jest.fn() };
 const mockFlutterwave = { verify: jest.fn() };
+const mockDispatch    = { findEligibleDrivers: jest.fn().mockResolvedValue([]) };
+const mockPayout      = { createPayout: jest.fn().mockResolvedValue(undefined) };
+const mockReceiptSvc  = { sendRideReceipt: jest.fn().mockResolvedValue(undefined) };
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
@@ -57,6 +63,9 @@ describe('BookingsScheduler', () => {
         { provide: AuditService,         useValue: mockAudit         },
         { provide: RedisService,         useValue: mockRedis         },
         { provide: FlutterwaveService,   useValue: mockFlutterwave   },
+        { provide: DispatchService,      useValue: mockDispatch      },
+        { provide: PayoutService,        useValue: mockPayout        },
+        { provide: ReceiptService,       useValue: mockReceiptSvc    },
       ],
     }).compile();
 

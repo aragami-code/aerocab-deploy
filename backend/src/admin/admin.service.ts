@@ -6,7 +6,18 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { RedisService } from '../redis/redis.service';
+import { NotchPayService, WITHDRAWAL_METHOD_TO_NOTCHPAY } from '../payments/notchpay.service';
+import { FlutterwaveService, WITHDRAWAL_METHOD_TO_FLUTTERWAVE } from '../payments/flutterwave.service';
 import { VerifyDriverDto, VerificationAction } from './dto';
+import { ExportService } from './export.service';
+
+const DOC_LABELS: Record<string, string> = {
+  cni_front: 'CNI Recto', cni_back: 'CNI Verso',
+  license: 'Permis de conduire', registration: 'Carte grise',
+  vehicle_photo: 'Photo du véhicule',
+};
 
 @Injectable()
 export class AdminService {
@@ -15,6 +26,11 @@ export class AdminService {
   constructor(
     private prisma: PrismaService,
     private settingsService: SettingsService,
+    private notifications: NotificationsService,
+    private redis: RedisService,
+    private notchpay: NotchPayService,
+    private flutterwave: FlutterwaveService,
+    private exportService: ExportService,
   ) {}
 
   // ── Tariffs ──────────────────────────────────────────
@@ -45,6 +61,80 @@ export class AdminService {
     return { success: true, countryCode: countryCode.toUpperCase() };
   }
 
+  // ── Gestion des pays ─────────────────────────────────
+  async getAllCountries() {
+    return this.prisma.country.findMany({
+      select: { code: true, name: true, currency: true, paymentMethods: true, isActive: true },
+      orderBy: { code: 'asc' },
+    });
+  }
+
+  async createCountry(code: string, name: string, currency: string) {
+    const cc = code.trim().toUpperCase();
+    if (!/^[A-Z]{2,3}$/.test(cc)) throw new Error('Code pays invalide (2-3 lettres majuscules)');
+    return this.prisma.country.upsert({
+      where: { code: cc },
+      update: { name, currency },
+      create: { code: cc, name, currency, paymentMethods: [] },
+    });
+  }
+
+  async deleteCountry(countryCode: string) {
+    await this.prisma.country.delete({ where: { code: countryCode.toUpperCase() } });
+    return { success: true };
+  }
+
+  // ── Payment methods par pays ──────────────────────────
+  async getCountryPaymentMethods(countryCode: string) {
+    const country = await this.prisma.country.findUnique({
+      where: { code: countryCode.toUpperCase() },
+      select: { code: true, name: true, paymentMethods: true },
+    });
+    if (!country) throw new Error(`Pays introuvable : ${countryCode}`);
+    return { countryCode: country.code, name: country.name, methods: country.paymentMethods ?? [] };
+  }
+
+  async setCountryPaymentMethods(countryCode: string, methods: { id: string; label: string; icon: string }[]) {
+    await this.prisma.country.upsert({
+      where: { code: countryCode.toUpperCase() },
+      update: { paymentMethods: methods },
+      create: { code: countryCode.toUpperCase(), name: countryCode.toUpperCase(), paymentMethods: methods },
+    });
+    return { success: true, countryCode: countryCode.toUpperCase(), methods };
+  }
+
+  // ── Chart Data (15 derniers jours) ──────────────────
+  async getChartData() {
+    const days = 15;
+    const result: { day: string; courses: number; revenus: number }[] = [];
+
+    for (let i = days - 1; i >= 0; i--) {
+      const start = new Date();
+      start.setDate(start.getDate() - i);
+      start.setHours(0, 0, 0, 0);
+
+      const end = new Date(start);
+      end.setHours(23, 59, 59, 999);
+
+      const [courses, revenusAgg] = await Promise.all([
+        this.prisma.booking.count({
+          where: { createdAt: { gte: start, lte: end } },
+        }),
+        this.prisma.booking.aggregate({
+          where: { status: 'completed', updatedAt: { gte: start, lte: end } },
+          _sum: { estimatedPrice: true },
+        }),
+      ]);
+
+      result.push({
+        day: start.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }),
+        courses,
+        revenus: revenusAgg._sum.estimatedPrice ?? 0,
+      });
+    }
+
+    return result;
+  }
 
   // ── Driver Verification ──────────────────────────────
 
@@ -192,24 +282,42 @@ export class AdminService {
   ) {
     const doc = await this.prisma.driverDocument.findUnique({
       where: { id: documentId },
+      include: { driverProfile: { select: { userId: true } } },
     });
 
-    if (!doc) {
-      throw new NotFoundException('Document introuvable');
-    }
-
-    if (action === 'reject' && !reason) {
-      throw new BadRequestException('Un motif de rejet est requis');
-    }
+    if (!doc) throw new NotFoundException('Document introuvable');
 
     const updated = await this.prisma.driverDocument.update({
       where: { id: documentId },
       data: {
         status: action === 'approve' ? 'approved' : 'rejected',
-        rejectionReason: action === 'reject' ? reason : null,
+        rejectionReason: action === 'reject' ? (reason ?? null) : null,
         verifiedAt: action === 'approve' ? new Date() : null,
       },
     });
+
+    // Notification push au chauffeur
+    const userId = (doc as any).driverProfile?.userId;
+    if (userId) {
+      const label = DOC_LABELS[doc.type] ?? doc.type;
+      if (action === 'reject') {
+        await this.notifications.sendToUser(
+          userId,
+          'Document refusé',
+          reason
+            ? `${label} refusé — Motif : ${reason}`
+            : `${label} a été refusé. Veuillez le remplacer.`,
+          { type: 'document_rejected', screen: 'pending-review', docType: doc.type },
+        ).catch(() => {});
+      } else {
+        await this.notifications.sendToUser(
+          userId,
+          'Document approuvé ✓',
+          `${label} a été approuvé.`,
+          { type: 'document_approved', screen: 'pending-review' },
+        ).catch(() => {});
+      }
+    }
 
     return updated;
   }
@@ -231,6 +339,7 @@ export class AdminService {
       completedBookings,
       cancelledBookings,
       completedToday,
+      revenueAgg,
     ] = await Promise.all([
       this.prisma.user.count(),
       this.prisma.driverProfile.count(),
@@ -242,6 +351,7 @@ export class AdminService {
       this.prisma.booking.count({ where: { status: 'completed' } }),
       this.prisma.booking.count({ where: { status: 'cancelled' } }),
       this.prisma.booking.count({ where: { status: 'completed', updatedAt: { gte: today } } }),
+      this.prisma.booking.aggregate({ where: { status: 'completed' }, _sum: { estimatedPrice: true } }),
     ]);
 
     return {
@@ -249,6 +359,8 @@ export class AdminService {
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
+      activeAccessPasses: 0,
+      totalRevenue: revenueAgg._sum.estimatedPrice ?? 0,
       bookings: {
         total: totalBookings,
         pending: pendingBookings,
@@ -287,6 +399,33 @@ export class AdminService {
     return { data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
+  async getBookingRatings(bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { driverProfile: { select: { userId: true } } },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+
+    const driverUserId = booking.driverProfile?.userId;
+    if (!driverUserId) return { ratings: [] };
+
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { passengerId: booking.passengerId, driverId: driverUserId },
+    });
+    if (!conversation) return { ratings: [] };
+
+    const ratings = await this.prisma.rating.findMany({
+      where: { conversationId: conversation.id },
+      include: {
+        fromUser: { select: { id: true, name: true, role: true } },
+        toUser:   { select: { id: true, name: true, role: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return { ratings };
+  }
+
   async cancelBookingAdmin(bookingId: string) {
     const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
     if (!booking) throw new NotFoundException('Réservation introuvable');
@@ -299,7 +438,59 @@ export class AdminService {
     });
   }
 
-  async updateDriverProfile(driverId: string, data: { driverType?: string; consigneEnabled?: boolean }) {
+  async refundBooking(bookingId: string, adminUserId: string, reason?: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { paymentIntent: true },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+
+    // Déjà remboursé ?
+    if (booking.paymentIntent?.refundedAt) {
+      throw new BadRequestException('Cette réservation a déjà été remboursée');
+    }
+
+    const amount = booking.estimatedPrice ?? 0;
+    if (amount <= 0) throw new BadRequestException('Montant de remboursement nul');
+
+    await this.prisma.$transaction(async (tx) => {
+      // Créditer les points au passager
+      await tx.pointsTransaction.create({
+        data: {
+          userId: booking.passengerId,
+          type: 'credit',
+          source: 'refund',
+          points: amount,
+          label: `Remboursement course #${bookingId.slice(-6)}${reason ? ` — ${reason}` : ''}`,
+        },
+      });
+
+      // Marquer le PaymentIntent comme remboursé si existant
+      if (booking.paymentIntent) {
+        await tx.paymentIntent.update({
+          where: { bookingId },
+          data: {
+            status: 'refunded',
+            refundedAt: new Date(),
+            adminNote: reason ?? null,
+          },
+        });
+      }
+    });
+
+    // Notifier le passager
+    this.notifications.sendToUser(
+      booking.passengerId,
+      '💚 Remboursement effectué',
+      `${amount.toLocaleString()} pts ont été crédités sur votre portefeuille${reason ? ` (${reason})` : ''}.`,
+    ).catch(() => {});
+
+    this.logger.log(`Refund booking ${bookingId} — ${amount} pts → user ${booking.passengerId} by admin ${adminUserId}`);
+
+    return { success: true, amount, passengerId: booking.passengerId };
+  }
+
+  async updateDriverProfile(driverId: string, data: { driverType?: string }) {
     return this.prisma.driverProfile.update({
       where: { id: driverId },
       data,
@@ -446,6 +637,32 @@ export class AdminService {
     return { period, from: startDate, to: now, totalRides: bookings.length, totalRevenue, byType };
   }
 
+  // ── Rapport financier avec plage de dates ─────────────
+
+  async getFinancialReport(from: string, to: string) {
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
+    const [bookings, commissionRateSetting] = await Promise.all([
+      this.prisma.booking.findMany({
+        where: { status: 'completed', completedAt: { gte: fromDate, lte: toDate } },
+        select: { estimatedPrice: true, type: true, vehicleType: true },
+      }),
+      this.settingsService.get('commission_rate', '0.15'),
+    ]);
+    const rate = parseFloat(commissionRateSetting) || 0.15;
+    const totalRevenue  = bookings.reduce((s, b) => s + (b.estimatedPrice ?? 0), 0);
+    const commission    = Math.round(totalRevenue * rate);
+    const driverPayouts = totalRevenue - commission;
+    const byType = bookings.reduce<Record<string, { count: number; revenue: number }>>((acc, b) => {
+      const t = b.type ?? 'unknown';
+      if (!acc[t]) acc[t] = { count: 0, revenue: 0 };
+      acc[t].count++;
+      acc[t].revenue += b.estimatedPrice ?? 0;
+      return acc;
+    }, {});
+    return { from: fromDate.toISOString(), to: toDate.toISOString(), totalBookings: bookings.length, totalRevenue, commission, driverPayouts, byType };
+  }
+
   // ── 6.B4 — Suspend / reactivate driver ───────────────
 
   async suspendDriver(driverProfileId: string, action: 'suspend' | 'reactivate') {
@@ -557,7 +774,7 @@ export class AdminService {
       this.prisma.withdrawalRequest.count({ where }),
     ]);
 
-    return { data, total, page, limit };
+    return { data, pagination: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
   async processWithdrawal(
@@ -575,8 +792,7 @@ export class AdminService {
       throw new BadRequestException('La demande doit être approuvée avant d\'être marquée comme payée');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      // Débit wallet uniquement quand on marque "paid"
+    const result = await this.prisma.$transaction(async (tx) => {
       if (status === 'paid') {
         const wallet = await tx.wallet.findUnique({ where: { userId: withdrawal.userId } });
         if (!wallet || Number(wallet.balance) < withdrawal.amount) {
@@ -589,9 +805,9 @@ export class AdminService {
         await tx.transaction.create({
           data: {
             walletId: wallet.id,
-            amount: withdrawal.amount,
-            type: 'withdrawal',
-            status: 'completed',
+            amount:   withdrawal.amount,
+            type:     'withdrawal',
+            status:   'completed',
             reference: `WITHDRAW-${id}`,
             metadata: { withdrawalRequestId: id, adminId },
           },
@@ -602,18 +818,351 @@ export class AdminService {
         where: { id },
         data: { status, adminNote: adminNote ?? null, processedAt: new Date() },
         select: {
-          id: true,
-          status: true,
-          adminNote: true,
-          processedAt: true,
-          amount: true,
-          currency: true,
-          method: true,
-          mobileNumber: true,
+          id: true, status: true, adminNote: true, processedAt: true,
+          amount: true, currency: true, method: true, mobileNumber: true,
           user: { select: { id: true, name: true, phone: true } },
         },
       });
     });
+
+    // Disbursement automatique — NotchPay en priorité, Flutterwave en fallback
+    // Déclenché après le commit DB pour ne pas bloquer la transaction Prisma
+    if (status === 'paid') {
+      const notchChannel = WITHDRAWAL_METHOD_TO_NOTCHPAY[withdrawal.method as string];
+      const flwBank      = WITHDRAWAL_METHOD_TO_FLUTTERWAVE[withdrawal.method as string];
+
+      const updateDisb = (disbursementStatus: string) =>
+        Promise.resolve(this.prisma.withdrawalRequest.update({ where: { id }, data: { disbursementStatus } }))
+          .catch(() => {/* non-critique */});
+
+      const onSuccess = (provider: string, txId: string, txStatus: string) => {
+        this.logger.log(`${provider} disbursement ${txId} status=${txStatus}`);
+        void updateDisb('sent');
+      };
+
+      const onFailure = (provider: string, err: Error) => {
+        this.logger.error(`${provider} disbursement FAILED pour withdrawal ${id}: ${err.message}`);
+        void updateDisb('failed');
+        void this.notifications.sendToAdmins(
+          'Échec disbursement',
+          `Retrait #${id} (${withdrawal.amount} ${withdrawal.currency ?? 'XAF'}) via ${provider} n'a pas abouti — intervention manuelle requise.`,
+          { withdrawalId: id, provider, error: err.message },
+        );
+      };
+
+      if (notchChannel && await this.notchpay.isConfigured()) {
+        this.notchpay
+          .transfer({
+            reference:        `DISBURSE-NP-${id}`,
+            amount:           withdrawal.amount,
+            currency:         withdrawal.currency ?? 'XAF',
+            beneficiaryName:  (result as any).user?.name ?? 'Chauffeur',
+            beneficiaryPhone: withdrawal.mobileNumber,
+            channel:          notchChannel,
+            description:      `Retrait AeroGo 24 — ${withdrawal.amount} XAF`,
+          })
+          .then((t) => onSuccess('NotchPay', t.id, t.status))
+          .catch((e) => onFailure('NotchPay', e));
+      } else if (flwBank && await this.flutterwave.isConfigured()) {
+        this.flutterwave
+          .transfer({
+            reference:        `DISBURSE-FLW-${id}`,
+            amount:           withdrawal.amount,
+            currency:         withdrawal.currency ?? 'XAF',
+            beneficiaryPhone: withdrawal.mobileNumber,
+            bankCode:         flwBank,
+            description:      `Retrait AeroGo 24 — ${withdrawal.amount} XAF`,
+          })
+          .then((t) => onSuccess('Flutterwave', t.id, t.status))
+          .catch((e) => onFailure('Flutterwave', e));
+      }
+    }
+
+    return result;
+  }
+
+  // ── Détail utilisateur (courses + solde + retraits) ─────────────────────
+
+  async getUserDetail(userId: string) {
+    const [user, pointsAgg, totalBookings] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true, name: true, phone: true, email: true, role: true,
+          status: true, referralCode: true, createdAt: true,
+          wallet: { select: { balance: true } },
+          bookings: {
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+            select: {
+              id: true, status: true, destination: true, estimatedPrice: true,
+              discountAmount: true, type: true, createdAt: true,
+              driverProfile: { select: { user: { select: { name: true } } } },
+            },
+          },
+          pointsTransactions: {
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+            select: { id: true, points: true, type: true, label: true, createdAt: true },
+          },
+          withdrawalRequests: {
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+            select: { id: true, amount: true, status: true, createdAt: true },
+          },
+        },
+      }),
+      this.prisma.pointsTransaction.aggregate({
+        where: { userId },
+        _sum: { points: true },
+      }),
+      this.prisma.booking.count({ where: { passengerId: userId } }),
+    ]);
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+    return {
+      ...user,
+      pointsBalance: pointsAgg._sum.points ?? 0,
+      totalBookings,
+    };
+  }
+
+  // ── Stats retraits ───────────────────────────────────────────────────────
+
+  async getWithdrawalStats() {
+    const [total, pending, approved, paid, rejected, sumPaid] = await Promise.all([
+      this.prisma.withdrawalRequest.count(),
+      this.prisma.withdrawalRequest.count({ where: { status: 'pending' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'approved' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'paid' } }),
+      this.prisma.withdrawalRequest.count({ where: { status: 'rejected' } }),
+      this.prisma.withdrawalRequest.aggregate({
+        where: { status: 'paid' },
+        _sum: { amount: true },
+      }),
+    ]);
+    return {
+      total,
+      byStatus: { pending, approved, paid, rejected },
+      totalPaidAmount: Number(sumPaid._sum.amount ?? 0),
+    };
+  }
+
+  // ── Export CSV ─────────────────────────────────────────────────────────────
+
+  async getBookingsCsv(): Promise<string> {
+    const rows = await this.prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, status: true, type: true,
+        destination: true, pickupAddress: true,
+        estimatedPrice: true, discountAmount: true,
+        paymentMethod: true, createdAt: true, completedAt: true,
+        passenger: { select: { name: true, phone: true } },
+        driverProfile: { select: { user: { select: { name: true, phone: true } } } },
+      },
+    });
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = 'id,status,type,passengerName,passengerPhone,driverName,driverPhone,pickupAddress,destination,estimatedPrice,discountAmount,paymentMethod,createdAt,completedAt';
+    const lines = rows.map((r) =>
+      [r.id, r.status, r.type, r.passenger?.name, r.passenger?.phone,
+       r.driverProfile?.user?.name, r.driverProfile?.user?.phone,
+       r.pickupAddress, r.destination, r.estimatedPrice, r.discountAmount,
+       r.paymentMethod, r.createdAt?.toISOString(), r.completedAt?.toISOString()]
+        .map(esc).join(','),
+    );
+    return [header, ...lines].join('\n');
+  }
+
+  async getUsersCsv(): Promise<string> {
+    const rows = await this.prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, name: true, phone: true, email: true, role: true, createdAt: true,
+        wallet: { select: { balance: true } },
+        _count: { select: { bookings: true } },
+      },
+    });
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = 'id,name,phone,email,role,createdAt,walletBalance,totalBookings';
+    const lines = rows.map((r) =>
+      [r.id, r.name, r.phone, r.email, r.role, r.createdAt?.toISOString(),
+       r.wallet?.balance ?? 0, r._count.bookings].map(esc).join(','),
+    );
+    return [header, ...lines].join('\n');
+  }
+
+  async getWithdrawalsCsv(): Promise<string> {
+    const rows = await this.prisma.withdrawalRequest.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, amount: true, currency: true, method: true,
+        mobileNumber: true, status: true, adminNote: true,
+        createdAt: true, processedAt: true,
+        user: { select: { name: true, phone: true } },
+      },
+    });
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = 'id,userName,userPhone,amount,currency,method,mobileNumber,status,adminNote,createdAt,processedAt';
+    const lines = rows.map((r) =>
+      [r.id, r.user?.name, r.user?.phone, r.amount, r.currency, r.method,
+       r.mobileNumber, r.status, r.adminNote, r.createdAt?.toISOString(), r.processedAt?.toISOString()]
+        .map(esc).join(','),
+    );
+    return [header, ...lines].join('\n');
+  }
+
+  // ── Export Excel (SpreadsheetML) ─────────────────────────────────────────
+
+  async getBookingsXls(): Promise<Buffer> {
+    const rows = await this.prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, status: true, type: true,
+        destination: true, pickupAddress: true,
+        estimatedPrice: true, discountAmount: true,
+        paymentMethod: true, createdAt: true, completedAt: true,
+        passenger: { select: { name: true, phone: true } },
+        driverProfile: { select: { user: { select: { name: true, phone: true } } } },
+      },
+    });
+
+    const headers = ['ID', 'Statut', 'Type', 'Passager', 'Téléphone passager',
+      'Chauffeur', 'Téléphone chauffeur', 'Départ', 'Destination',
+      'Prix estimé', 'Remise', 'Paiement', 'Créé le', 'Terminé le'];
+
+    const dataRows = rows.map(r => [
+      r.id, r.status, r.type,
+      r.passenger?.name ?? '', r.passenger?.phone ?? '',
+      r.driverProfile?.user?.name ?? '', r.driverProfile?.user?.phone ?? '',
+      r.pickupAddress ?? '', r.destination ?? '',
+      r.estimatedPrice ?? 0, r.discountAmount ?? 0, r.paymentMethod ?? '',
+      r.createdAt?.toISOString() ?? '', r.completedAt?.toISOString() ?? '',
+    ]);
+
+    return this.buildXls('Réservations', headers, dataRows);
+  }
+
+  async getUsersXls(): Promise<Buffer> {
+    const rows = await this.prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, name: true, phone: true, email: true, role: true, createdAt: true,
+        wallet: { select: { balance: true } },
+        _count: { select: { bookings: true } },
+      },
+    });
+
+    const headers = ['ID', 'Nom', 'Téléphone', 'Email', 'Rôle', 'Créé le', 'Solde pts', 'Nb courses'];
+    const dataRows = rows.map(r => [
+      r.id, r.name ?? '', r.phone, r.email ?? '', r.role,
+      r.createdAt?.toISOString() ?? '',
+      r.wallet?.balance ?? 0, r._count.bookings,
+    ]);
+
+    return this.buildXls('Utilisateurs', headers, dataRows);
+  }
+
+  private buildXls(sheetName: string, headers: string[], rows: (string | number)[][]): Buffer {
+    const esc = (v: string | number) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const cell = (v: string | number) => {
+      const type = typeof v === 'number' ? 'Number' : 'String';
+      return `<Cell><Data ss:Type="${type}">${esc(v)}</Data></Cell>`;
+    };
+    const headerRow = `<Row>${headers.map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${esc(h)}</Data></Cell>`).join('')}</Row>`;
+    const dataRowsXml = rows.map(r => `<Row>${r.map(cell).join('')}</Row>`).join('\n');
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:x="urn:schemas-microsoft-com:office:excel">
+<Styles>
+  <Style ss:ID="header">
+    <Font ss:Bold="1"/>
+    <Interior ss:Color="#1a1a2e" ss:Pattern="Solid"/>
+    <Font ss:Color="#FFFFFF" ss:Bold="1"/>
+  </Style>
+</Styles>
+<Worksheet ss:Name="${esc(sheetName)}">
+<Table>
+${headerRow}
+${dataRowsXml}
+</Table>
+</Worksheet>
+</Workbook>`;
+
+    return Buffer.from(xml, 'utf-8');
+  }
+
+  // ── Export PDF (HTML imprimable) ──────────────────────────────────────────
+
+  async getBookingsPdfHtml(): Promise<string> {
+    const rows = await this.prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 1000,
+      select: {
+        id: true, status: true, type: true,
+        destination: true, pickupAddress: true,
+        estimatedPrice: true, paymentMethod: true,
+        createdAt: true, completedAt: true,
+        passenger: { select: { name: true, phone: true } },
+        driverProfile: { select: { user: { select: { name: true } } } },
+      },
+    });
+
+    const statusColor: Record<string, string> = {
+      completed: '#16a34a', cancelled: '#dc2626', pending: '#d97706',
+      in_progress: '#2563eb', confirmed: '#7c3aed',
+    };
+
+    const rows_html = rows.map((r, i) => `
+      <tr style="background:${i % 2 === 0 ? '#f9f9f9' : '#fff'}">
+        <td>${r.id.slice(0, 8)}</td>
+        <td><span style="color:${statusColor[r.status] ?? '#333'};font-weight:600">${r.status}</span></td>
+        <td>${r.type}</td>
+        <td>${r.passenger?.name ?? '—'}</td>
+        <td>${r.destination ?? '—'}</td>
+        <td>${(r.estimatedPrice ?? 0).toLocaleString()} FCFA</td>
+        <td>${r.paymentMethod ?? '—'}</td>
+        <td>${r.driverProfile?.user?.name ?? '—'}</td>
+        <td>${r.createdAt ? new Date(r.createdAt).toLocaleDateString('fr-FR') : '—'}</td>
+      </tr>`).join('');
+
+    return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Export Réservations — AeroCab</title>
+<style>
+  @media print { @page { margin: 1cm; } }
+  body { font-family: Arial, sans-serif; font-size: 11px; color: #333; }
+  h1 { font-size: 16px; color: #1a1a2e; border-bottom: 2px solid #1a1a2e; padding-bottom: 8px; }
+  .meta { font-size: 11px; color: #666; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { background: #1a1a2e; color: #fff; padding: 6px 8px; text-align: left; font-size: 10px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #eee; }
+  .footer { margin-top: 16px; font-size: 10px; color: #999; text-align: center; }
+</style>
+</head>
+<body>
+<h1>AeroCab Connect — Réservations</h1>
+<div class="meta">Exporté le ${new Date().toLocaleString('fr-FR')} · ${rows.length} résultats</div>
+<table>
+<thead><tr>
+  <th>Réf.</th><th>Statut</th><th>Type</th><th>Passager</th>
+  <th>Destination</th><th>Prix</th><th>Paiement</th><th>Chauffeur</th><th>Date</th>
+</tr></thead>
+<tbody>${rows_html}</tbody>
+</table>
+<div class="footer">AeroCab Connect · export automatique</div>
+<script>window.addEventListener('load', () => window.print());</script>
+</body>
+</html>`;
   }
 
   // ── Crédit / Débit manuel de points (ADM·069) ────────────────────────────
@@ -631,16 +1180,16 @@ export class AdminService {
     if (!user) throw new NotFoundException('Utilisateur introuvable');
 
     return this.prisma.$transaction(async (tx) => {
-      // Vérifier le solde en cas de débit
-      if (amount < 0) {
-        const agg = await tx.pointsTransaction.aggregate({
-          where: { userId },
-          _sum: { points: true },
-        });
-        const currentBalance = agg._sum.points ?? 0;
-        if (currentBalance + amount < 0) {
-          throw new BadRequestException(`Solde insuffisant (${currentBalance} pts)`);
-        }
+      // D5 — Utiliser wallet.balance comme source de vérité unique
+      const wallet = await tx.wallet.upsert({
+        where: { userId },
+        update: {},
+        create: { userId, balance: 0 },
+      });
+      const currentBalance = Number(wallet.balance);
+
+      if (amount < 0 && currentBalance + amount < 0) {
+        throw new BadRequestException(`Solde insuffisant (${currentBalance} pts)`);
       }
 
       await tx.pointsTransaction.create({
@@ -652,13 +1201,254 @@ export class AdminService {
         },
       });
 
-      const agg = await tx.pointsTransaction.aggregate({
+      const newWallet = await tx.wallet.update({
         where: { userId },
-        _sum: { points: true },
+        data: { balance: { increment: amount } },
       });
 
       this.logger.log(`[AdminPoints] ${amount >= 0 ? '+' : ''}${amount} pts → user ${userId} par admin ${adminId} : ${reason}`);
-      return { balance: agg._sum.points ?? 0 };
+      return { balance: Number(newWallet.balance) };
     });
+  }
+
+  // ── D5 : Alertes fraude solde ─────────────────────────────────────────────
+
+  async getFraudAlerts(minFailures: number = 3) {
+    // Récupère les utilisateurs ayant eu des échecs de solde répétés via Redis SCAN (non-bloquant)
+    const keys = await this.redis.scan('fraud:balance_fail:*');
+
+    const alerts: { userId: string; name: string | null; email: string | null; failures: number; walletBalance: number }[] = [];
+
+    for (const key of keys) {
+      const raw = await this.redis.get(key);
+      const count = raw ? parseInt(raw, 10) : 0;
+      if (count < minFailures) continue;
+
+      const userId = key.replace('fraud:balance_fail:', '');
+      const [user, wallet] = await Promise.all([
+        this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true } }),
+        this.prisma.wallet.findUnique({ where: { userId } }),
+      ]);
+
+      alerts.push({
+        userId,
+        name: user?.name ?? null,
+        email: user?.email ?? null,
+        failures: count,
+        walletBalance: wallet ? Number(wallet.balance) : 0,
+      });
+    }
+
+    return alerts.sort((a, b) => b.failures - a.failures);
+  }
+
+  async resetFraudCounter(userId: string) {
+    await this.redis.del(`fraud:balance_fail:${userId}`);
+    return { success: true };
+  }
+
+  // ── Export XLSX ───────────────────────────────────────────────────────────
+
+  async getBookingsXlsx(): Promise<Buffer> {
+    const rows = await this.prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, status: true, type: true,
+        destination: true, pickupAddress: true,
+        estimatedPrice: true, discountAmount: true,
+        paymentMethod: true, createdAt: true, completedAt: true,
+        passenger: { select: { name: true, phone: true } },
+        driverProfile: { select: { user: { select: { name: true, phone: true } } } },
+      },
+    });
+
+    const headers = [
+      { header: 'ID', key: 'id', width: 38 },
+      { header: 'Statut', key: 'status', width: 16 },
+      { header: 'Type', key: 'type', width: 14 },
+      { header: 'Passager', key: 'passengerName', width: 22 },
+      { header: 'Tél. passager', key: 'passengerPhone', width: 18 },
+      { header: 'Chauffeur', key: 'driverName', width: 22 },
+      { header: 'Tél. chauffeur', key: 'driverPhone', width: 18 },
+      { header: 'Départ', key: 'pickup', width: 30 },
+      { header: 'Destination', key: 'destination', width: 30 },
+      { header: 'Prix (FCFA)', key: 'price', width: 14 },
+      { header: 'Remise', key: 'discount', width: 12 },
+      { header: 'Paiement', key: 'payment', width: 14 },
+      { header: 'Créé le', key: 'createdAt', width: 20 },
+      { header: 'Terminé le', key: 'completedAt', width: 20 },
+    ];
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      status: r.status,
+      type: r.type,
+      passengerName: r.passenger?.name ?? '',
+      passengerPhone: r.passenger?.phone ?? '',
+      driverName: r.driverProfile?.user?.name ?? '',
+      driverPhone: r.driverProfile?.user?.phone ?? '',
+      pickup: r.pickupAddress ?? '',
+      destination: r.destination ?? '',
+      price: r.estimatedPrice ?? 0,
+      discount: r.discountAmount ?? 0,
+      payment: r.paymentMethod ?? '',
+      createdAt: r.createdAt ? new Date(r.createdAt).toLocaleString('fr-FR') : '',
+      completedAt: r.completedAt ? new Date(r.completedAt).toLocaleString('fr-FR') : '',
+    }));
+
+    return this.exportService.buildXlsx('Réservations', headers, data);
+  }
+
+  async getUsersXlsx(): Promise<Buffer> {
+    const rows = await this.prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, name: true, phone: true, email: true,
+        role: true, status: true, loyaltyTier: true,
+        createdAt: true,
+        wallet: { select: { balance: true } },
+        _count: { select: { bookings: true } },
+      },
+    });
+
+    const headers = [
+      { header: 'ID', key: 'id', width: 38 },
+      { header: 'Nom', key: 'name', width: 24 },
+      { header: 'Téléphone', key: 'phone', width: 18 },
+      { header: 'Email', key: 'email', width: 28 },
+      { header: 'Rôle', key: 'role', width: 12 },
+      { header: 'Statut', key: 'status', width: 14 },
+      { header: 'Niveau fidélité', key: 'tier', width: 16 },
+      { header: 'Solde points', key: 'balance', width: 14 },
+      { header: 'Nb courses', key: 'rides', width: 12 },
+      { header: 'Inscrit le', key: 'createdAt', width: 20 },
+    ];
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      name: r.name ?? '',
+      phone: r.phone,
+      email: r.email ?? '',
+      role: r.role,
+      status: r.status,
+      tier: r.loyaltyTier ?? 'bronze',
+      balance: r.wallet?.balance ?? 0,
+      rides: r._count.bookings,
+      createdAt: r.createdAt ? new Date(r.createdAt).toLocaleString('fr-FR') : '',
+    }));
+
+    return this.exportService.buildXlsx('Utilisateurs', headers, data);
+  }
+
+  async getWithdrawalsXlsx(): Promise<Buffer> {
+    const rows = await this.prisma.withdrawalRequest.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10000,
+      select: {
+        id: true, amount: true, currency: true, method: true,
+        mobileNumber: true, status: true, adminNote: true,
+        createdAt: true, processedAt: true,
+        user: { select: { name: true, phone: true } },
+      },
+    });
+
+    const headers = [
+      { header: 'ID', key: 'id', width: 38 },
+      { header: 'Chauffeur', key: 'name', width: 24 },
+      { header: 'Tél. chauffeur', key: 'phone', width: 18 },
+      { header: 'Montant', key: 'amount', width: 14 },
+      { header: 'Devise', key: 'currency', width: 10 },
+      { header: 'Méthode', key: 'method', width: 16 },
+      { header: 'Numéro Mobile Money', key: 'mobileNumber', width: 22 },
+      { header: 'Statut', key: 'status', width: 14 },
+      { header: 'Note admin', key: 'adminNote', width: 30 },
+      { header: 'Demandé le', key: 'createdAt', width: 20 },
+      { header: 'Traité le', key: 'processedAt', width: 20 },
+    ];
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      name: r.user?.name ?? '',
+      phone: r.user?.phone ?? '',
+      amount: r.amount,
+      currency: r.currency,
+      method: r.method,
+      mobileNumber: r.mobileNumber,
+      status: r.status,
+      adminNote: r.adminNote ?? '',
+      createdAt: r.createdAt ? new Date(r.createdAt).toLocaleString('fr-FR') : '',
+      processedAt: r.processedAt ? new Date(r.processedAt).toLocaleString('fr-FR') : '',
+    }));
+
+    return this.exportService.buildXlsx('Retraits', headers, data);
+  }
+
+  // ── Export PDF ────────────────────────────────────────────────────────────
+
+  async getBookingsPdf(): Promise<Buffer> {
+    const rows = await this.prisma.booking.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 2000,
+      select: {
+        id: true, status: true, type: true,
+        destination: true, estimatedPrice: true,
+        paymentMethod: true, createdAt: true,
+        passenger: { select: { name: true } },
+        driverProfile: { select: { user: { select: { name: true } } } },
+      },
+    });
+
+    const headers = ['Réf.', 'Statut', 'Type', 'Passager', 'Destination', 'Prix FCFA', 'Paiement', 'Chauffeur', 'Date'];
+    const data = rows.map((r) => [
+      r.id.slice(0, 8),
+      r.status,
+      r.type,
+      r.passenger?.name ?? '—',
+      r.destination ?? '—',
+      r.estimatedPrice ?? 0,
+      r.paymentMethod ?? '—',
+      r.driverProfile?.user?.name ?? '—',
+      r.createdAt ? new Date(r.createdAt).toLocaleDateString('fr-FR') : '—',
+    ]);
+
+    return this.exportService.buildPdf(
+      'Export Réservations',
+      `${rows.length} résultats · exporté le ${new Date().toLocaleString('fr-FR')}`,
+      headers,
+      data,
+    );
+  }
+
+  async getUsersPdf(): Promise<Buffer> {
+    const rows = await this.prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 2000,
+      select: {
+        id: true, name: true, phone: true, role: true,
+        status: true, loyaltyTier: true, createdAt: true,
+        _count: { select: { bookings: true } },
+      },
+    });
+
+    const headers = ['Réf.', 'Nom', 'Téléphone', 'Rôle', 'Statut', 'Niveau', 'Courses', 'Inscrit le'];
+    const data = rows.map((r) => [
+      r.id.slice(0, 8),
+      r.name ?? '—',
+      r.phone,
+      r.role,
+      r.status,
+      r.loyaltyTier ?? 'bronze',
+      r._count.bookings,
+      r.createdAt ? new Date(r.createdAt).toLocaleDateString('fr-FR') : '—',
+    ]);
+
+    return this.exportService.buildPdf(
+      'Export Utilisateurs',
+      `${rows.length} résultats · exporté le ${new Date().toLocaleString('fr-FR')}`,
+      headers,
+      data,
+    );
   }
 }

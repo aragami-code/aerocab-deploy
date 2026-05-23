@@ -1,0 +1,211 @@
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.UsersService = void 0;
+const common_1 = require("@nestjs/common");
+const prisma_service_1 = require("../database/prisma.service");
+const settings_service_1 = require("../settings/settings.service");
+const notifications_service_1 = require("../notifications/notifications.service");
+const trust_score_service_1 = require("./trust-score.service");
+const TIER_THRESHOLDS = { bronze: 0, silver: 500, gold: 2000, platinum: 5000 };
+const TIER_META = {
+    bronze: { label: 'Bronze', color: '#CD7F32', emoji: '🥉', nextTier: 'silver' },
+    silver: { label: 'Argent', color: '#A8A9AD', emoji: '🥈', nextTier: 'gold' },
+    gold: { label: 'Or', color: '#FFD700', emoji: '🥇', nextTier: 'platinum' },
+    platinum: { label: 'Platine', color: '#E5E4E2', emoji: '💎', nextTier: null },
+};
+let UsersService = class UsersService {
+    constructor(prisma, settings, notifications, trustScoreService) {
+        this.prisma = prisma;
+        this.settings = settings;
+        this.notifications = notifications;
+        this.trustScoreService = trustScoreService;
+    }
+    async updateTrustScore(userId) {
+        return this.trustScoreService.updateScore(userId);
+    }
+    async getProfile(userId) {
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: {
+                id: true,
+                phone: true,
+                name: true,
+                email: true,
+                role: true,
+                status: true,
+                avatarUrl: true,
+                language: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+        });
+        if (!user) {
+            throw new common_1.NotFoundException('Utilisateur introuvable');
+        }
+        return user;
+    }
+    async updateProfile(userId, dto) {
+        const user = await this.prisma.user.update({
+            where: { id: userId },
+            data: Object.assign(Object.assign(Object.assign({}, (dto.name !== undefined && { name: dto.name })), (dto.email !== undefined && { email: dto.email })), (dto.language !== undefined && { language: dto.language })),
+            select: {
+                id: true,
+                phone: true,
+                name: true,
+                email: true,
+                role: true,
+                avatarUrl: true,
+                language: true,
+                updatedAt: true,
+            },
+        });
+        return user;
+    }
+    async deleteAccount(userId) {
+        const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, status: true } });
+        if (!user)
+            throw new common_1.NotFoundException('Utilisateur introuvable');
+        if (user.status === 'deleted')
+            throw new common_1.BadRequestException('Compte déjà supprimé');
+        const anon = `deleted_${userId.replace(/-/g, '').slice(0, 10)}`;
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: {
+                name: anon,
+                phone: `+00000${userId.replace(/-/g, '').slice(0, 9)}`,
+                email: `${anon}@deleted.invalid`,
+                avatarUrl: null,
+                referralCode: null,
+                status: 'deleted',
+            },
+        });
+        return { success: true };
+    }
+    async updateAvatar(userId, avatarUrl) {
+        return this.prisma.user.update({
+            where: { id: userId },
+            data: { avatarUrl },
+            select: {
+                id: true,
+                avatarUrl: true,
+            },
+        });
+    }
+    // ── Fidélité ────────────────────────────────────────────────────────────────
+    async getLoyaltyStatus(userId) {
+        var _a;
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { loyaltyTier: true },
+        });
+        if (!user)
+            throw new common_1.NotFoundException('Utilisateur introuvable');
+        const [silverThraw, goldThraw, platThraw] = await Promise.all([
+            this.settings.get('loyalty_silver_threshold', '500'),
+            this.settings.get('loyalty_gold_threshold', '2000'),
+            this.settings.get('loyalty_platinum_threshold', '5000'),
+        ]);
+        const thresholds = {
+            bronze: 0,
+            silver: parseInt(silverThraw, 10),
+            gold: parseInt(goldThraw, 10),
+            platinum: parseInt(platThraw, 10),
+        };
+        const totalEarned = await this.prisma.pointsTransaction.aggregate({
+            where: { userId, type: 'credit' },
+            _sum: { points: true },
+        });
+        const earnedTotal = (_a = totalEarned._sum.points) !== null && _a !== void 0 ? _a : 0;
+        const currentTier = user.loyaltyTier;
+        const meta = TIER_META[currentTier];
+        const nextTier = meta.nextTier;
+        const nextThreshold = nextTier ? thresholds[nextTier] : null;
+        const currentThreshold = thresholds[currentTier];
+        const progressPct = nextThreshold
+            ? Math.min(100, Math.round(((earnedTotal - currentThreshold) / (nextThreshold - currentThreshold)) * 100))
+            : 100;
+        return {
+            tier: currentTier,
+            tierLabel: meta.label,
+            tierColor: meta.color,
+            tierEmoji: meta.emoji,
+            pointsTotal: earnedTotal,
+            currentThreshold,
+            nextTier,
+            nextThreshold,
+            progressPct,
+            benefits: this.getTierBenefits(currentTier),
+        };
+    }
+    async updateLoyaltyTier(userId) {
+        var _a;
+        const [silverThraw, goldThraw, platThraw] = await Promise.all([
+            this.settings.get('loyalty_silver_threshold', '500'),
+            this.settings.get('loyalty_gold_threshold', '2000'),
+            this.settings.get('loyalty_platinum_threshold', '5000'),
+        ]);
+        const thresholds = {
+            silver: parseInt(silverThraw, 10),
+            gold: parseInt(goldThraw, 10),
+            platinum: parseInt(platThraw, 10),
+        };
+        const totalEarned = await this.prisma.pointsTransaction.aggregate({
+            where: { userId, type: 'credit' },
+            _sum: { points: true },
+        });
+        const pts = (_a = totalEarned._sum.points) !== null && _a !== void 0 ? _a : 0;
+        const newTier = pts >= thresholds.platinum ? 'platinum' :
+            pts >= thresholds.gold ? 'gold' :
+                pts >= thresholds.silver ? 'silver' : 'bronze';
+        const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { loyaltyTier: true } });
+        if (user && user.loyaltyTier !== newTier) {
+            await this.prisma.user.update({
+                where: { id: userId },
+                data: { loyaltyTier: newTier },
+            });
+            // Notification de montée de niveau
+            const meta = TIER_META[newTier];
+            const tierLabels = { bronze: 'Bronze', silver: 'Argent', gold: 'Or', platinum: 'Platine' };
+            this.notifications.sendToUser(userId, `${meta.emoji} Niveau ${tierLabels[newTier]} atteint !`, `Félicitations ! Vous avez atteint le niveau ${tierLabels[newTier]}. Découvrez vos nouveaux avantages.`).catch(() => { });
+        }
+    }
+    /** Taux de cashback bonus selon le niveau (en %) */
+    getTierCashbackRate(tier) {
+        var _a;
+        const rates = { bronze: 0, silver: 5, gold: 10, platinum: 15 };
+        return (_a = rates[tier]) !== null && _a !== void 0 ? _a : 0;
+    }
+    /** Récupère le tier d'un passager — utilisé par BookingsService */
+    async getPassengerTier(userId) {
+        var _a;
+        const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { loyaltyTier: true } });
+        return ((_a = user === null || user === void 0 ? void 0 : user.loyaltyTier) !== null && _a !== void 0 ? _a : 'bronze');
+    }
+    getTierBenefits(tier) {
+        const all = {
+            bronze: ['Accès à toutes les réservations', 'Support standard'],
+            silver: ['5% de cashback bonus', 'Support prioritaire', 'File d\'attente réduite'],
+            gold: ['10% de cashback bonus', 'Support VIP', 'Annulation gratuite', 'Accès véhicules Or'],
+            platinum: ['15% de cashback bonus', 'Support 24h/24', 'Chauffeur attitré prioritaire', 'Accès toutes catégories'],
+        };
+        return all[tier];
+    }
+};
+exports.UsersService = UsersService;
+exports.UsersService = UsersService = __decorate([
+    (0, common_1.Injectable)(),
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService,
+        settings_service_1.SettingsService,
+        notifications_service_1.NotificationsService,
+        trust_score_service_1.TrustScoreService])
+], UsersService);
+//# sourceMappingURL=users.service.js.map

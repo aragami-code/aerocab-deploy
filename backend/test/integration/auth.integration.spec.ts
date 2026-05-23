@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import { getApp, closeApp } from './helpers/app';
 import { truncateAll, getPrisma } from './helpers/db';
@@ -19,10 +20,12 @@ import { createPassengerToken } from './helpers/auth';
 
 describe('Auth Integration (S001-S015)', () => {
   let app: INestApplication;
+  let prisma: PrismaClient;
   let redis: Redis;
 
   beforeAll(async () => {
     app = await getApp();
+    prisma = await getPrisma();
     // Connect to test Redis to allow flushing between tests
     redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6380');
   });
@@ -36,6 +39,9 @@ describe('Auth Integration (S001-S015)', () => {
     // Flush Redis to clear OTP rate-limit keys and session tokens from previous tests
     await redis.flushdb();
     await truncateAll();
+    // Re-seed test-mode settings (cleared by truncateAll)
+    await prisma.appSetting.upsert({ where: { key: 'test_mode_enabled' }, update: { value: 'true'   }, create: { key: 'test_mode_enabled', value: 'true'   } });
+    await prisma.appSetting.upsert({ where: { key: 'test_otp_value'    }, update: { value: '000000' }, create: { key: 'test_otp_value',    value: '000000' } });
   });
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

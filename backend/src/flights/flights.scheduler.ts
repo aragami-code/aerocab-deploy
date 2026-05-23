@@ -129,34 +129,84 @@ export class FlightsScheduler {
 
   private async handleCancelledFlight(flightNumber: string, userId: string) {
     try {
-      // Trouver les bookings actifs liés à ce vol
+      // Trouver les bookings actifs liés à ce vol (inclut in_progress — vol annulé en cours de route)
       const bookings = await this.prisma.booking.findMany({
         where: {
           passengerId: userId,
           flightNumber,
-          status: { in: ['pending', 'confirmed'] },
+          status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] },
         },
-        select: {
-          id: true,
-          passengerId: true,
+        include: {
           driverProfile: { select: { id: true, userId: true } },
         },
       });
 
-      for (const booking of bookings) {
-        // Annuler le booking
-        await this.prisma.booking.update({
-          where: { id: booking.id },
-          data: { status: 'cancelled' },
-        });
+      // Marquer le vol comme traité en DB (évite les appels FR24 redondants)
+      await this.prisma.flight.updateMany({
+        where: { flightNumber, userId, actualArrival: null },
+        data: { actualArrival: new Date('2000-01-01T00:00:00Z') },
+      });
 
-        // Libérer le chauffeur si assigné
-        if (booking.driverProfile) {
-          await this.prisma.driverProfile.update({
-            where: { id: booking.driverProfile.id },
-            data: { isAvailable: true },
-          }).catch(() => {});
-        }
+      for (const booking of bookings) {
+        const price = Number(booking.estimatedPrice) || 0;
+        const isPointsPayment = booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points';
+        const isDriverAtAirport = booking.status === 'arrived_at_airport';
+
+        // D1 — Annulation + remboursement atomique ($transaction)
+        await this.prisma.$transaction(async (tx) => {
+          // 1. Annuler le booking
+          await tx.booking.update({
+            where: { id: booking.id },
+            data: { status: 'cancelled', cancelledAt: new Date() },
+          });
+
+          // 2. Remboursement 100% passager (faute compagnie aérienne → pas de pénalité)
+          if (isPointsPayment && price > 0) {
+            await tx.pointsTransaction.create({
+              data: {
+                userId: booking.passengerId,
+                type: 'credit',
+                points: price,
+                label: `Remboursement 100% — vol ${flightNumber} annulé`,
+              },
+            });
+            // upsert : crée le wallet s'il n'existe pas encore (1er booking du passager)
+            await tx.wallet.upsert({
+              where: { userId: booking.passengerId },
+              update: { balance: { increment: price } },
+              create: { userId: booking.passengerId, balance: price },
+            });
+          }
+
+          // 3. Compensation chauffeur si déjà sur place (arrived_at_airport)
+          if (isDriverAtAirport && isPointsPayment && price > 0 && booking.driverProfile?.userId) {
+            const compensation = Math.ceil(price * 0.5);
+            await tx.pointsTransaction.create({
+              data: {
+                userId: booking.driverProfile.userId,
+                type: 'credit',
+                points: compensation,
+                label: `Compensation déplacement — vol ${flightNumber} annulé`,
+              },
+            });
+            let driverWallet = await tx.wallet.findUnique({ where: { userId: booking.driverProfile.userId } });
+            if (!driverWallet) {
+              driverWallet = await tx.wallet.create({ data: { userId: booking.driverProfile.userId, balance: 0 } });
+            }
+            await tx.wallet.update({
+              where: { userId: booking.driverProfile.userId },
+              data: { balance: { increment: compensation } },
+            });
+          }
+
+          // 4. Libérer le chauffeur
+          if (booking.driverProfile) {
+            await tx.driverProfile.update({
+              where: { id: booking.driverProfile.id },
+              data: { isAvailable: true },
+            });
+          }
+        });
 
         const cancelPayload = { id: booking.id, status: 'cancelled', reason: 'flight_cancelled' };
         const flightPayload = { bookingId: booking.id, flightNumber, status: 'cancelled' };
@@ -171,22 +221,27 @@ export class FlightsScheduler {
         this.notifications.sendToUser(
           booking.passengerId,
           'Vol annulé ❌',
-          `Votre vol ${flightNumber} a été annulé. Votre réservation a été annulée automatiquement.`,
+          `Votre vol ${flightNumber} a été annulé. Votre réservation a été annulée et vos ${price} pts remboursés intégralement.`,
         ).catch(() => {});
 
         // Notifier le chauffeur via WebSocket + push
         if (booking.driverProfile) {
+          const driverMsg = isDriverAtAirport
+            ? `Le vol ${flightNumber} de votre client a été annulé. Une compensation de ${Math.ceil(price * 0.5)} pts vous a été créditée.`
+            : `Le vol ${flightNumber} de votre client a été annulé. La réservation a été annulée.`;
           this.ridesGateway.server
             .to(`driver:${booking.driverProfile.id}`)
             .emit('booking_status_changed', cancelPayload);
           this.notifications.sendToUser(
             booking.driverProfile.userId,
             'Course annulée — vol annulé ❌',
-            `Le vol ${flightNumber} de votre client a été annulé. La réservation a été annulée.`,
+            driverMsg,
           ).catch(() => {});
         }
 
-        this.logger.log(`[FlightsScheduler] Booking ${booking.id} cancelled due to flight ${flightNumber} cancellation.`);
+        this.logger.log(
+          `[FlightsScheduler] Booking ${booking.id} cancelled — flight ${flightNumber} cancelled. Refund: ${price} pts. Driver at airport: ${isDriverAtAirport}`,
+        );
       }
     } catch (err) {
       this.logger.error(`[FlightsScheduler] handleCancelledFlight error: ${err.message}`);
@@ -204,6 +259,7 @@ export class FlightsScheduler {
         select: {
           id: true,
           passengerId: true,
+          departureAirport: true,
           driverProfile: { select: { id: true, userId: true } },
         },
       });
@@ -215,6 +271,36 @@ export class FlightsScheduler {
       if (!threshold) return;
 
       const timeStr = estimatedArrival.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+
+      // P2 — Recalculer driverEtaMinutes du booking selon la nouvelle heure d'arrivée
+      //   ETA = minutesUntilLanding + airport.exitDelayMinutes (fallback setting)
+      let newDriverEtaMinutes: number | null = null;
+      try {
+        const minutesUntilLanding = Math.max(
+          0,
+          Math.floor((estimatedArrival.getTime() - Date.now()) / 60000),
+        );
+        if (minutesUntilLanding > 0) {
+          let exitDelay: number | null = null;
+          if (booking.departureAirport && booking.departureAirport.toUpperCase() !== 'INTERNATIONAL') {
+            const a = await this.prisma.airport.findUnique({
+              where: { iataCode: booking.departureAirport.toUpperCase() },
+              select: { exitDelayMinutes: true },
+            }).catch(() => null);
+            exitDelay = a?.exitDelayMinutes ?? null;
+          }
+          const fallbackRaw = await this.settingsService.get('default_airport_exit_delay_min', '15');
+          const exit = exitDelay ?? (parseInt(fallbackRaw, 10) || 15);
+          newDriverEtaMinutes = minutesUntilLanding + exit;
+          await this.prisma.booking.update({
+            where: { id: booking.id },
+            data: { driverEtaMinutes: newDriverEtaMinutes },
+          });
+        }
+      } catch (e: any) {
+        this.logger.warn(`[FlightsScheduler] driverEtaMinutes update failed for ${booking.id}: ${e?.message}`);
+      }
+
       const flightPayload = {
         bookingId: booking.id,
         flightNumber,
@@ -222,6 +308,7 @@ export class FlightsScheduler {
         status: 'delayed',
         delayMinutes: delayMin,
         estimatedArrival: estimatedArrival.toISOString(),
+        driverEtaMinutes: newDriverEtaMinutes,
       };
 
       // Notifier le passager
@@ -249,4 +336,5 @@ export class FlightsScheduler {
       this.logger.error(`[FlightsScheduler] notifyFlightDelayed error: ${err.message}`);
     }
   }
+
 }

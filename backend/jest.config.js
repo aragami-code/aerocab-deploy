@@ -10,7 +10,11 @@ module.exports = {
       tsconfig: './tsconfig.test.json',
     },
   },
+  roots: ['<rootDir>/src'],
   testMatch: ['**/*.spec.ts'],
   testPathIgnorePatterns: ['/node_modules/', '/test/integration/'],
+  haste: {
+    modulePathIgnorePatterns: ['/home/aragami/\\.bun/'],
+  },
   collectCoverageFrom: ['src/**/*.ts', '!src/**/*.spec.ts', '!src/main.ts'],
 };

@@ -4,7 +4,10 @@ import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RedisService } from '../redis/redis.service';
-import { makeBooking } from '../../test/factories';
+import { NotchPayService } from '../payments/notchpay.service';
+import { FlutterwaveService } from '../payments/flutterwave.service';
+import { ExportService } from './export.service';
+import { makeBooking, makeWallet, makeWithdrawalRequest } from '../../test/factories';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -14,7 +17,7 @@ const mockPrisma = {
   driverDocument:     { findUnique: jest.fn(), update: jest.fn() },
   user:               { count: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   report:             { findMany: jest.fn(), count: jest.fn() },
-  withdrawalRequest:  { findMany: jest.fn(), count: jest.fn(), aggregate: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+  withdrawalRequest:  { findMany: jest.fn(), count: jest.fn(), aggregate: jest.fn(), findUnique: jest.fn(), update: jest.fn().mockResolvedValue({}) },
   pointsTransaction:  { aggregate: jest.fn() },
   conversation:       { findFirst: jest.fn() },
   rating:             { findMany: jest.fn() },
@@ -37,11 +40,26 @@ const mockSettings = {
   deleteTariffsByCountry: jest.fn(),
 };
 
-const mockNotifications = { sendToUser: jest.fn().mockResolvedValue(undefined) };
+const mockNotchPay = {
+  isConfigured: jest.fn().mockResolvedValue(false),
+  transfer:     jest.fn().mockResolvedValue({ id: 'np-001', status: 'pending' }),
+};
+const mockFlutterwave = {
+  isConfigured: jest.fn().mockResolvedValue(false),
+  transfer:     jest.fn().mockResolvedValue({ id: 'flw-001', status: 'NEW' }),
+};
+const mockNotifications = {
+  sendToUser:   jest.fn().mockResolvedValue(undefined),
+  sendToAdmins: jest.fn().mockResolvedValue(undefined),
+};
 const mockRedis = {
   scan: jest.fn().mockResolvedValue([]),
   get:  jest.fn(),
   del:  jest.fn(),
+};
+const mockExport = {
+  buildXlsx: jest.fn().mockResolvedValue(Buffer.from('')),
+  buildPdf:  jest.fn().mockResolvedValue(Buffer.from('')),
 };
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
@@ -59,6 +77,9 @@ describe('AdminService', () => {
         { provide: SettingsService,      useValue: mockSettings      },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: RedisService,         useValue: mockRedis         },
+        { provide: NotchPayService,      useValue: mockNotchPay      },
+        { provide: FlutterwaveService,   useValue: mockFlutterwave   },
+        { provide: ExportService,        useValue: mockExport        },
       ],
     }).compile();
 
@@ -148,6 +169,155 @@ describe('AdminService', () => {
             completedAt: expect.objectContaining({ gte: expect.any(Date), lte: expect.any(Date) }),
           }),
         }),
+      );
+    });
+  });
+
+  // ── processWithdrawal — disbursement ──────────────────────────────────────────
+
+  describe('processWithdrawal() — disbursement automatique', () => {
+    const adminId = 'admin-1';
+
+    function setupWithdrawal(overrides: Record<string, any> = {}) {
+      const wallet     = makeWallet({ userId: 'u-1', balance: 20000 });
+      const withdrawal = makeWithdrawalRequest({
+        id:           'wd-1',
+        userId:       'u-1',
+        status:       'approved',
+        amount:       5000,
+        currency:     'XAF',
+        method:       'mtn_momo',
+        mobileNumber: '+237691234567',
+        ...overrides,
+      });
+
+      mockPrisma.withdrawalRequest.findUnique.mockResolvedValue(withdrawal);
+
+      // $transaction : débite wallet + met à jour le statut
+      mockPrisma.$transaction.mockImplementation((fn: any) =>
+        fn({
+          wallet:            { findUnique: jest.fn().mockResolvedValue(wallet), update: jest.fn().mockResolvedValue(wallet) },
+          transaction:       { create: jest.fn() },
+          withdrawalRequest: { update: jest.fn().mockResolvedValue({ ...withdrawal, status: 'paid', user: { id: 'u-1', name: 'Jean Dupont', phone: '+237691234567' } }) },
+        }),
+      );
+
+      return { wallet, withdrawal };
+    }
+
+    it('ne déclenche aucun disbursement si les deux providers sont non configurés', async () => {
+      setupWithdrawal();
+      mockNotchPay.isConfigured.mockResolvedValue(false);
+      mockFlutterwave.isConfigured.mockResolvedValue(false);
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+
+      expect(mockNotchPay.transfer).not.toHaveBeenCalled();
+      expect(mockFlutterwave.transfer).not.toHaveBeenCalled();
+    });
+
+    it('utilise NotchPay si configuré (priorité)', async () => {
+      setupWithdrawal({ method: 'mtn_momo' });
+      mockNotchPay.isConfigured.mockResolvedValue(true);
+      mockFlutterwave.isConfigured.mockResolvedValue(true);
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+
+      // Laisse le temps à la promesse fire-and-forget de s'exécuter
+      await Promise.resolve();
+
+      expect(mockNotchPay.transfer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reference: 'DISBURSE-NP-wd-1',
+          amount:    5000,
+          currency:  'XAF',
+          channel:   'cm.mtn',
+        }),
+      );
+      expect(mockFlutterwave.transfer).not.toHaveBeenCalled();
+    });
+
+    it('utilise Flutterwave en fallback si NotchPay non configuré', async () => {
+      setupWithdrawal({ method: 'orange_money' });
+      mockNotchPay.isConfigured.mockResolvedValue(false);
+      mockFlutterwave.isConfigured.mockResolvedValue(true);
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+
+      await Promise.resolve();
+
+      expect(mockNotchPay.transfer).not.toHaveBeenCalled();
+      expect(mockFlutterwave.transfer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reference:        'DISBURSE-FLW-wd-1',
+          amount:           5000,
+          currency:         'XAF',
+          bankCode:         'ORANGE_CM',
+          beneficiaryPhone: '+237691234567',
+        }),
+      );
+    });
+
+    it('n\'appelle pas de disbursement si status=approved (pas encore paid)', async () => {
+      const withdrawal = makeWithdrawalRequest({ id: 'wd-2', status: 'pending' });
+      mockPrisma.withdrawalRequest.findUnique.mockResolvedValue(withdrawal);
+      mockPrisma.$transaction.mockImplementation((fn: any) =>
+        fn({
+          wallet:            { findUnique: jest.fn().mockResolvedValue(makeWallet({ balance: 20000 })), update: jest.fn() },
+          transaction:       { create: jest.fn() },
+          withdrawalRequest: { update: jest.fn().mockResolvedValue({ ...withdrawal, status: 'approved' }) },
+        }),
+      );
+
+      await service.processWithdrawal('wd-2', 'approved', adminId);
+
+      expect(mockNotchPay.transfer).not.toHaveBeenCalled();
+      expect(mockFlutterwave.transfer).not.toHaveBeenCalled();
+    });
+
+    it('n\'appelle pas Flutterwave si la méthode n\'est pas mappée', async () => {
+      setupWithdrawal({ method: 'bank_transfer' }); // méthode sans mapping Flutterwave
+      mockNotchPay.isConfigured.mockResolvedValue(false);
+      mockFlutterwave.isConfigured.mockResolvedValue(true);
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+
+      await Promise.resolve();
+
+      expect(mockFlutterwave.transfer).not.toHaveBeenCalled();
+    });
+
+    it('met disbursementStatus=sent et ne notifie pas en cas de succès', async () => {
+      setupWithdrawal({ method: 'mtn_momo' });
+      mockNotchPay.isConfigured.mockResolvedValue(true);
+      mockFlutterwave.isConfigured.mockResolvedValue(false);
+      mockNotchPay.transfer.mockResolvedValue({ id: 'np-ok', status: 'pending' });
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+      await Promise.resolve();
+
+      expect(mockPrisma.withdrawalRequest.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { disbursementStatus: 'sent' } }),
+      );
+      expect(mockNotifications.sendToAdmins).not.toHaveBeenCalled();
+    });
+
+    it('met disbursementStatus=failed et notifie les admins en cas d\'échec Flutterwave', async () => {
+      setupWithdrawal({ method: 'orange_money' });
+      mockNotchPay.isConfigured.mockResolvedValue(false);
+      mockFlutterwave.isConfigured.mockResolvedValue(true);
+      mockFlutterwave.transfer.mockRejectedValue(new Error('Insufficient balance'));
+
+      await service.processWithdrawal('wd-1', 'paid', adminId);
+      await Promise.resolve();
+
+      expect(mockPrisma.withdrawalRequest.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { disbursementStatus: 'failed' } }),
+      );
+      expect(mockNotifications.sendToAdmins).toHaveBeenCalledWith(
+        'Échec disbursement',
+        expect.stringContaining('wd-1'),
+        expect.objectContaining({ withdrawalId: 'wd-1', provider: 'Flutterwave' }),
       );
     });
   });

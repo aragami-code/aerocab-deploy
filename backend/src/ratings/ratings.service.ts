@@ -1,18 +1,57 @@
-import { Injectable, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { AuditService } from '../audit/audit.service';
+import { TrustScoreService } from '../users/trust-score.service';
 
 @Injectable()
 export class RatingsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(RatingsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private audit: AuditService,
+    private trustScore: TrustScoreService,
+  ) {}
 
   async createRating(
     fromUserId: string,
-    data: { toUserId: string; conversationId: string; score: number; comment?: string },
+    data: { toUserId: string; conversationId?: string; bookingId?: string; score: number; comment?: string },
   ) {
+    let conversationId = data.conversationId;
+
+    // If no conversationId provided, resolve via bookingId
+    if (!conversationId && data.bookingId) {
+      const booking = await this.prisma.booking.findFirst({
+        where: {
+          id: data.bookingId,
+          OR: [{ passengerId: fromUserId }, { driverProfile: { userId: fromUserId } }],
+        },
+        include: { driverProfile: { select: { userId: true } } },
+      });
+      if (!booking) throw new BadRequestException('Réservation introuvable');
+
+      const passengerId = booking.passengerId;
+      const driverId = booking.driverProfile?.userId;
+      if (!driverId) throw new BadRequestException('Chauffeur introuvable pour cette réservation');
+
+      // Find or create conversation between the two parties
+      let conv = await this.prisma.conversation.findFirst({
+        where: { passengerId, driverId },
+      });
+      if (!conv) {
+        conv = await this.prisma.conversation.create({
+          data: { passengerId, driverId },
+        });
+      }
+      conversationId = conv.id;
+    }
+
+    if (!conversationId) throw new BadRequestException('conversationId ou bookingId requis');
+
     // Check conversation exists and user is part of it
     const conversation = await this.prisma.conversation.findFirst({
       where: {
-        id: data.conversationId,
+        id: conversationId,
         OR: [{ passengerId: fromUserId }, { driverId: fromUserId }],
       },
     });
@@ -28,25 +67,30 @@ export class RatingsService {
       throw new BadRequestException('Utilisateur cible invalide');
     }
 
-    // Check if already rated
-    const existing = await this.prisma.rating.findUnique({
-      where: {
-        fromUserId_conversationId: {
-          fromUserId,
-          conversationId: data.conversationId,
-        },
-      },
-    });
-
-    if (existing) {
-      throw new ConflictException('Vous avez deja evalue cette conversation');
+    // F5.5 — Check : un rating par booking (au lieu d'un seul par conversation).
+    // Si pas de bookingId, on retombe sur le check par conversation (rétro-compat).
+    if (data.bookingId) {
+      const existingByBooking = await this.prisma.rating.findUnique({
+        where: { fromUserId_bookingId: { fromUserId, bookingId: data.bookingId } },
+      });
+      if (existingByBooking) {
+        throw new ConflictException('Vous avez déjà évalué cette course');
+      }
+    } else {
+      const existingByConv = await this.prisma.rating.findFirst({
+        where: { fromUserId, conversationId, bookingId: null },
+      });
+      if (existingByConv) {
+        throw new ConflictException('Vous avez déjà évalué cette conversation');
+      }
     }
 
     const rating = await this.prisma.rating.create({
       data: {
         fromUserId,
         toUserId: data.toUserId,
-        conversationId: data.conversationId,
+        conversationId,
+        bookingId: data.bookingId ?? null,
         score: data.score,
         comment: data.comment,
       },
@@ -55,8 +99,13 @@ export class RatingsService {
       },
     });
 
-    // Update driver's average rating if rated user is a driver
-    await this.updateDriverRatingAvg(data.toUserId);
+    // Mettre à jour la moyenne : chauffeur si noté par passager, passager si noté par chauffeur
+    if (isPassenger) {
+      await this.updateDriverRatingAvg(data.toUserId);
+    } else {
+      await this.updatePassengerRatingAvg(data.toUserId);
+      this.trustScore.updateScore(data.toUserId).catch(() => {});
+    }
 
     // Reward points to the rater (100 pts pour avoir noté)
     try {
@@ -70,6 +119,21 @@ export class RatingsService {
       });
     } catch (e) {
       // Silent fail pour ne pas bloquer la notation
+    }
+
+    // WAL·030 — Bonus passager si note ≥ 4★ donnée au chauffeur
+    if (isPassenger && data.score >= 4) {
+      try {
+        const setting = await this.prisma.appSetting.findUnique({ where: { key: 'rating_bonus_points' } });
+        const bonus = setting ? (parseInt(setting.value, 10) || 200) : 200;
+        if (bonus > 0) {
+          await this.prisma.pointsTransaction.create({
+            data: { userId: fromUserId, type: 'credit', points: bonus, label: `Bonus notation ≥4★` },
+          });
+        }
+      } catch (e) {
+        // Silent fail
+      }
     }
 
     return rating;
@@ -146,12 +210,30 @@ export class RatingsService {
   }
 
   async hasRated(fromUserId: string, conversationId: string): Promise<boolean> {
-    const rating = await this.prisma.rating.findUnique({
-      where: {
-        fromUserId_conversationId: { fromUserId, conversationId },
-      },
+    const rating = await this.prisma.rating.findFirst({
+      where: { fromUserId, conversationId },
     });
     return !!rating;
+  }
+
+  private async updatePassengerRatingAvg(userId: string) {
+    const avg = await this.prisma.rating.aggregate({
+      where: { toUserId: userId },
+      _avg: { score: true },
+      _count: { score: true },
+    });
+    const ratingAvg = avg._avg.score || 0;
+    const ratingCount = avg._count.score;
+    // Flag passager si note < 3 après au moins 5 trajets
+    if (ratingCount >= 5 && ratingAvg < 3) {
+      this.logger.warn(`[Rating] Passager ${userId} mal noté : ${ratingAvg.toFixed(2)}/5 sur ${ratingCount} trajets`);
+      await this.audit.log({
+        action: 'passenger.low_rating_flag',
+        entity: 'user',
+        entityId: userId,
+        meta: { ratingAvg, ratingCount, threshold: 3, minRides: 5 },
+      }).catch(() => {});
+    }
   }
 
   private async updateDriverRatingAvg(userId: string) {
@@ -161,12 +243,23 @@ export class RatingsService {
       _count: { score: true },
     });
 
+    const ratingAvg = avg._avg.score || 0;
+    const ratingCount = avg._count.score;
+
     await this.prisma.driverProfile.updateMany({
       where: { userId },
-      data: {
-        ratingAvg: avg._avg.score || 0,
-        ratingCount: avg._count.score,
-      },
+      data: { ratingAvg, ratingCount },
     });
+
+    // S242 — Flag admin si note < 3.5 après au moins 30 trajets
+    if (ratingCount >= 30 && ratingAvg < 3.5) {
+      this.logger.warn(`[Rating] Chauffeur ${userId} flaggé : ${ratingAvg.toFixed(2)}/5 sur ${ratingCount} trajets`);
+      await this.audit.log({
+        action: 'driver.low_rating_flag',
+        entity: 'driverProfile',
+        entityId: userId,
+        meta: { ratingAvg, ratingCount, threshold: 3.5, minRides: 30 },
+      }).catch(() => {});
+    }
   }
 }

@@ -8,6 +8,9 @@ import { PointsService } from '../points/points.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../redis/redis.service';
 import { FlutterwaveService } from '../payments/flutterwave.service';
+import { DispatchService } from './dispatch.service';
+import { PayoutService } from '../payments/payout.service';
+import { ReceiptService } from '../payments/receipt.service';
 
 @Injectable()
 export class BookingsScheduler {
@@ -22,7 +25,153 @@ export class BookingsScheduler {
     private audit: AuditService,
     private redis: RedisService,
     private flutterwave: FlutterwaveService,
+    private dispatch: DispatchService,
+    private payout: PayoutService,
+    private receiptSvc: ReceiptService,
   ) {}
+
+  /**
+   * F5.3 — Toutes les minutes : retry les reçus de course qui ont échoué.
+   * Settings : `receipt_max_attempts` (défaut 5), `receipt_backoff_minutes` (défaut 2).
+   * Backoff exponentiel simple : skip si updatedAt < now - attempts * backoff_min.
+   */
+  @Cron('* * * * *')
+  async processReceiptJobs() {
+    const maxRaw = await this.settingsService.get('receipt_max_attempts', '5');
+    const backoffRaw = await this.settingsService.get('receipt_backoff_minutes', '2');
+    const maxAttempts = parseInt(maxRaw, 10) || 5;
+    const backoffMin = parseInt(backoffRaw, 10) || 2;
+
+    const jobs = await this.prisma.receiptJob.findMany({
+      where: { status: 'pending', attempts: { lt: maxAttempts } },
+      take: 10,
+      orderBy: { updatedAt: 'asc' },
+    });
+
+    for (const job of jobs) {
+      // Backoff : on ne retry qu'après attempts * backoffMin minutes
+      const elapsedMin = (Date.now() - job.updatedAt.getTime()) / 60000;
+      if (elapsedMin < job.attempts * backoffMin) continue;
+
+      try {
+        await this.receiptSvc.sendRideReceipt(job.bookingId);
+        await this.prisma.receiptJob.update({
+          where: { id: job.id },
+          data: { status: 'sent', updatedAt: new Date() },
+        });
+        this.logger.log(`[Receipt] retry ok booking=${job.bookingId} attempts=${job.attempts + 1}`);
+      } catch (err: any) {
+        const nextAttempts = job.attempts + 1;
+        const nextStatus = nextAttempts >= maxAttempts ? 'failed' : 'pending';
+        await this.prisma.receiptJob.update({
+          where: { id: job.id },
+          data: { attempts: nextAttempts, status: nextStatus, lastError: err?.message?.slice(0, 500), updatedAt: new Date() },
+        });
+        if (nextStatus === 'failed') {
+          this.logger.error(`[Receipt] max attempts reached booking=${job.bookingId} — escalation requise`);
+          this.audit.log({
+            action: 'receipt.escalation',
+            entity: 'booking',
+            entityId: job.bookingId,
+            meta: { attempts: nextAttempts, lastError: err?.message },
+          }).catch(() => {});
+        }
+      }
+    }
+  }
+
+  /**
+   * D3.4 — Toutes les 30 secondes : réassigne les bookings dont le driver
+   * assigné n'a ni accepté ni refusé après `accept_timeout_seconds` (défaut 60s).
+   * Évite que le passager attende indéfiniment un driver qui ne répond pas.
+   */
+  @Cron('*/30 * * * * *')
+  async reassignUnacceptedBookings() {
+    const raw = await this.settingsService.get('accept_timeout_seconds', '60');
+    const timeoutSec = parseInt(raw, 10) || 60;
+    const cutoff = new Date(Date.now() - timeoutSec * 1000);
+
+    // Bookings encore pending avec un driver assigné dont l'updatedAt est antérieur au cutoff
+    const stalled = await this.prisma.booking.findMany({
+      where: {
+        status: 'pending',
+        driverProfileId: { not: null },
+        updatedAt: { lt: cutoff },
+      },
+      select: {
+        id: true,
+        passengerId: true,
+        destination: true,
+        vehicleType: true,
+        departureAirport: true,
+        pickupLat: true,
+        pickupLng: true,
+        type: true,
+        flightNumber: true,
+        estimatedPrice: true,
+        driverProfileId: true,
+      },
+      take: 20,
+    });
+
+    if (stalled.length === 0) return;
+
+    this.logger.warn(`[D3.4] ${stalled.length} booking(s) sans réponse driver après ${timeoutSec}s — re-dispatch`);
+
+    for (const booking of stalled) {
+      try {
+        const previousDriverId = booking.driverProfileId!;
+        const coords = (booking.pickupLat && booking.pickupLng)
+          ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+          : undefined;
+        // Recherche d'un autre driver, en excluant celui qui n'a pas répondu
+        const nextDriver = await this.dispatch.findEligibleDrivers(
+          booking as any,
+          false,
+          coords,
+        ).then((list: any[]) => list.find((d) => d.id !== previousDriverId) ?? null);
+
+        if (nextDriver) {
+          await this.prisma.booking.update({
+            where: { id: booking.id },
+            data: { driverProfileId: nextDriver.id },
+          });
+          this.ridesGateway.server.to(`driver:${nextDriver.id}`).emit('booking:new_request', {
+            id: booking.id,
+            passengerId: booking.passengerId,
+            flightNumber: booking.flightNumber,
+            destination: booking.destination,
+            vehicleType: booking.vehicleType,
+            estimatedPrice: booking.estimatedPrice,
+            departureAirport: booking.departureAirport,
+          });
+          await this.notifications.sendToUser(
+            nextDriver.userId,
+            'Nouvelle course 🚗',
+            `Course vers ${booking.destination}`,
+          ).catch(() => {});
+          this.ridesGateway.server
+            .to(`passenger:${booking.passengerId}`)
+            .emit('booking_status_changed', { id: booking.id, status: 'pending' });
+        } else {
+          // Aucun autre driver → libère le booking (le cron 2-min finira de l'expirer)
+          await this.prisma.booking.update({
+            where: { id: booking.id },
+            data: { driverProfileId: null },
+          });
+        }
+
+        await this.audit.log({
+          action: 'booking.reassigned_on_timeout',
+          entity: 'booking',
+          entityId: booking.id,
+          meta: { previousDriverId, nextDriverId: nextDriver?.id ?? null, timeoutSec },
+        }).catch(() => {});
+      } catch (e: any) {
+        this.logger.error(`[D3.4] Re-dispatch ${booking.id} échoué: ${e.message}`);
+      }
+    }
+  }
 
   /**
    * Toutes les 2 minutes : expire les bookings en `pending` sans driver
@@ -409,105 +558,6 @@ export class BookingsScheduler {
   }
 
   /**
-   * C-D6 — Toutes les 30 minutes : auto-clôturer les consignes dont la date de fin prévue
-   * est dépassée (+ période de grâce configurable `consigne_autoclose_grace_hours`, défaut 4h).
-   * Facture les jours réels, crédite le chauffeur, notifie les deux parties.
-   */
-  @Cron('*/30 * * * *')
-  async autoCloseExpiredConsignes() {
-    const graceRaw = await this.settingsService.get('consigne_autoclose_grace_hours', '4');
-    const graceHours = parseInt(graceRaw, 10) || 4;
-    const now = new Date();
-
-    const activeConsignes = await this.prisma.booking.findMany({
-      where: { consigneStatus: 'active' },
-      select: {
-        id: true, passengerId: true, paymentMethod: true,
-        consigneStartedAt: true, consigneDays: true, consigneDailyRate: true,
-        driverProfile: { select: { id: true, userId: true } },
-      },
-    });
-
-    const expired = activeConsignes.filter((b) => {
-      if (!b.consigneStartedAt || !b.consigneDays) return false;
-      const expectedEnd = new Date(
-        b.consigneStartedAt.getTime() + (b.consigneDays + graceHours / 24) * 24 * 60 * 60 * 1000,
-      );
-      return now > expectedEnd;
-    });
-
-    if (expired.length === 0) return;
-    this.logger.warn(`[C-D6] ${expired.length} consigne(s) expirée(s) → auto-clôture`);
-
-    for (const booking of expired) {
-      try {
-        const startedAt = booking.consigneStartedAt!;
-        const hoursElapsed = (now.getTime() - startedAt.getTime()) / (1000 * 60 * 60);
-        const actualDays = Math.max(1, Math.ceil(hoursElapsed / 24));
-        const dailyRate = Number(booking.consigneDailyRate) || 0;
-        const finalTotal = actualDays * dailyRate;
-        const commissionRate = 0.15;
-        const driverEarnings = Math.floor(finalTotal * (1 - commissionRate));
-
-        await this.prisma.$transaction(async (tx) => {
-          const updated = await tx.booking.updateMany({
-            where: { id: booking.id, consigneStatus: 'active' },
-            data: { consigneStatus: 'completed', consigneEndedAt: now, consigneActualDays: actualDays, consigneFinalTotal: finalTotal },
-          });
-          if (updated.count === 0) return; // idempotence
-
-          if (finalTotal > 0 && booking.paymentMethod !== 'cash') {
-            await tx.wallet.upsert({
-              where: { userId: booking.passengerId },
-              update: { balance: { decrement: finalTotal } },
-              create: { userId: booking.passengerId, balance: -finalTotal },
-            });
-            await tx.pointsTransaction.create({
-              data: {
-                userId: booking.passengerId,
-                type: 'debit',
-                points: Math.ceil(finalTotal),
-                label: `Consigne auto-clôturée — ${actualDays}j × ${dailyRate.toLocaleString()} FCFA`,
-              },
-            });
-          }
-
-          if (driverEarnings > 0 && booking.paymentMethod !== 'cash' && booking.driverProfile) {
-            await tx.wallet.upsert({
-              where: { userId: booking.driverProfile.userId },
-              update: { balance: { increment: driverEarnings } },
-              create: { userId: booking.driverProfile.userId, balance: driverEarnings },
-            });
-          }
-        });
-
-        this.notifications.sendToUser(
-          booking.passengerId,
-          'Consigne clôturée automatiquement ⏰',
-          `Votre consigne de ${booking.consigneDays}j a expiré. ${finalTotal.toLocaleString()} FCFA débités pour ${actualDays} jour(s) réel(s).`,
-        ).catch(() => {});
-
-        if (booking.driverProfile) {
-          this.notifications.sendToUser(
-            booking.driverProfile.userId,
-            'Consigne clôturée automatiquement ⏰',
-            `La consigne du client a atteint sa date limite. ${driverEarnings.toLocaleString()} FCFA crédités. Le véhicule doit être restitué.`,
-          ).catch(() => {});
-        }
-
-        await this.audit.log({
-          action: 'consigne.auto_closed', entity: 'booking', entityId: booking.id,
-          meta: { actualDays, finalTotal, driverEarnings, graceHours },
-        }).catch(() => {});
-
-        this.logger.log(`[C-D6] Consigne ${booking.id} auto-clôturée — ${actualDays}j — ${finalTotal} FCFA`);
-      } catch (e: any) {
-        this.logger.error(`[C-D6] Auto-close échoué pour ${booking.id}: ${e.message}`);
-      }
-    }
-  }
-
-  /**
    * WAL·076-warn — 15 du mois à 9h : avertir les utilisateurs dont les points vont expirer
    * au prochain cycle (inactifs depuis >11 mois). Délai configurable via points_expiry_warning_days.
    */
@@ -682,30 +732,148 @@ export class BookingsScheduler {
     }
   }
 
-  @Cron('0 8 * * *')
-  async checkConsigneEndDates() {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+  /**
+   * Toutes les 5 minutes : dispatcher les réservations programmées dont la date
+   * d'exécution est dans moins de 60 minutes (dispatch_scheduled_advance_min configurable).
+   */
+  @Cron('*/5 * * * *')
+  async dispatchScheduledBookings() {
+    const advanceRaw = await this.settingsService.get('dispatch_scheduled_advance_min', '60');
+    const advanceMin = parseInt(advanceRaw, 10) || 60;
+    const dispatchBefore = new Date(Date.now() + advanceMin * 60 * 1000);
 
-    const expiredConsignes = await this.prisma.booking.findMany({
+    const due = await this.prisma.booking.findMany({
       where: {
-        withConsigne: true,
-        consigneStatus: 'active',
-        consigneEndDate: { lte: today },
-      } as any,
-      select: { id: true, passengerId: true },
+        status: 'scheduled',
+        scheduledAt: { lte: dispatchBefore },
+      },
+      select: {
+        id: true,
+        passengerId: true,
+        vehicleType: true,
+        destination: true,
+        type: true,
+        pickupLat: true,
+        pickupLng: true,
+        scheduledAt: true,
+      },
     });
 
-    for (const booking of expiredConsignes) {
-      this.notifications.sendToUser(
-        booking.passengerId,
-        'Fin de votre consigne aujourd\'hui 🗓',
-        'Votre période de consigne se termine aujourd\'hui. Pensez à réserver votre course retour vers l\'aéroport.',
-      ).catch(() => {});
-    }
+    if (due.length === 0) return;
+    this.logger.log(`[Scheduled] ${due.length} réservation(s) programmée(s) à dispatcher`);
 
-    if (expiredConsignes.length > 0) {
-      this.logger.log(`[Consigne] ${expiredConsignes.length} consigne(s) arrivent à échéance aujourd'hui`);
+    for (const booking of due) {
+      try {
+        // Idempotence : ne dispatcher qu'une fois
+        const locked = await this.redis.setNx(`scheduled:dispatch:${booking.id}`, 'locked', 600);
+        if (!locked) continue;
+
+        await this.prisma.booking.update({
+          where: { id: booking.id },
+          data: { status: 'pending' },
+        });
+
+        const eligibleDrivers = await this.dispatch.findEligibleDrivers(
+          booking as any,
+          false,
+          booking.pickupLat && booking.pickupLng
+            ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+            : undefined,
+        );
+
+        const scheduledStr = booking.scheduledAt
+          ? new Date(booking.scheduledAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })
+          : '';
+
+        for (const driver of eligibleDrivers) {
+          this.notifications.sendToUser(
+            driver.userId,
+            'Réservation programmée disponible 🕐',
+            `Course programmée le ${scheduledStr} vers ${booking.destination}`,
+            { bookingId: booking.id, type: 'scheduled_booking' },
+          ).catch(() => {});
+
+          this.ridesGateway.notifyNewBooking(driver.id, {
+            id: booking.id,
+            passengerId: booking.passengerId,
+            destination: booking.destination,
+            vehicleType: booking.vehicleType,
+            type: booking.type,
+            isScheduled: true,
+            scheduledAt: booking.scheduledAt?.toISOString(),
+          } as any);
+        }
+
+        this.notifications.sendToUser(
+          booking.passengerId,
+          'Chauffeur recherché ✅',
+          `Nous recherchons un chauffeur pour votre course programmée le ${scheduledStr}.`,
+        ).catch(() => {});
+
+        this.logger.log(`[Scheduled] Booking ${booking.id} dispatché (${eligibleDrivers.length} drivers notifiés)`);
+      } catch (e: any) {
+        this.logger.error(`[Scheduled] Dispatch échoué pour ${booking.id}: ${e.message}`);
+      }
+    }
+  }
+
+  // ── C.1 — Retrait automatique chauffeurs (48h post-completion) ───────────────
+
+  @Cron('0 * * * *') // toutes les heures
+  async autoWithdrawDrivers() {
+    const enabled = await this.settingsService.get('auto_withdrawal_enabled', 'false');
+    if (enabled !== 'true') return;
+
+    const minRaw = await this.settingsService.get('min_withdrawal_amount', '5000');
+    const minAmount = parseFloat(minRaw) || 5000;
+
+    // Chauffeurs bloqués manuellement par un admin
+    const blockedRaw = await this.settingsService.get('auto_withdrawal_blocked_drivers', '[]');
+    let blockedIds: string[] = [];
+    try { blockedIds = JSON.parse(blockedRaw); } catch { blockedIds = []; }
+
+    // Drivers éligibles : portefeuille >= minAmount, compte vérifié, non bloqués
+    const eligible = await this.prisma.driverProfile.findMany({
+      where: {
+        payoutVerified: true,
+        payoutPhone:    { not: null },
+        payoutMethod:   { not: null },
+        id:             { notIn: blockedIds },
+        earningsWallet: { balance: { gte: minAmount } },
+      },
+      select: {
+        id:     true,
+        userId: true,
+        earningsWallet: { select: { balance: true } },
+      },
+    });
+
+    if (eligible.length === 0) return;
+    this.logger.log(`[AutoWithdraw] ${eligible.length} chauffeur(s) éligible(s)`);
+
+    for (const driver of eligible) {
+      const lockKey = `auto_withdraw:lock:${driver.id}`;
+      // Idempotence : 48h de délai entre deux retraits automatiques
+      const locked = await this.redis.setNx(lockKey, '1', 48 * 60 * 60);
+      if (!locked) continue;
+
+      const balance = driver.earningsWallet?.balance ?? 0;
+      try {
+        await this.payout.disburse({ driverProfileId: driver.id, amount: balance });
+        this.logger.log(`[AutoWithdraw] Retrait initié driver=${driver.id} amount=${balance} XAF`);
+
+        // C.3 — Notification push au chauffeur
+        this.notifications.sendToUser(
+          driver.userId,
+          'Virement en cours',
+          `Un virement de ${balance.toLocaleString('fr-FR')} XAF vient d'être initié vers votre compte Mobile Money.`,
+          { type: 'auto_withdrawal', amount: String(balance) },
+        ).catch(() => {});
+      } catch (err: any) {
+        // Retrait échoué → libérer le lock pour réessayer à la prochaine heure
+        await this.redis.del(lockKey);
+        this.logger.warn(`[AutoWithdraw] Échec driver=${driver.id}: ${err.message}`);
+      }
     }
   }
 }

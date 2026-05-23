@@ -290,7 +290,7 @@ describe('Wallet & Payments (S081-S088)', () => {
       .send({
         amount: 20000,
         method: 'orange_money',
-        mobileNumber: '+237690000085',
+        mobileNumber: '+237699000085',
       });
 
     expect(res.status).toBe(201);
@@ -365,7 +365,7 @@ describe('Wallet & Payments (S081-S088)', () => {
       .send({
         amount: 10000,
         method: 'orange_money',
-        mobileNumber: '+237690000088',
+        mobileNumber: '+237699000088',
       });
     expect(res1.status).toBe(201);
 

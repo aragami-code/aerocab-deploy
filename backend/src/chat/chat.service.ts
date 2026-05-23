@@ -7,6 +7,16 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 
+const MSG_SELECT = {
+  id: true,
+  content: true,
+  mediaUrl: true,
+  mediaType: true,
+  senderId: true,
+  readAt: true,
+  createdAt: true,
+} as const;
+
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
@@ -14,7 +24,6 @@ export class ChatService {
   constructor(private prisma: PrismaService) {}
 
   async startConversation(passengerId: string, driverId: string, flightId?: string) {
-    // Verify driver exists and is approved
     const driver = await this.prisma.driverProfile.findFirst({
       where: { userId: driverId, status: 'approved' },
     });
@@ -22,7 +31,6 @@ export class ChatService {
       throw new NotFoundException('Chauffeur introuvable ou non approuve');
     }
 
-    // Check if conversation already exists
     const existing = await this.prisma.conversation.findFirst({
       where: {
         passengerId,
@@ -37,9 +45,7 @@ export class ChatService {
       },
     });
 
-    if (existing) {
-      return existing;
-    }
+    if (existing) return existing;
 
     const conversation = await this.prisma.conversation.create({
       data: {
@@ -51,18 +57,33 @@ export class ChatService {
         driver: { select: { id: true, name: true, avatarUrl: true } },
         passenger: { select: { id: true, name: true, avatarUrl: true } },
         flight: {
-          select: {
-            id: true,
-            flightNumber: true,
-            airline: true,
-            scheduledArrival: true,
-          },
+          select: { id: true, flightNumber: true, airline: true, scheduledArrival: true },
         },
       },
     });
 
     this.logger.log(`Conversation created: ${conversation.id}`);
     return conversation;
+  }
+
+  async findOrCreateConversation(userId: string, otherUserId: string) {
+    const isDriver = await this.prisma.driverProfile.findFirst({
+      where: { userId, status: 'approved' },
+    });
+
+    const passengerId = isDriver ? otherUserId : userId;
+    const driverId    = isDriver ? userId       : otherUserId;
+
+    const existing = await this.prisma.conversation.findFirst({
+      where: { passengerId, driverId, status: 'active' },
+    });
+    if (existing) return { id: existing.id };
+
+    const conversation = await this.prisma.conversation.create({
+      data: { passengerId, driverId },
+    });
+    this.logger.log(`Conversation find-or-created: ${conversation.id}`);
+    return { id: conversation.id };
   }
 
   async getConversations(userId: string) {
@@ -73,13 +94,11 @@ export class ChatService {
       include: {
         driver: { select: { id: true, name: true, avatarUrl: true } },
         passenger: { select: { id: true, name: true, avatarUrl: true } },
-        flight: {
-          select: { flightNumber: true, scheduledArrival: true },
-        },
+        flight: { select: { flightNumber: true, scheduledArrival: true } },
         messages: {
           orderBy: { createdAt: 'desc' },
           take: 1,
-          select: { content: true, createdAt: true, senderId: true, readAt: true },
+          select: { content: true, mediaUrl: true, mediaType: true, createdAt: true, senderId: true, readAt: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -87,15 +106,11 @@ export class ChatService {
   }
 
   async getMessages(conversationId: string, userId: string, cursor?: string, limit = 50) {
-    // Verify user is part of conversation
     const conversation = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
     });
 
-    if (!conversation) {
-      throw new NotFoundException('Conversation introuvable');
-    }
-
+    if (!conversation) throw new NotFoundException('Conversation introuvable');
     if (conversation.passengerId !== userId && conversation.driverId !== userId) {
       throw new ForbiddenException('Acces non autorise');
     }
@@ -107,20 +122,30 @@ export class ChatService {
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
-      select: {
-        id: true,
-        content: true,
-        senderId: true,
-        readAt: true,
-        createdAt: true,
-      },
+      select: MSG_SELECT,
     });
 
     return messages.reverse();
   }
 
-  async sendMessage(conversationId: string, senderId: string, content: string) {
-    if (!content.trim()) {
+  async verifyAccess(conversationId: string, userId: string) {
+    const conv = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
+    if (!conv) throw new NotFoundException('Conversation introuvable');
+    if (conv.passengerId !== userId && conv.driverId !== userId) {
+      throw new ForbiddenException('Acces non autorise');
+    }
+    return conv;
+  }
+
+  async sendMessage(
+    conversationId: string,
+    senderId: string,
+    content: string,
+    mediaUrl?: string,
+    mediaType?: string,
+  ) {
+    const trimmed = content.trim();
+    if (!trimmed && !mediaUrl) {
       throw new BadRequestException('Le message ne peut pas etre vide');
     }
 
@@ -128,14 +153,10 @@ export class ChatService {
       where: { id: conversationId },
     });
 
-    if (!conversation) {
-      throw new NotFoundException('Conversation introuvable');
-    }
-
+    if (!conversation) throw new NotFoundException('Conversation introuvable');
     if (conversation.passengerId !== senderId && conversation.driverId !== senderId) {
       throw new ForbiddenException('Acces non autorise');
     }
-
     if (conversation.status !== 'active') {
       throw new BadRequestException('Cette conversation est fermee');
     }
@@ -144,18 +165,12 @@ export class ChatService {
       data: {
         conversationId,
         senderId,
-        content: content.trim(),
+        content: trimmed,
+        ...(mediaUrl ? { mediaUrl, mediaType: mediaType ?? null } : {}),
       },
-      select: {
-        id: true,
-        content: true,
-        senderId: true,
-        readAt: true,
-        createdAt: true,
-      },
+      select: MSG_SELECT,
     });
 
-    // Update conversation timestamp
     await this.prisma.conversation.update({
       where: { id: conversationId },
       data: { updatedAt: new Date() },
@@ -169,20 +184,13 @@ export class ChatService {
       where: { id: conversationId },
     });
 
-    if (!conversation) {
-      throw new NotFoundException('Conversation introuvable');
-    }
-
+    if (!conversation) throw new NotFoundException('Conversation introuvable');
     if (conversation.passengerId !== userId && conversation.driverId !== userId) {
       throw new ForbiddenException('Acces non autorise');
     }
 
     await this.prisma.message.updateMany({
-      where: {
-        conversationId,
-        senderId: { not: userId },
-        readAt: null,
-      },
+      where: { conversationId, senderId: { not: userId }, readAt: null },
       data: { readAt: new Date() },
     });
 

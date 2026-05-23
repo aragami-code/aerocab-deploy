@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../database/prisma.service';
+import { TrustScoreService } from '../users/trust-score.service';
 
 /**
  * Gateway principal (namespace /) pour les chauffeurs.
@@ -33,6 +34,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private jwtService: JwtService,
     private prisma: PrismaService,
+    private trustScore: TrustScoreService,
   ) {}
 
   async handleConnection(client: Socket) {
@@ -111,20 +113,31 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }).catch(() => {});
 
     // Re-envoyer le booking pending s'il en existe un (rattrapage de race condition)
+    // Seulement si l'encoche du chauffeur est active (isAvailable)
     try {
+      const profile = await this.prisma.driverProfile.findUnique({ where: { id: data.driverId }, select: { isAvailable: true } });
+      if (!profile?.isAvailable) return;
+
       const pending = await this.prisma.booking.findFirst({
         where: { driverProfileId: data.driverId, status: 'pending' },
-        include: { passenger: { select: { name: true } } },
+        include: { passenger: { select: { name: true, avatarUrl: true, status: true } } },
         orderBy: { createdAt: 'desc' },
       });
       if (pending) {
         const seats: Record<string, number> = {
           eco: 4, eco_plus: 4, standard: 5, confort: 5, confort_plus: 7,
         };
+        const etaMin = pending.driverEtaMinutes ?? 10;
+        const passengerTrustScore = await this.trustScore
+          .computeScore(pending.passengerId)
+          .catch(() => 5.0);
         client.emit('booking:new_request', {
           id: pending.id,
           passengerId: pending.passengerId,
           passengerName: pending.passenger?.name ?? null,
+          passengerAvatarUrl: pending.passenger?.avatarUrl ?? null,
+          passengerVerified: pending.passenger?.status === 'active',
+          passengerTrustScore,
           flightNumber: pending.flightNumber,
           destination: pending.destination,
           vehicleType: pending.vehicleType,
@@ -134,6 +147,8 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
           pickupAddress: pending.pickupAddress,
           pricingMode: (pending as any).pricingMode ?? 'kilometrage',
           seats: seats[pending.vehicleType] ?? 4,
+          distanceKm: parseFloat((etaMin * 0.5).toFixed(1)),
+          durationMin: etaMin,
         });
         this.logger.log(`[Rides] Re-sent pending booking ${pending.id} to driver ${data.driverId}`);
       }

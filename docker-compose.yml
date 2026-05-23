@@ -1,0 +1,109 @@
+version: '3.9'
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aerocab_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: laravel
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: aerogo24
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aerocab_net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U laravel -d aerogo24']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aerocab_redis
+    restart: unless-stopped
+    networks:
+      - aerocab_net
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Admin Dashboard ───────────────────────────────────────────────────────
+  admin:
+    build:
+      context: ../aerocab-admin
+      dockerfile: Dockerfile
+    container_name: aerocab_admin
+    restart: unless-stopped
+    ports:
+      - '80:80'
+    depends_on:
+      - api
+    networks:
+      - aerocab_net
+
+  # ── NestJS API ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: aerocab_api
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: postgresql://laravel:secret@postgres:5432/aerogo24
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - aerocab_net
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/api/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── TURN Server (WebRTC) ─────────────────────────────────────────────────
+  coturn:
+    image: coturn/coturn:latest
+    container_name: aerocab_coturn
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n
+      --log-file=stdout
+      --listening-port=3478
+      --tls-listening-port=5349
+      --listening-ip=0.0.0.0
+      --external-ip=217.160.47.83
+      --realm=aerogo24.com
+      --user=aerogo:TurnAeroGo@2026!
+      --lt-cred-mech
+      --no-cli
+      --fingerprint
+      --min-port=49160
+      --max-port=49300
+      --no-stun
+
+networks:
+  aerocab_net:
+    name: aerocab_net
+
+volumes:
+  postgres_data:

@@ -1,6 +1,6 @@
-import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, Min, Max } from 'class-validator';
+import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, Min, Max, Matches, Length } from 'class-validator';
 
-const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money', 'mtn_momo', 'wallet'];
+const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money_cm', 'mtn_cm', 'wallet', 'orange_money', 'mtn_momo'];
 
 export class CreateBookingDto {
   @IsString()
@@ -49,32 +49,22 @@ export class CreateBookingDto {
   pickupLng?: number;
 
   @IsOptional()
+  @IsNumber()
+  roadDistanceKm?: number;
+
+  @IsOptional()
   @IsString()
   promoCode?: string;
 
-  @IsOptional()
-  @IsString()
-  force?: string;
-
-  // ── Consigne ────────────────────────────────────────────────────────────────
-  @IsOptional()
-  @IsBoolean()
-  withConsigne?: boolean;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(1, { message: 'Minimum 1 jour de consigne' })
-  @Max(90, { message: 'Maximum 90 jours' })
-  consigneDays?: number;
-
-  @IsOptional()
-  @IsString()
-  consigneVehicleType?: string; // peut différer du vehicleType principal
-
-  // ── Surcharges contextuelles ─────────────────────────────────────────────────
+  /**
+   * Le passager accepte explicitement un délai de prise en charge plus long
+   * (cas où aucun chauffeur n'est dans le rayon de proximité immédiate).
+   * Envoyé après réception d'une réponse 400 { code: 'DELAYED_DISPATCH', estimatedWaitMin }.
+   * Le client doit afficher le délai au passager avant de re-POSTER avec ce flag.
+   */
   @IsOptional()
   @IsBoolean()
-  rainSurge?: boolean;    // L'utilisateur signale qu'il pleut
+  acceptDelay?: boolean;
 
   // ── Verrou de prix ───────────────────────────────────────────────────────────
   @IsOptional()
@@ -82,10 +72,39 @@ export class CreateBookingDto {
   expectedPriceFcfa?: number; // Prix affiché au passager — vérifié côté backend avant création
 
   @IsOptional()
-  @IsNumber()
-  expectedConsigneFcfa?: number; // Devis consigne affiché — vérifié côté backend avant création
-
-  @IsOptional()
   @IsString()
   forfaitId?: string; // UUID du forfait sélectionné par le passager
+
+  /**
+   * Code pays ISO-3166-1 alpha-2 (ex: 'CM', 'NG'). Utilisé principalement pour
+   * les bookings INTERNATIONAL sans aéroport de départ — le pays est alors
+   * extrait du DTO au lieu de l'aéroport.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(2, 2, { message: 'countryCode doit faire 2 caractères ISO-3166-1' })
+  @Matches(/^[a-zA-Z]{2}$/, { message: 'countryCode doit contenir uniquement des lettres' })
+  countryCode?: string;
+
+  // ── Réservation programmée ───────────────────────────────────────────────────
+  @IsOptional()
+  @IsString()
+  scheduledAt?: string; // ISO 8601, minimum 30 min dans le futur
+
+  // ── Devise d'affichage (multi-pays) ──────────────────────────────────────────
+  @IsOptional()
+  @IsString()
+  displayCurrency?: string; // Devise vue par le passager (ex: EUR, MAD, XAF)
+
+  @IsOptional()
+  @IsNumber()
+  displayAmount?: number; // Montant converti affiché (ex: 22.90 pour 15000 XAF en EUR)
+
+  @IsOptional()
+  @IsNumber()
+  exchangeRateUsed?: number; // Taux XAF→displayCurrency utilisé pour l'affichage
+
+  @IsOptional()
+  @IsNumber()
+  pointsUsed?: number; // Points fidélité utilisés en déduction
 }

@@ -5,5 +5,13 @@
   "workspaces": [
     "packages/*",
     "backend"
-  ]
+  ],
+  "dependencies": {
+    "backend": "^0.0.0",
+    "exceljs": "^4.4.0",
+    "pdfkit": "^0.18.0"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "^0.17.6"
+  }
 }
