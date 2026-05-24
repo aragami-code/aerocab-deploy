@@ -347,10 +347,13 @@ export class DriversService {
       },
     });
 
-    // Sauvegarde la position si une course est en cours (pour le replay)
+    // Sauvegarde la position + émission WebSocket pour tous les statuts actifs
     const activeBooking = await this.prisma.booking.findFirst({
-      where: { driverProfileId: profile.id, status: 'in_progress' },
-      select: { id: true, driverProfileId: true },
+      where: {
+        driverProfileId: profile.id,
+        status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] },
+      },
+      select: { id: true, driverProfileId: true, passengerId: true, status: true },
     });
 
     if (activeBooking) {
@@ -363,14 +366,9 @@ export class DriversService {
         },
       }).catch(() => {});
 
-      // Émettre la position en temps réel au passager
-      const booking = await this.prisma.booking.findUnique({
-        where: { id: activeBooking.id },
-        select: { passengerId: true },
-      });
-      if (booking?.passengerId) {
+      if (activeBooking.passengerId) {
         this.ridesGateway.server
-          .to(`passenger:${booking.passengerId}`)
+          .to(`passenger:${activeBooking.passengerId}`)
           .emit('driver:position', {
             bookingId: activeBooking.id,
             latitude: dto.latitude,
@@ -378,38 +376,6 @@ export class DriversService {
             timestamp: new Date().toISOString(),
           });
       }
-    }
-
-    // Émettre aussi pour les courses confirmées (chauffeur en route)
-    const confirmedBooking = await this.prisma.booking.findFirst({
-      where: { driverProfileId: profile.id, status: 'confirmed' },
-      select: { id: true, passengerId: true },
-    });
-    if (confirmedBooking?.passengerId) {
-      this.ridesGateway.server
-        .to(`passenger:${confirmedBooking.passengerId}`)
-        .emit('driver:position', {
-          bookingId: confirmedBooking.id,
-          latitude: dto.latitude,
-          longitude: dto.longitude,
-          timestamp: new Date().toISOString(),
-        });
-    }
-
-    // B2 — Émettre aussi pour les courses où le chauffeur est arrivé (en attente du passager)
-    const arrivedBooking = await this.prisma.booking.findFirst({
-      where: { driverProfileId: profile.id, status: 'arrived_at_airport' },
-      select: { id: true, passengerId: true },
-    });
-    if (arrivedBooking?.passengerId) {
-      this.ridesGateway.server
-        .to(`passenger:${arrivedBooking.passengerId}`)
-        .emit('driver:position', {
-          bookingId: arrivedBooking.id,
-          latitude: dto.latitude,
-          longitude: dto.longitude,
-          timestamp: new Date().toISOString(),
-        });
     }
 
     return { message: 'Position mise a jour' };

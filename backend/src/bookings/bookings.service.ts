@@ -2343,7 +2343,9 @@ export class BookingsService {
   async getBookingPositions(userId: string, bookingId: string) {
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
-      include: { driverProfile: { select: { userId: true } } },
+      include: {
+        driverProfile: { select: { userId: true, latitude: true, longitude: true, locationUpdatedAt: true } },
+      },
     });
 
     if (!booking) throw new NotFoundException('Réservation introuvable');
@@ -2352,32 +2354,38 @@ export class BookingsService {
     const isDriver = booking.driverProfile?.userId === userId;
     if (!isPassenger && !isDriver) throw new ForbiddenException('Accès refusé');
 
-    const positions = await this.prisma.driverPosition.findMany({
+    let positions = await this.prisma.driverPosition.findMany({
       where: { bookingId },
       select: { latitude: true, longitude: true, recordedAt: true },
       orderBy: { recordedAt: 'asc' },
     });
+
+    // Fallback : si aucune position enregistrée, utiliser la position actuelle du profil chauffeur
+    if (positions.length === 0 && booking.driverProfile?.latitude != null && booking.driverProfile?.longitude != null) {
+      positions = [{
+        latitude: booking.driverProfile.latitude,
+        longitude: booking.driverProfile.longitude,
+        recordedAt: booking.driverProfile.locationUpdatedAt ?? new Date(),
+      }];
+    }
 
     if (positions.length === 0) {
       return { positions: [], etaMinutes: null };
     }
 
     // Calcul ETA dynamique depuis la dernière position connue
-    const allPos = positions.length > 0 ? positions : null;
     let etaMinutes: number | null = null;
-    if (allPos) {
-      const last = allPos[allPos.length - 1];
-      const bk = await this.prisma.booking.findUnique({
-        where: { id: bookingId },
-        select: { destLat: true, destLng: true, pickupLat: true, pickupLng: true, status: true },
-      });
-      if (bk) {
-        const targetLat = bk.status === 'in_progress' ? bk.destLat : (bk.pickupLat ?? bk.destLat);
-        const targetLng = bk.status === 'in_progress' ? bk.destLng : (bk.pickupLng ?? bk.destLng);
-        if (targetLat != null && targetLng != null) {
-          const distKm = haversineKm(last.latitude, last.longitude, targetLat, targetLng);
-          etaMinutes = Math.max(1, Math.ceil((distKm / 40) * 60));
-        }
+    const last = positions[positions.length - 1];
+    const bk = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { destLat: true, destLng: true, pickupLat: true, pickupLng: true, status: true },
+    });
+    if (bk) {
+      const targetLat = bk.status === 'in_progress' ? bk.destLat : (bk.pickupLat ?? bk.destLat);
+      const targetLng = bk.status === 'in_progress' ? bk.destLng : (bk.pickupLng ?? bk.destLng);
+      if (targetLat != null && targetLng != null) {
+        const distKm = haversineKm(last.latitude, last.longitude, targetLat, targetLng);
+        etaMinutes = Math.max(1, Math.ceil((distKm / 40) * 60));
       }
     }
 
