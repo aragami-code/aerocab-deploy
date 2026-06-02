@@ -30,6 +30,7 @@ import { BotModule } from './bot/bot.module';
 import { KycModule } from './kyc/kyc.module';
 import { SosModule } from './sos/sos.module';
 import { CallsModule } from './calls/calls.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
 
 @Module({
   imports: [
@@ -71,6 +72,7 @@ import { CallsModule } from './calls/calls.module';
     KycModule,
     SosModule,
     CallsModule,
+    AnnouncementsModule,
   ],
   controllers: [AppController],
   providers: [
