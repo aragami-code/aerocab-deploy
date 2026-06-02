@@ -40,6 +40,8 @@ const PERMISSIONS: Array<{ key: string; group: string; description: string }> = 
   { key: 'create_promo',              group: 'promos',     description: 'Créer un code promo' },
   { key: 'edit_promo',                group: 'promos',     description: 'Modifier un code promo' },
   { key: 'delete_promo',              group: 'promos',     description: 'Supprimer un code promo' },
+  // announcements (1)
+  { key: 'manage_announcements',      group: 'announcements', description: 'Gérer les annonces et la version des apps' },
   // reports (2)
   { key: 'view_reports',              group: 'reports',    description: 'Voir les signalements' },
   { key: 'handle_report',             group: 'reports',    description: 'Traiter / Fermer un signalement' },
@@ -97,6 +99,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_tariffs','edit_tariffs','rollback_tariffs',
     'view_airports','create_airport','edit_airport',
     'view_promos','create_promo','edit_promo','delete_promo',
+    'manage_announcements',
     'view_reports','handle_report',
     'view_referrals',
     'view_audit_logs',
