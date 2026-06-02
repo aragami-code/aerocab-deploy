@@ -541,6 +541,42 @@ model DriverPosition {
   @@map("driver_positions")
 }
 
+model Announcement {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type            AnnouncementType
+  title           String
+  body            String
+  imageUrl        String?               @map("image_url")
+  priority        AnnouncementPriority  @default(normal)
+  ctaType         AnnouncementCtaType   @default(none) @map("cta_type")
+  ctaLabel        String?               @map("cta_label")
+  ctaValue        String?               @map("cta_value")
+  targetApps      String[]              @default([]) @map("target_apps")
+  targetCountries String[]              @default([]) @map("target_countries")
+  targetTiers     String[]              @default([]) @map("target_tiers")
+  startsAt        DateTime?             @map("starts_at")
+  endsAt          DateTime?             @map("ends_at")
+  isActive        Boolean               @default(true) @map("is_active")
+  createdBy       String?               @map("created_by") @db.Uuid
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+  reads           AnnouncementRead[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("announcements")
+}
+
+model AnnouncementRead {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  announcementId String       @map("announcement_id") @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  seenAt         DateTime     @default(now()) @map("seen_at")
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId])
+  @@map("announcement_reads")
+}
+
 enum UserRole {
   passenger
   driver
@@ -595,6 +631,23 @@ enum BookingType {
   ARRIVAL        // À l'aéroport → destination
   DEPARTURE      // Lieu quelconque → aéroport
   INTERNATIONAL  // Hors du pays, réservation à l'avance (vol arrivée → destination)
+}
+
+enum AnnouncementType {
+  promo
+  info
+  ad
+}
+
+enum AnnouncementPriority {
+  high
+  normal
+}
+
+enum AnnouncementCtaType {
+  none
+  screen
+  promo_code
 }
 
 enum PricingMode {
