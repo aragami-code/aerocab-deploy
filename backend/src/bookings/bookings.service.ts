@@ -883,7 +883,7 @@ export class BookingsService {
       where: { passengerId, id: { not: booking.id } },
     });
     if (totalBookings === 0) {
-      const firstRideBonus = parseInt(await this.settingsService.get('first_ride_bonus_points', '500'), 10) || 500;
+      const firstRideBonus = parseInt(await this.settingsService.getForCountry('first_ride_bonus_points', bookingCountryCode, '500'), 10) || 500;
       this.points.addPoints(passengerId, firstRideBonus, 'Bonus première course', 'bonus').catch(() => {});
     }
 
@@ -1251,7 +1251,7 @@ export class BookingsService {
 
     const isLateCancel = booking.status === 'arrived_at_airport' || isLateCancelBy48h;
     const price = Number(booking.estimatedPrice) || 0;
-    const lateCancelRate = parseFloat(await this.settingsService.get('late_cancel_refund_rate', '0.5')) || 0.5;
+    const lateCancelRate = parseFloat(await this.settingsService.getForCountry('late_cancel_refund_rate', booking.operatingCountry ?? null, '0.5')) || 0.5;
     const refundRate = isLateCancel ? lateCancelRate : 1.0;
     const pointsToRefund = Math.ceil(price * refundRate);
     const penaltyPoints  = Math.floor(price * (1 - refundRate));
@@ -2319,7 +2319,7 @@ export class BookingsService {
       const completedCount = await this.prisma.booking.count({
         where: { passengerId: booking.passengerId, status: 'completed' },
       });
-      const nRaw = await this.settingsService.get('loyalty_bonus_every_n_rides', '10');
+      const nRaw = await this.settingsService.getForCountry('loyalty_bonus_every_n_rides', booking.operatingCountry ?? null, '10');
       const n = parseInt(nRaw, 10) || 10;
       if (completedCount > 0 && completedCount % n === 0) {
         const ref = `LOYALTY-RIDE-${completedCount}-${booking.passengerId}`;
@@ -2332,7 +2332,7 @@ export class BookingsService {
           label = `🎁 Course offerte Platine — ${completedCount}ème trajet`;
           this.logger.log(`[Loyalty/Platine] Course offerte ${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
         } else {
-          const bonusRaw = await this.settingsService.get('loyalty_bonus_points', '500');
+          const bonusRaw = await this.settingsService.getForCountry('loyalty_bonus_points', booking.operatingCountry ?? null, '500');
           bonus = parseInt(bonusRaw, 10) || 500;
           label = `Fidélité — ${completedCount}ème course`;
           this.logger.log(`[Loyalty] +${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
