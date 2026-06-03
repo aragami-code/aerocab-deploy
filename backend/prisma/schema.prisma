@@ -191,6 +191,7 @@ model Booking {
   vehicleType      String         @map("vehicle_type")
   paymentMethod    String         @map("payment_method")
   estimatedPrice   Float          @map("estimated_price")
+  commissionRate   Float?         @map("commission_rate")
   promoCode        String?        @map("promo_code")
   discountAmount   Float?         @default(0) @map("discount_amount")
   status           BookingStatus  @default(pending)
