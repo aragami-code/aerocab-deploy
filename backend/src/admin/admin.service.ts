@@ -10,6 +10,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RedisService } from '../redis/redis.service';
 import { NotchPayService, WITHDRAWAL_METHOD_TO_NOTCHPAY } from '../payments/notchpay.service';
 import { FlutterwaveService, WITHDRAWAL_METHOD_TO_FLUTTERWAVE } from '../payments/flutterwave.service';
+import { PaymentIntentService } from '../payments/payment-intent.service';
 import { VerifyDriverDto, VerificationAction } from './dto';
 import { ExportService } from './export.service';
 
@@ -31,6 +32,7 @@ export class AdminService {
     private notchpay: NotchPayService,
     private flutterwave: FlutterwaveService,
     private exportService: ExportService,
+    private paymentIntentSvc: PaymentIntentService,
   ) {}
 
   // ── Tariffs ──────────────────────────────────────────
@@ -104,7 +106,10 @@ export class AdminService {
   }
 
   // ── Chart Data (15 derniers jours) ──────────────────
-  async getChartData() {
+  async getChartData(country?: string) {
+    const cc = country ? country.toUpperCase() : null;
+    const bookingWhere = cc ? { operatingCountry: cc } : {};
+
     const days = 15;
     const result: { day: string; courses: number; revenus: number }[] = [];
 
@@ -118,10 +123,10 @@ export class AdminService {
 
       const [courses, revenusAgg] = await Promise.all([
         this.prisma.booking.count({
-          where: { createdAt: { gte: start, lte: end } },
+          where: { ...bookingWhere, createdAt: { gte: start, lte: end } },
         }),
         this.prisma.booking.aggregate({
-          where: { status: 'completed', updatedAt: { gte: start, lte: end } },
+          where: { ...bookingWhere, status: 'completed', updatedAt: { gte: start, lte: end } },
           _sum: { estimatedPrice: true },
         }),
       ]);
@@ -324,12 +329,24 @@ export class AdminService {
 
   // ── Stats ────────────────────────────────────────────
 
-  async getStats() {
+  async getStats(country?: string) {
+    const cc = country ? country.toUpperCase() : null;
+    const bookingWhere = cc ? { operatingCountry: cc } : {};
+    const userWhere = cc ? { countryCode: cc } : {};
+    const driverWhere = cc ? { countryCode: cc } : {};
+
+    const cacheKey = cc ? `admin:stats:${cc}` : 'admin:stats';
+    const cached = await this.redis.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch { /* recompute */ }
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     const [
       totalUsers,
+      newUsersToday,
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
@@ -340,27 +357,47 @@ export class AdminService {
       cancelledBookings,
       completedToday,
       revenueAgg,
+      revenueTodayAgg,
+      pendingKYC,
+      pendingWithdrawals,
+      pendingWithdrawalsAmount,
+      pendingReports,
+      unreadNotifications,
     ] = await Promise.all([
-      this.prisma.user.count(),
-      this.prisma.driverProfile.count(),
-      this.prisma.driverProfile.count({ where: { status: 'pending' } }),
-      this.prisma.driverProfile.count({ where: { status: 'approved' } }),
-      this.prisma.booking.count(),
-      this.prisma.booking.count({ where: { status: 'pending' } }),
-      this.prisma.booking.count({ where: { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
-      this.prisma.booking.count({ where: { status: 'completed' } }),
-      this.prisma.booking.count({ where: { status: 'cancelled' } }),
-      this.prisma.booking.count({ where: { status: 'completed', updatedAt: { gte: today } } }),
-      this.prisma.booking.aggregate({ where: { status: 'completed' }, _sum: { estimatedPrice: true } }),
+      this.prisma.user.count({ where: userWhere }),
+      this.prisma.user.count({ where: { ...userWhere, createdAt: { gte: today } } }),
+      this.prisma.driverProfile.count({ where: driverWhere }),
+      this.prisma.driverProfile.count({ where: { ...driverWhere, status: 'pending' } }),
+      this.prisma.driverProfile.count({ where: { ...driverWhere, status: 'approved' } }),
+      this.prisma.booking.count({ where: bookingWhere }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'pending' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'completed' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'cancelled' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'completed', updatedAt: { gte: today } } }),
+      this.prisma.booking.aggregate({ where: { ...bookingWhere, status: 'completed' }, _sum: { estimatedPrice: true } }),
+      this.prisma.booking.aggregate({ where: { ...bookingWhere, status: 'completed', updatedAt: { gte: today } }, _sum: { estimatedPrice: true } }),
+      this.prisma.user.count({ where: { ...userWhere, kycStatus: 'submitted' } }),
+      (this.prisma as any).withdrawalRequest.count({ where: { status: 'pending' } }),
+      (this.prisma as any).withdrawalRequest.aggregate({ where: { status: 'pending' }, _sum: { amount: true } }),
+      this.prisma.report.count({ where: { status: 'open' } }),
+      (this.prisma as any).adminNotification.count({ where: { read: false } }),
     ]);
 
-    return {
+    const result = {
       totalUsers,
+      newUsersToday,
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
       activeAccessPasses: 0,
       totalRevenue: revenueAgg._sum.estimatedPrice ?? 0,
+      revenueToday: revenueTodayAgg._sum.estimatedPrice ?? 0,
+      pendingKYC,
+      pendingWithdrawals,
+      pendingWithdrawalsAmount: pendingWithdrawalsAmount?._sum?.amount ?? 0,
+      pendingReports,
+      unreadNotifications,
       bookings: {
         total: totalBookings,
         pending: pendingBookings,
@@ -370,6 +407,9 @@ export class AdminService {
         completedToday,
       },
     };
+
+    await this.redis.set(cacheKey, JSON.stringify(result), 60);
+    return result;
   }
 
   async getBookings(status?: string, page = 1, limit = 20) {
@@ -427,15 +467,59 @@ export class AdminService {
   }
 
   async cancelBookingAdmin(bookingId: string) {
-    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { driverProfile: { select: { id: true, userId: true } } },
+    });
     if (!booking) throw new NotFoundException('Réservation introuvable');
     if (['completed', 'cancelled'].includes(booking.status)) {
       throw new BadRequestException('Cette réservation ne peut plus être annulée');
     }
-    return this.prisma.booking.update({
-      where: { id: bookingId },
-      data: { status: 'cancelled' },
+
+    const price = Number(booking.estimatedPrice) || 0;
+
+    try {
+      await this.paymentIntentSvc.refund(bookingId, { reason: 'admin_cancel', penaltyPct: 0 });
+    } catch {}
+
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.booking.updateMany({
+        where: { id: bookingId, status: { notIn: ['completed', 'cancelled'] } },
+        data: { status: 'cancelled', cancelledAt: new Date() },
+      });
+      if (updated.count === 0) return;
+
+      if ((booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') && price > 0) {
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'credit',
+            points: price,
+            label: `Remboursement annulation admin — course ${bookingId.slice(0, 8)}`,
+            source: 'refund',
+          },
+        });
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { increment: price } },
+          create: { userId: booking.passengerId, balance: price },
+        });
+      }
+
+      if (booking.driverProfile?.id) {
+        await tx.driverProfile.update({
+          where: { id: booking.driverProfile.id },
+          data: { isAvailable: true },
+        }).catch(() => {});
+      }
     });
+
+    this.notifications.sendToUser(booking.passengerId, 'Course annulée', `Votre course a été annulée par l'administration. Vous avez été remboursé.`).catch(() => {});
+    if (booking.driverProfile?.userId) {
+      this.notifications.sendToUser(booking.driverProfile.userId, 'Course annulée', `La course ${bookingId.slice(0, 8)} a été annulée par l'administration.`).catch(() => {});
+    }
+
+    return { success: true };
   }
 
   async refundBooking(bookingId: string, adminUserId: string, reason?: string) {
@@ -454,7 +538,6 @@ export class AdminService {
     if (amount <= 0) throw new BadRequestException('Montant de remboursement nul');
 
     await this.prisma.$transaction(async (tx) => {
-      // Créditer les points au passager
       await tx.pointsTransaction.create({
         data: {
           userId: booking.passengerId,
@@ -465,7 +548,12 @@ export class AdminService {
         },
       });
 
-      // Marquer le PaymentIntent comme remboursé si existant
+      await tx.wallet.upsert({
+        where: { userId: booking.passengerId },
+        update: { balance: { increment: amount } },
+        create: { userId: booking.passengerId, balance: amount },
+      });
+
       if (booking.paymentIntent) {
         await tx.paymentIntent.update({
           where: { bookingId },

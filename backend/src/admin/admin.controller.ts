@@ -15,6 +15,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AdminNotificationService } from './admin-notification.service';
 import { DriversService } from '../drivers/drivers.service';
 import { VerifyDriverDto } from './dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
@@ -32,6 +33,7 @@ import { SettingsService } from '../settings/settings.service';
 export class AdminController {
   constructor(
     private adminService: AdminService,
+    private adminNotifs: AdminNotificationService,
     private driversService: DriversService,
     private payout: PayoutService,
     private settings: SettingsService,
@@ -41,14 +43,14 @@ export class AdminController {
 
   @Get('stats')
   @RequirePermission('view_stats')
-  async getStats() {
-    return this.adminService.getStats();
+  async getStats(@Query('country') country?: string) {
+    return this.adminService.getStats(country);
   }
 
   @Get('chart-data')
   @RequirePermission('view_stats')
-  async getChartData() {
-    return this.adminService.getChartData();
+  async getChartData(@Query('country') country?: string) {
+    return this.adminService.getChartData(country);
   }
 
   // ── Active bookings (real-time) ──────────────────────
@@ -392,6 +394,38 @@ export class AdminController {
   @RequirePermission('view_withdrawals')
   async getWithdrawalStats() {
     return this.adminService.getWithdrawalStats();
+  }
+
+  // ── Notifications Admin ──────────────────────────────────────────────────────
+
+  @Get('notifications')
+  async getNotifications(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('unread') unread?: string,
+  ) {
+    return this.adminNotifs.getNotifications(
+      page ? parseInt(page) : 1,
+      limit ? parseInt(limit) : 20,
+      unread === 'true',
+    );
+  }
+
+  @Get('notifications/unread-count')
+  async getUnreadCount() {
+    return { count: await this.adminNotifs.getUnreadCount() };
+  }
+
+  @Patch('notifications/:id/read')
+  async markNotificationRead(@Param('id') id: string) {
+    return this.adminNotifs.markAsRead(id);
+  }
+
+  @Post('notifications/read-all')
+  @HttpCode(200)
+  async markAllNotificationsRead() {
+    await this.adminNotifs.markAllAsRead();
+    return { success: true };
   }
 
   // ── D5 : Fraude / solde ───────────────────────────────────────────────────
