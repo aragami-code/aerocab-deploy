@@ -38,6 +38,7 @@ import { PayoutService } from '../payments/payout.service';
 import { CashCommissionService } from '../payments/cash-commission.service';
 import { ReceiptService } from '../payments/receipt.service';
 import { UsersService } from '../users/users.service';
+import { resolveCommissionRate } from './commission-resolver';
 
 // Méthodes de paiement direct (F4) — pas de débit wallet points
 const F4_PAYMENT_METHODS = ['orange_money_cm', 'mtn_cm', 'card', 'cash'];
@@ -289,21 +290,19 @@ export class BookingsService {
     grossAmount: number,
     vehicleType: string,
     forfaitId: string | null,
+    operatingCountry: string | null,
   ): Promise<number> {
-    let rate: number | null = null;
-    // 1. Forfait spécifique
+    let forfaitPercent: number | null = null;
     if (forfaitId) {
       const forfait = await this.forfaitsService.findOne(forfaitId).catch(() => null);
-      if (forfait?.companyPercent != null) rate = forfait.companyPercent / 100;
+      forfaitPercent = forfait?.companyPercent ?? null;
     }
-    // 2. Setting global ou tarifs véhicule
-    if (rate === null) {
-      const rideTariffs = await this.settingsService.getTariffs();
-      const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate;
-      const settingRaw = await this.settingsService.get('commission_rate_pct', '');
-      const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
-      rate = vehicleRate ?? settingRate ?? rideTariffs.commissionRate ?? 0.15;
-    }
+    const rideTariffs = await this.settingsService.getTariffsByCountry(operatingCountry);
+    const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate ?? null;
+    const settingRaw = await this.settingsService.getForCountry('commission_rate_pct', operatingCountry, '');
+    const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
+    const tariffsRate = rideTariffs.commissionRate ?? null;
+    const rate = resolveCommissionRate({ forfaitPercent, vehicleRate, settingRate, tariffsRate });
     return Math.round(grossAmount * rate * 100) / 100;
   }
 
@@ -2170,7 +2169,7 @@ export class BookingsService {
         // Pour le cash : le passager paie le driver en main. Le driver doit la commission
         // à AeroCab → on enregistre la dette pour qu'elle soit déduite de ses retraits futurs.
         if (booking.paymentMethod === 'cash') {
-          const commissionAmount = await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId);
+          const commissionAmount = await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId, booking.operatingCountry ?? null);
           await this.cashCommissionSvc.recordDebt(booking.driverProfile.id, commissionAmount)
             .catch((err) => this.logger.warn(`[CashCommission] recordDebt ${booking.id} failed: ${err?.message}`));
         }
