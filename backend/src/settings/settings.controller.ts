@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Put, Post, HttpCode, Body, UseGuards, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Patch, Put, Post, HttpCode, Body, Query, UseGuards, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { SettingsService } from './settings.service';
 import { AuditService } from '../audit/audit.service';
@@ -486,9 +486,11 @@ export class SettingsController {
   @RequirePermission('manage_payment_providers')
   async setPaymentProviders(
     @Body() body: { enabled?: Record<string, boolean>; credentials?: Record<string, string> },
+    @Query('country') country: string | undefined,
     @CurrentUser() admin: any,
   ) {
     const updated: string[] = [];
+    const cc = country ? country.trim().toUpperCase() : null;
 
     // Mise à jour des toggles enabled
     if (body.enabled) {
@@ -505,8 +507,9 @@ export class SettingsController {
       const allowed = new Set(SettingsController.PAYMENT_KEYS.map((k) => k.key));
       for (const [key, value] of Object.entries(body.credentials)) {
         if (!allowed.has(key) || typeof value !== 'string') continue;
-        await this.settings.set(key, value.trim());
-        updated.push(key);
+        const targetKey = cc ? `${key}:${cc}` : key;
+        await this.settings.set(targetKey, value.trim());
+        updated.push(targetKey);
       }
     }
 
