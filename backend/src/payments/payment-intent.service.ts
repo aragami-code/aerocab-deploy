@@ -152,6 +152,7 @@ export class PaymentIntentService {
           customerName:  params.passengerName,
           customerPhone: params.passengerPhone,
           customerEmail: params.passengerEmail,
+          country:       params.operatingCountry,
         }));
       } catch (err) {
         this.logger.error(`NotchPay initiate failed for booking ${bookingId}: ${(err as Error).message}`);
@@ -189,6 +190,7 @@ export class PaymentIntentService {
         customerEmail: params.passengerEmail,
         backendUrl,
         bookingId,
+        country:       params.operatingCountry,
       });
 
       await this.prisma.paymentIntent.update({
