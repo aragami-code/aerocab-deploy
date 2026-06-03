@@ -403,7 +403,7 @@ export class BookingsService {
     const workflowKey = dto.type === 'ARRIVAL' ? 'workflow_arrival_enabled'
       : dto.type === 'DEPARTURE' ? 'workflow_departure_enabled'
       : 'workflow_international_enabled';
-    const workflowEnabled = await this.settingsService.get(workflowKey, 'true');
+    const workflowEnabled = await this.settingsService.getForCountry(workflowKey, dto.countryCode?.toUpperCase() ?? null, 'true');
     if (workflowEnabled === 'false') {
       const labels: Record<string, string> = {
         ARRIVAL: 'Arrivée aéroport',
