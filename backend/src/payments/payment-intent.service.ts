@@ -127,6 +127,7 @@ export class PaymentIntentService {
           currency:    'XAF',
           description,
           metadata:    { bookingId, provider },
+          country:     params.operatingCountry,
         });
 
         await this.prisma.paymentIntent.update({
