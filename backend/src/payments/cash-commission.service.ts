@@ -28,7 +28,7 @@ export class CashCommissionService {
   async recordDebt(driverProfileId: string, commissionAmount: number): Promise<void> {
     const profile = await this.prisma.driverProfile.findUnique({
       where:  { id: driverProfileId },
-      select: { cashDepositBalance: true, cashCommissionDebt: true, cashRidesAllowed: true },
+      select: { cashDepositBalance: true, cashCommissionDebt: true, cashRidesAllowed: true, countryCode: true },
     });
     if (!profile) return;
 
@@ -45,7 +45,7 @@ export class CashCommissionService {
     const newDebt = profile.cashCommissionDebt + remainingDebt;
 
     // Vérifier le seuil de blocage
-    const blockThresholdRaw = await this.settings.get('cash_commission_block_threshold', '10000');
+    const blockThresholdRaw = await this.settings.getForCountry('cash_commission_block_threshold', profile.countryCode, '10000');
     const blockThreshold    = parseFloat(blockThresholdRaw);
     const shouldBlock       = newDebt >= blockThreshold;
 
@@ -76,7 +76,7 @@ export class CashCommissionService {
   async settleDebt(driverProfileId: string, amount: number): Promise<void> {
     const profile = await this.prisma.driverProfile.findUnique({
       where:  { id: driverProfileId },
-      select: { cashCommissionDebt: true },
+      select: { cashCommissionDebt: true, countryCode: true },
     });
     if (!profile) return;
 
@@ -84,7 +84,7 @@ export class CashCommissionService {
     if (settled <= 0) return;
 
     const newDebt = profile.cashCommissionDebt - settled;
-    const blockThresholdRaw = await this.settings.get('cash_commission_block_threshold', '10000');
+    const blockThresholdRaw = await this.settings.getForCountry('cash_commission_block_threshold', profile.countryCode, '10000');
     const blockThreshold    = parseFloat(blockThresholdRaw);
 
     await this.prisma.driverProfile.update({
@@ -103,7 +103,13 @@ export class CashCommissionService {
    * 50% du montant va en dépôt de garantie pour la commission cash.
    */
   async creditDeposit(driverProfileId: string, registrationFeeAmount: number): Promise<void> {
-    const depositPctRaw = await this.settings.get('registration_fee_deposit_pct', '50');
+    const driver = await this.prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      select: { countryCode: true },
+    });
+    const driverCountry = driver?.countryCode ?? null;
+
+    const depositPctRaw = await this.settings.getForCountry('registration_fee_deposit_pct', driverCountry, '50');
     const depositPct    = parseFloat(depositPctRaw) / 100;
     const depositAmount = Math.round(registrationFeeAmount * depositPct * 100) / 100;
 
@@ -123,9 +129,9 @@ export class CashCommissionService {
   }> {
     const profile = await this.prisma.driverProfile.findUnique({
       where:  { id: driverProfileId },
-      select: { cashCommissionDebt: true, cashDepositBalance: true, cashRidesAllowed: true },
+      select: { cashCommissionDebt: true, cashDepositBalance: true, cashRidesAllowed: true, countryCode: true },
     });
-    const blockThresholdRaw = await this.settings.get('cash_commission_block_threshold', '10000');
+    const blockThresholdRaw = await this.settings.getForCountry('cash_commission_block_threshold', profile?.countryCode ?? null, '10000');
 
     return {
       cashCommissionDebt: profile?.cashCommissionDebt ?? 0,

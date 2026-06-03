@@ -43,9 +43,16 @@ export class PayoutService {
     const { bookingId, driverProfileId, grossAmount, isCash } = params;
     const tipAmount = params.tipAmount ?? 0;
 
-    // Lire les paramètres financiers dynamiquement
-    const commissionRaw    = await this.settings.get('commission_rate_pct', '15');
-    const vipCommissionRaw = await this.settings.get('commission_rate_vip_pct', '25');
+    // Résoudre le pays du chauffeur pour les paramètres par pays
+    const driver = await this.prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      select: { countryCode: true },
+    });
+    const driverCountry = driver?.countryCode ?? null;
+
+    // Lire les paramètres financiers dynamiquement (par pays du chauffeur)
+    const commissionRaw    = await this.settings.getForCountry('commission_rate_pct', driverCountry, '15');
+    const vipCommissionRaw = await this.settings.getForCountry('commission_rate_vip_pct', driverCountry, '25');
     const providerFeeRaw   = await this.settings.get('payment_provider_fee_pct', '2');
 
     const booking = await this.prisma.booking.findUnique({
@@ -128,7 +135,7 @@ export class PayoutService {
       select: {
         payoutPhone: true, payoutMethod: true, payoutName: true, payoutVerified: true,
         cashCommissionDebt: true, cashDepositBalance: true,
-        earningsWallet: true,
+        earningsWallet: true, countryCode: true,
       },
     });
     if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
@@ -158,7 +165,7 @@ export class PayoutService {
       );
     }
 
-    const minWithdrawal = parseFloat(await this.settings.get('min_withdrawal_amount', '5000'));
+    const minWithdrawal = parseFloat(await this.settings.getForCountry('min_withdrawal_amount', profile.countryCode, '5000'));
     if (amount < minWithdrawal) {
       throw new BadRequestException(`Montant minimum de retrait: ${minWithdrawal} XAF`);
     }
