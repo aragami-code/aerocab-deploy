@@ -77,6 +77,19 @@ export class SettingsService {
     return setting?.value ?? defaultValue;
   }
 
+  /**
+   * Résolution en cascade d'un réglage par pays :
+   *   app_settings["key:PAYS"] → app_settings["key"] → defaultValue
+   * countryCode null/absent → comportement global pur.
+   */
+  async getForCountry(key: string, countryCode: string | null | undefined, defaultValue = ''): Promise<string> {
+    if (countryCode) {
+      const scoped = await this.get(`${key}:${countryCode.toUpperCase()}`, ' ');
+      if (scoped !== ' ') return scoped;
+    }
+    return this.get(key, defaultValue);
+  }
+
   async set(key: string, value: string): Promise<void> {
     await this.prisma.appSetting.upsert({
       where: { key },
