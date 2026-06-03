@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { FALLBACK_COUNTRY } from '../common/country.constants';
 
@@ -68,5 +68,33 @@ export class CountriesService {
     if (!existingDefault) {
       await this.setDefault('CM').catch((e) => this.logger.warn(`[backfill] setDefault CM échoué: ${e?.message}`));
     }
+  }
+
+  /** Vérifie la complétude config d'un pays pour activation. */
+  async getReadiness(code: string): Promise<{ ready: boolean; missing: string[] }> {
+    const cc = code.toUpperCase();
+    const country = await this.prisma.country.findUnique({ where: { code: cc } });
+    const missing: string[] = [];
+    if (!country) return { ready: false, missing: ['country_not_found'] };
+    if (!country.currency) missing.push('currency');
+    const methods = (country.paymentMethods as any[]) ?? [];
+    if (!Array.isArray(methods) || methods.length === 0) missing.push('payment_methods');
+    const tariffs = await this.prisma.appSetting.findUnique({ where: { key: `tariffs_config:${cc}` } });
+    if (!tariffs) missing.push('tariffs');
+    const operated = await this.prisma.airport.count({ where: { countryCode: cc, isOperated: true } as any });
+    if (operated < 1) missing.push('operated_airports');
+    return { ready: missing.length === 0, missing };
+  }
+
+  /** Active un pays après vérification de complétude. */
+  async activate(code: string) {
+    const r = await this.getReadiness(code);
+    if (!r.ready) throw new BadRequestException(`Pays incomplet : ${r.missing.join(', ')}`);
+    return this.prisma.country.update({ where: { code: code.toUpperCase() }, data: { status: 'active' } });
+  }
+
+  /** Suspend un pays (nouvelles réservations bloquées). */
+  async suspend(code: string) {
+    return this.prisma.country.update({ where: { code: code.toUpperCase() }, data: { status: 'suspended' } });
   }
 }

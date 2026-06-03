@@ -46,3 +46,41 @@ describe('CountriesService', () => {
     expect(db.filter((c) => c.isDefault).length).toBe(1);
   });
 });
+
+describe('CountriesService.getReadiness + activate', () => {
+  function make(country: any, opts: { tariffs?: boolean; operatedAirports?: number } = {}) {
+    const prisma = {
+      country: {
+        findUnique: async () => country,
+        update: async ({ data }: any) => ({ ...country, ...data }),
+      },
+      appSetting: {
+        findUnique: async ({ where: { key } }: any) =>
+          (opts.tariffs && key === `tariffs_config:${country.code}`) ? { key, value: '{}' } : null,
+      },
+      airport: { count: async () => opts.operatedAirports ?? 0 },
+    } as any;
+    return new CountriesService(prisma);
+  }
+  it('readiness incomplet liste les manquants', async () => {
+    const svc = make({ code: 'KE', currency: 'KES', paymentMethods: [] }, { tariffs: false, operatedAirports: 0 });
+    const r = await svc.getReadiness('KE');
+    expect(r.ready).toBe(false);
+    expect(r.missing).toEqual(expect.arrayContaining(['payment_methods', 'tariffs', 'operated_airports']));
+  });
+  it('readiness complet → ready', async () => {
+    const svc = make({ code: 'KE', currency: 'KES', paymentMethods: [{ id: 'mpesa' }] }, { tariffs: true, operatedAirports: 2 });
+    const r = await svc.getReadiness('KE');
+    expect(r.ready).toBe(true);
+    expect(r.missing).toEqual([]);
+  });
+  it('activate refuse si non ready', async () => {
+    const svc = make({ code: 'KE', currency: 'KES', paymentMethods: [] }, { tariffs: false });
+    await expect(svc.activate('KE')).rejects.toThrow(/incomplet/i);
+  });
+  it('activate passe le statut à active si ready', async () => {
+    const svc = make({ code: 'KE', currency: 'KES', paymentMethods: [{ id: 'mpesa' }] }, { tariffs: true, operatedAirports: 1 });
+    const res = await svc.activate('KE');
+    expect(res.status).toBe('active');
+  });
+});
