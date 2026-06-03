@@ -31,6 +31,7 @@ import { KycModule } from './kyc/kyc.module';
 import { SosModule } from './sos/sos.module';
 import { CallsModule } from './calls/calls.module';
 import { AnnouncementsModule } from './announcements/announcements.module';
+import { CountriesModule } from './countries/countries.module';
 
 @Module({
   imports: [
@@ -73,6 +74,7 @@ import { AnnouncementsModule } from './announcements/announcements.module';
     SosModule,
     CallsModule,
     AnnouncementsModule,
+    CountriesModule,
   ],
   controllers: [AppController],
   providers: [
