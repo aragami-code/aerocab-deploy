@@ -29,4 +29,44 @@ export class CountriesService {
       this.prisma.country.update({ where: { code }, data: { isDefault: true } }),
     ]);
   }
+
+  /**
+   * Remplit les métadonnées pays (préfixe, symbole devise, défaut) sur les pays
+   * déjà opérés, sans écraser les champs gérés par l'admin (name, currency,
+   * paymentMethods, accessPrice). Idempotent — appelé au démarrage.
+   */
+  async backfillKnownCountries(): Promise<void> {
+    const known = [
+      { code: 'CM', name: 'Cameroun', currency: 'XAF', phonePrefix: '+237', flagEmoji: '🇨🇲', currencySymbol: 'FCFA', currencyDecimals: 0, defaultLanguage: 'fr' },
+      { code: 'SN', name: 'Sénégal',  currency: 'XOF', phonePrefix: '+221', flagEmoji: '🇸🇳', currencySymbol: 'FCFA', currencyDecimals: 0, defaultLanguage: 'fr' },
+    ];
+
+    for (const c of known) {
+      try {
+        await this.prisma.country.upsert({
+          where: { code: c.code },
+          // Crée la ligne complète si absente (cas d'un nouvel environnement)
+          create: {
+            code: c.code, name: c.name, currency: c.currency,
+            phonePrefix: c.phonePrefix, flagEmoji: c.flagEmoji,
+            currencySymbol: c.currencySymbol, currencyDecimals: c.currencyDecimals,
+            defaultLanguage: c.defaultLanguage, status: 'active',
+          },
+          // Ne remplit QUE les métadonnées structurelles (pas name/currency/paymentMethods)
+          update: {
+            phonePrefix: c.phonePrefix, flagEmoji: c.flagEmoji,
+            currencySymbol: c.currencySymbol, currencyDecimals: c.currencyDecimals,
+          },
+        });
+      } catch (e: any) {
+        this.logger.warn(`[backfill] pays ${c.code} échoué: ${e?.message}`);
+      }
+    }
+
+    // Garantit un pays par défaut (CM) si aucun n'est encore marqué — sans écraser un choix admin existant.
+    const existingDefault = await this.prisma.country.findFirst({ where: { isDefault: true } });
+    if (!existingDefault) {
+      await this.setDefault('CM').catch((e) => this.logger.warn(`[backfill] setDefault CM échoué: ${e?.message}`));
+    }
+  }
 }
