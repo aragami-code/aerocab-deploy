@@ -813,6 +813,7 @@ model RolePermission {
 model UserAdminRole {
   userId    String    @map("user_id") @db.Uuid
   roleId    String    @map("role_id") @db.Uuid
+  countryScope String[]  @default([]) @map("country_scope")
   grantedAt DateTime  @default(now()) @map("granted_at")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   role      AdminRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
