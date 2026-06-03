@@ -306,6 +306,22 @@ export class BookingsService {
     return Math.round(grossAmount * rate * 100) / 100;
   }
 
+  /** Taux de commission effectif (0–1) pour un nouveau booking, country-aware. */
+  private async resolveBookingCommissionRate(
+    vehicleType: string, forfaitId: string | null, operatingCountry: string | null,
+  ): Promise<number> {
+    let forfaitPercent: number | null = null;
+    if (forfaitId) {
+      const forfait = await this.forfaitsService.findOne(forfaitId).catch(() => null);
+      forfaitPercent = forfait?.companyPercent ?? null;
+    }
+    const rideTariffs = await this.settingsService.getTariffsByCountry(operatingCountry);
+    const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate ?? null;
+    const settingRaw = await this.settingsService.getForCountry('commission_rate_pct', operatingCountry, '');
+    const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
+    return resolveCommissionRate({ forfaitPercent, vehicleRate, settingRate, tariffsRate: rideTariffs.commissionRate ?? null });
+  }
+
   /**
    * P2.1 — Géocodage inversé asynchrone du pickupAddress après création du booking.
    * Appelle Google Geocoding, met à jour le booking si trouvé, et émet une socket
@@ -752,6 +768,7 @@ export class BookingsService {
       }
 
       // 1. Créer le booking en premier
+      const frozenCommissionRate = await this.resolveBookingCommissionRate(dto.vehicleType, null, bookingCountryCode);
       const newBooking = await tx.booking.create({
         data: {
           passengerId,
@@ -788,6 +805,7 @@ export class BookingsService {
           airportFee:  null,
           // Forfait
           forfaitId:     null,
+          commissionRate: frozenCommissionRate,
           pricingZoneId: zoneMatch.zone.id,
           pricingMode:   pricingMode as any,
         } as any,
@@ -2169,7 +2187,9 @@ export class BookingsService {
         // Pour le cash : le passager paie le driver en main. Le driver doit la commission
         // à AeroCab → on enregistre la dette pour qu'elle soit déduite de ses retraits futurs.
         if (booking.paymentMethod === 'cash') {
-          const commissionAmount = await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId, booking.operatingCountry ?? null);
+          const commissionAmount = booking.commissionRate != null
+            ? Math.round(grossAmount * booking.commissionRate * 100) / 100
+            : await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId ?? null, booking.operatingCountry ?? null);
           await this.cashCommissionSvc.recordDebt(booking.driverProfile.id, commissionAmount)
             .catch((err) => this.logger.warn(`[CashCommission] recordDebt ${booking.id} failed: ${err?.message}`));
         }
