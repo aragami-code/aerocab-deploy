@@ -136,15 +136,16 @@ export class PaymentsController {
    */
   @Get('methods')
   @UseGuards(JwtAuthGuard)
-  async getPaymentMethods(@Request() req: any) {
+  async getPaymentMethods(@Request() req: any, @Query('country') country?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: req.user.id },
       select: { phone: true },
     });
 
-    const countryCode = (user?.phone ? extractCountryFromPhone(user.phone) : null) ?? 'CM';
+    const phoneCountry = (user?.phone ? extractCountryFromPhone(user.phone) : null) ?? 'CM';
+    const countryCode = (country ?? phoneCountry).toUpperCase();
 
-    const country = await this.prisma.country.findUnique({
+    const countryRow = await this.prisma.country.findUnique({
       where: { code: countryCode },
       select: { paymentMethods: true },
     });
@@ -155,8 +156,8 @@ export class PaymentsController {
       { id: 'cash',            label: 'Espèces',       icon: 'cash' },
     ];
 
-    const methods = Array.isArray(country?.paymentMethods) && (country.paymentMethods as any[]).length
-      ? country.paymentMethods as any[]
+    const methods = Array.isArray(countryRow?.paymentMethods) && (countryRow.paymentMethods as any[]).length
+      ? countryRow.paymentMethods as any[]
       : DEFAULT_METHODS;
 
     return { methods, countryCode };
