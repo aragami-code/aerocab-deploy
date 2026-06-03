@@ -295,7 +295,7 @@ export class DriversService {
     // Required types from admin config (falls back to hardcoded defaults)
     let requiredTypes = ['cni_front', 'cni_back', 'license', 'registration', 'vehicle_photo'];
     try {
-      const raw = await this.settings.get('driver_document_config', '');
+      const raw = await this.settings.getForCountry('driver_document_config', profile.countryCode ?? null, '');
       if (raw) {
         const config: { type: string; required: boolean; enabled: boolean }[] = JSON.parse(raw);
         const fromConfig = config.filter(d => d.enabled && d.required).map(d => d.type);

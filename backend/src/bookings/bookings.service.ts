@@ -79,9 +79,9 @@ export class BookingsService {
   ) {}
 
   /** 0.B17 — Capacité d'un type de véhicule depuis AppSetting vehicle_capacity (JSON). */
-  private async getVehicleSeats(vehicleType: string): Promise<number> {
+  private async getVehicleSeats(vehicleType: string, country?: string | null): Promise<number> {
     try {
-      const raw = await this.settingsService.get('vehicle_capacity', '');
+      const raw = await this.settingsService.getForCountry('vehicle_capacity', country ?? null, '');
       if (raw) {
         const capacity: Record<string, number> = JSON.parse(raw);
         if (capacity[vehicleType] !== undefined) return capacity[vehicleType];
@@ -1115,7 +1115,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         vehicleBrand: booking.driverProfile?.vehicleBrand || '',
         vehicleModel: booking.driverProfile?.vehicleModel || '',
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
         estimatedPrice: booking.estimatedPrice,
         paymentMethod: booking.paymentMethod,
         driverEtaMinutes: liveEtaMinutes,
@@ -1584,7 +1584,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       },
     };
   }
@@ -1708,7 +1708,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       });
       this.notifications.sendToUser(
         nextDriver.user.id,
@@ -1804,7 +1804,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       });
       this.notifications.sendToUser(
         nextDriver.user.id,
