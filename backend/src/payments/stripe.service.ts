@@ -24,8 +24,8 @@ export class StripeService {
     private settings: SettingsService,
   ) {}
 
-  private async cred(dbKey: string, envKey: string): Promise<string> {
-    const fromDb = await this.settings.get(dbKey, '');
+  private async cred(dbKey: string, envKey: string, country?: string | null): Promise<string> {
+    const fromDb = await this.settings.getForCountry(dbKey, country ?? null, '');
     return fromDb || this.config.get<string>(envKey, '');
   }
 
@@ -35,8 +35,9 @@ export class StripeService {
     currency: string;
     description: string;
     customerEmail: string;
+    country?: string;
   }): Promise<{ paymentUrl: string; sessionId: string }> {
-    const secretKey  = await this.cred('payment_stripe_secret_key', 'STRIPE_SECRET_KEY');
+    const secretKey  = await this.cred('payment_stripe_secret_key', 'STRIPE_SECRET_KEY', params.country ?? null);
     const appScheme  = 'aerogo24-passenger';
     const backendUrl = await this.settings.get('backend_url', this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com'));
 
@@ -121,8 +122,9 @@ export class StripeService {
     customerEmail?: string;
     bookingId: string;
     backendUrl: string;
+    country?: string;
   }): Promise<{ paymentIntentId: string; clientSecret: string }> {
-    const secretKey = await this.cred('payment_stripe_secret_key', 'STRIPE_SECRET_KEY');
+    const secretKey = await this.cred('payment_stripe_secret_key', 'STRIPE_SECRET_KEY', params.country ?? null);
     if (!secretKey) throw new Error('Stripe: clé secrète non configurée');
 
     const body = encodeStripe({

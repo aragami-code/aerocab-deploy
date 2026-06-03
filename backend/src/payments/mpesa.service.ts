@@ -18,14 +18,14 @@ export class MpesaService {
     return this.config.get<string>('NODE_ENV') === 'production' ? DARAJA_PROD : DARAJA_SANDBOX;
   }
 
-  private async cred(dbKey: string, envKey: string, fallback = ''): Promise<string> {
-    const fromDb = await this.settings.get(dbKey, '');
+  private async cred(dbKey: string, envKey: string, fallback = '', country?: string | null): Promise<string> {
+    const fromDb = await this.settings.getForCountry(dbKey, country ?? null, '');
     return fromDb || this.config.get<string>(envKey, fallback);
   }
 
-  private async getAccessToken(): Promise<string> {
-    const consumerKey    = await this.cred('payment_mpesa_consumer_key',    'MPESA_CONSUMER_KEY');
-    const consumerSecret = await this.cred('payment_mpesa_consumer_secret', 'MPESA_CONSUMER_SECRET');
+  private async getAccessToken(country?: string | null): Promise<string> {
+    const consumerKey    = await this.cred('payment_mpesa_consumer_key',    'MPESA_CONSUMER_KEY', '', country ?? null);
+    const consumerSecret = await this.cred('payment_mpesa_consumer_secret', 'MPESA_CONSUMER_SECRET', '', country ?? null);
     const cred = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
     const res  = await fetch(`${this.baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
       headers: { 'Authorization': `Basic ${cred}` },
@@ -35,9 +35,9 @@ export class MpesaService {
     return data.access_token;
   }
 
-  private async buildTimestampAndPassword(): Promise<{ timestamp: string; password: string }> {
-    const shortcode = await this.cred('payment_mpesa_shortcode', 'MPESA_SHORTCODE', '174379');
-    const passkey   = await this.cred('payment_mpesa_passkey',   'MPESA_PASSKEY');
+  private async buildTimestampAndPassword(country?: string | null): Promise<{ timestamp: string; password: string }> {
+    const shortcode = await this.cred('payment_mpesa_shortcode', 'MPESA_SHORTCODE', '174379', country ?? null);
+    const passkey   = await this.cred('payment_mpesa_passkey',   'MPESA_PASSKEY', '', country ?? null);
     const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
     const password  = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
     return { timestamp, password };
@@ -48,11 +48,12 @@ export class MpesaService {
     amountKes: number;
     phone: string;
     description: string;
+    country?: string;
   }): Promise<{ checkoutRequestId: string; message: string }> {
     const backendUrl = await this.settings.get('backend_url', this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com'));
-    const shortcode  = await this.cred('payment_mpesa_shortcode', 'MPESA_SHORTCODE', '174379');
-    const token      = await this.getAccessToken();
-    const { timestamp, password } = await this.buildTimestampAndPassword();
+    const shortcode  = await this.cred('payment_mpesa_shortcode', 'MPESA_SHORTCODE', '174379', params.country ?? null);
+    const token      = await this.getAccessToken(params.country ?? null);
+    const { timestamp, password } = await this.buildTimestampAndPassword(params.country ?? null);
 
     const body = {
       BusinessShortCode: shortcode,

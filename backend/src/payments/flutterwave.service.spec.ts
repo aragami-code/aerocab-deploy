@@ -4,7 +4,11 @@ import { FlutterwaveService } from './flutterwave.service';
 import { SettingsService } from '../settings/settings.service';
 
 const mockConfig  = { get: jest.fn((key: string, def?: string) => def ?? '') };
-const mockSettings = { get: jest.fn().mockResolvedValue('') };
+const mockSettings = {
+  get: jest.fn().mockResolvedValue(''),
+  // cred() now uses getForCountry; with country=null it mirrors get() (cascade backward-compat)
+  getForCountry: jest.fn((key: string, _country: string | null, def?: string) => mockSettings.get(key, def)),
+};
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;

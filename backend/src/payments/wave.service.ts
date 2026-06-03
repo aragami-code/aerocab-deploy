@@ -14,8 +14,8 @@ export class WaveService {
     private settings: SettingsService,
   ) {}
 
-  private async cred(dbKey: string, envKey: string): Promise<string> {
-    const fromDb = await this.settings.get(dbKey, '');
+  private async cred(dbKey: string, envKey: string, country?: string | null): Promise<string> {
+    const fromDb = await this.settings.getForCountry(dbKey, country ?? null, '');
     return fromDb || this.config.get<string>(envKey, '');
   }
 
@@ -23,8 +23,9 @@ export class WaveService {
     transactionId: string;
     amount: number;
     description: string;
+    country?: string;
   }): Promise<{ paymentUrl: string; sessionId: string }> {
-    const apiKey    = await this.cred('payment_wave_api_key', 'WAVE_API_KEY');
+    const apiKey    = await this.cred('payment_wave_api_key', 'WAVE_API_KEY', params.country ?? null);
     const appScheme = 'aerogo24-passenger';
 
     const body = {
