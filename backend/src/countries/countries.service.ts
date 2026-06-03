@@ -97,4 +97,22 @@ export class CountriesService {
   async suspend(code: string) {
     return this.prisma.country.update({ where: { code: code.toUpperCase() }, data: { status: 'suspended' } });
   }
+
+  /** Crée un pays en statut draft (devra être activé après config). */
+  createCountry(dto: {
+    code: string; name: string; currency: string; currencySymbol?: string;
+    currencyDecimals?: number; phonePrefix?: string; flagEmoji?: string; pointFxRate?: number;
+  }) {
+    const cc = dto.code.trim().toUpperCase();
+    return this.prisma.country.upsert({
+      where: { code: cc },
+      update: {},
+      create: {
+        code: cc, name: dto.name, currency: dto.currency,
+        currencySymbol: dto.currencySymbol ?? null, currencyDecimals: dto.currencyDecimals ?? 0,
+        phonePrefix: dto.phonePrefix ?? null, flagEmoji: dto.flagEmoji ?? null,
+        pointFxRate: dto.pointFxRate ?? 1, status: 'draft', paymentMethods: [],
+      },
+    });
+  }
 }

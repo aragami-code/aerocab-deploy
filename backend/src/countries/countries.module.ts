@@ -1,9 +1,12 @@
 import { Module, OnModuleInit } from '@nestjs/common';
 import { PrismaModule } from '../database/prisma.module';
+import { RbacModule } from '../rbac/rbac.module';
 import { CountriesService } from './countries.service';
+import { CountriesController } from './countries.controller';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, RbacModule],
+  controllers: [CountriesController],
   providers: [CountriesService],
   exports: [CountriesService],
 })
