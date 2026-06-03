@@ -363,6 +363,14 @@ model Country {
   airports       Json     @default("[]")
   paymentMethods Json     @default("[]") @map("payment_methods")
   isActive       Boolean  @default(true) @map("is_active")
+  flagEmoji        String?       @map("flag_emoji")
+  phonePrefix      String?       @map("phone_prefix")
+  currencySymbol   String?       @map("currency_symbol")
+  currencyDecimals Int           @default(0) @map("currency_decimals")
+  pointFxRate      Float         @default(1) @map("point_fx_rate")
+  defaultLanguage  String        @default("fr") @map("default_language")
+  status           CountryStatus @default(active)
+  isDefault        Boolean       @default(false) @map("is_default")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -631,6 +639,12 @@ enum BookingType {
   ARRIVAL        // À l'aéroport → destination
   DEPARTURE      // Lieu quelconque → aéroport
   INTERNATIONAL  // Hors du pays, réservation à l'avance (vol arrivée → destination)
+}
+
+enum CountryStatus {
+  draft
+  active
+  suspended
 }
 
 enum AnnouncementType {
