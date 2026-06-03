@@ -656,7 +656,7 @@ export class BookingsService {
     const passengerTierForDispatch = await this.usersService.getPassengerTier(passengerId).catch(() => 'bronze');
 
     const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
-      { departureAirport: dto.departureAirport } as any,
+      { departureAirport: dto.departureAirport, operatingCountry: bookingCountryCode } as any,
       isPreLanding,
       dispatchCustomCoords,
       passengerTierForDispatch,
@@ -670,7 +670,7 @@ export class BookingsService {
     if (eligibleDrivers.length === 0 && !isPreLanding && dto.acceptDelay !== true) {
       const pickupCoords = dispatchCustomCoords
         ?? (knownAirportCoords ? { lat: knownAirportCoords.lat, lng: knownAirportCoords.lng } : undefined);
-      const delay = await this.dispatchService.estimateDelayedDispatch(dto.vehicleType, pickupCoords);
+      const delay = await this.dispatchService.estimateDelayedDispatch(dto.vehicleType, pickupCoords, bookingCountryCode);
       if (delay.globalDriversCount > 0) {
         throw new BadRequestException(
           JSON.stringify({

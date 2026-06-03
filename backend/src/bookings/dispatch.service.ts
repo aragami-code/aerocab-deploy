@@ -22,10 +22,12 @@ export class DispatchService {
     this.logger.log(`Finding drivers for booking ${booking.id} (Pre-landing: ${isPreLanding}, tier: ${passengerTier ?? 'bronze'})`);
 
     let nearbyDrivers = [];
+    // Config par pays — pays opérant du booking (null = global, rétro-compatible)
+    const country = (booking as any)?.operatingCountry ?? null;
     // 0.B15 — score min + limits depuis AppSettings
     const [minScoreRaw, preLandingLimitRaw] = await Promise.all([
-      this.settingsService.get('min_driver_score', '4.0'),
-      this.settingsService.get('dispatch_prelanding_limit', '50'),
+      this.settingsService.getForCountry('min_driver_score', country, '4.0'),
+      this.settingsService.getForCountry('dispatch_prelanding_limit', country, '50'),
     ]);
     const minScore = parseFloat(minScoreRaw) || 4.0;
     const basePrelanding = parseInt(preLandingLimitRaw, 10) || 50;
@@ -58,7 +60,7 @@ export class DispatchService {
       });
     } else {
       // PRINCIPLE 2: Passenger already at airport OR departing from home -> Proximity Priority
-      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport, customCoords);
+      nearbyDrivers = await this.findNearbyDrivers(booking.departureAirport, customCoords, country);
       // F8 — Gold/Platinum : si pool insuffisant, élargir rayon via fetch global
       if ((passengerTier === 'gold' || passengerTier === 'platinum') && nearbyDrivers.length < 3) {
         const extra = await this.prisma.driverProfile.findMany({
@@ -80,7 +82,7 @@ export class DispatchService {
    * 0.B3 — Coords lues depuis la table airports DB (plus de constante hardcodée).
    * 0.B4 — Rayon lu depuis AppSetting proximity_radius_km.
    */
-  private async findNearbyDrivers(airportCode: string, customCoords?: { lat: number, lng: number }) {
+  private async findNearbyDrivers(airportCode: string, customCoords?: { lat: number, lng: number }, country: string | null = null) {
     let coords = customCoords;
     if (!coords && airportCode) {
       const airport = await this.airportsService.findByCode(airportCode.toUpperCase());
@@ -102,7 +104,7 @@ export class DispatchService {
       });
     }
 
-    const radiusRaw = await this.settingsService.get('proximity_radius_km', '25');
+    const radiusRaw = await this.settingsService.getForCountry('proximity_radius_km', country, '25');
     const proximityRadiusKm = parseFloat(radiusRaw) || 25;
 
     // Haversine formula in RAW SQL
@@ -167,6 +169,7 @@ export class DispatchService {
   async estimateDelayedDispatch(
     vehicleType: string,
     pickupCoords?: { lat: number; lng: number },
+    country: string | null = null,
   ): Promise<{ globalDriversCount: number; estimatedWaitMin: number; closestDistanceKm: number | null }> {
     // Chauffeurs disponibles globalement avec coords (pour estimation distance)
     const recentThreshold = new Date(Date.now() - 10 * 60 * 1000);
@@ -184,11 +187,11 @@ export class DispatchService {
     const globalDriversCount = drivers.length;
 
     // Setting dynamique : vitesse moyenne, défaut 30 km/h (urbain)
-    const avgSpeedRaw = await this.settingsService.get('avg_driver_speed_kmh', '30');
+    const avgSpeedRaw = await this.settingsService.getForCountry('avg_driver_speed_kmh', country, '30');
     const avgSpeedKmh = Math.max(1, parseFloat(avgSpeedRaw) || 30);
 
     // Setting fallback si pas de coords / pas de chauffeur géolocalisé
-    const fallbackRaw = await this.settingsService.get('delayed_dispatch_default_wait_min', '45');
+    const fallbackRaw = await this.settingsService.getForCountry('delayed_dispatch_default_wait_min', country, '45');
     const fallbackMin = Math.max(1, parseInt(fallbackRaw, 10) || 45);
 
     if (!pickupCoords || drivers.length === 0) {
@@ -214,7 +217,7 @@ export class DispatchService {
     }
 
     // ETA = distance / vitesse * 60 + buffer de prise en charge (setting)
-    const pickupBufferRaw = await this.settingsService.get('driver_pickup_buffer_min', '5');
+    const pickupBufferRaw = await this.settingsService.getForCountry('driver_pickup_buffer_min', country, '5');
     const pickupBuffer = Math.max(0, parseInt(pickupBufferRaw, 10) || 5);
     const estimatedWaitMin = Math.ceil((closestKm / avgSpeedKmh) * 60) + pickupBuffer;
 
