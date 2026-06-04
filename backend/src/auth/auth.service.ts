@@ -85,7 +85,7 @@ export class AuthService {
 
     const code = isTestMode
       ? testOtpValue
-      : Math.floor(100000 + Math.random() * 900000).toString();
+      : randomInt(100000, 1000000).toString();
 
     const shouldLog = isTestMode || otpLogEnabled === 'true'
       || this.config.get('NODE_ENV', 'development') !== 'production';
@@ -232,7 +232,7 @@ export class AuthService {
 
     const code = isTestMode
       ? testOtpValue
-      : Math.floor(100000 + Math.random() * 900000).toString();
+      : randomInt(100000, 1000000).toString();
 
     this.logger.log(`[OTP-EMAIL]${isTestMode ? ' [TEST]' : ''} ${emailAddr} → ${isTestMode ? code : '******'}`);
 
