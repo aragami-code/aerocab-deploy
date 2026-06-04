@@ -2277,7 +2277,8 @@ export class BookingsService {
           where: { passengerId: booking.passengerId, status: 'completed', id: { not: booking.id } },
         });
         if (completedRidesCount === 0) {
-          const tariffs = await this.settingsService.getTariffs();
+          // Bonus 1ère course selon le pays de la course (null = global)
+          const tariffs = await this.settingsService.getTariffsByCountry((booking as any).operatingCountry ?? null);
           const onFirstRideBonus = tariffs.referralBonus?.onFirstRide ?? 1000;
           if (onFirstRideBonus > 0) {
             const idempotencyRef = `REFERRAL-FIRST-RIDE-${booking.passengerId}`;

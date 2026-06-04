@@ -248,7 +248,7 @@ export class AuthService {
   async applyReferral(userId: string, referralCode: string): Promise<{ success: boolean; message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { referredBy: true },
+      select: { referredBy: true, phone: true, countryCode: true },
     });
     if (user?.referredBy) return { success: false, message: 'Vous avez déjà un parrain.' };
     const referrer = await this.prisma.user.findUnique({
@@ -261,7 +261,9 @@ export class AuthService {
       where: { id: userId },
       data: { referredBy: referrer.id },
     });
-    const tariffs = await this.settings.getTariffs();
+    // Bonus parrainage selon le pays du filleul (marché qu'il rejoint ; null = global)
+    const referralCountry = user?.countryCode ?? (user?.phone ? extractCountryFromPhone(user.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(referralCountry);
     const onSignup     = tariffs.referralBonus?.onSignup    ?? 500;
     const newUserBonus = tariffs.referralBonus?.newUserBonus ?? 300;
     await Promise.all([
