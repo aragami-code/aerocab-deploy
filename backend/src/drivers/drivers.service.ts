@@ -17,6 +17,7 @@ import { UpdateDriverDto } from './dto/update-driver.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import { extractCountryFromPhone } from '../common/phone-country';
+import { canChangeCountry } from './wallet-guard';
 
 @Injectable()
 export class DriversService {
@@ -266,17 +267,38 @@ export class DriversService {
     if (!req) throw new NotFoundException('Demande introuvable');
     if (req.status !== 'pending') throw new BadRequestException('Cette demande a déjà été traitée.');
 
+    // Garde wallet vide : à vérifier AVANT de marquer la demande approuvée,
+    // sinon la demande resterait "approved" sans application du changement.
+    if (status === 'approved') {
+      const wallet = await this.prisma.driverEarningsWallet.findUnique({
+        where: { driverProfileId: req.driverProfileId },
+        select: { balance: true },
+      });
+      const guard = canChangeCountry(wallet?.balance ?? 0);
+      if (!guard.ok) throw new BadRequestException(guard.reason);
+    }
+
     await (this.prisma as any).countryChangeRequest.update({
       where: { id: requestId },
       data: { status, adminNote: adminNote ?? null, reviewedBy: adminId, reviewedAt: new Date() },
     });
 
     if (status === 'approved') {
+      const newCountry = req.requestedCountry.toUpperCase();
+      const newCurrency = (await this.prisma.country.findUnique({
+        where: { code: newCountry }, select: { currency: true },
+      }))?.currency ?? null;
       await this.prisma.driverProfile.update({
         where: { id: req.driverProfileId },
-        data: { countryCode: req.requestedCountry },
+        data: { countryCode: newCountry },
       });
-      this.logger.log(`Country change approved: driverProfile ${req.driverProfileId} → ${req.requestedCountry}`);
+      if (newCurrency) {
+        await this.prisma.driverEarningsWallet.updateMany({
+          where: { driverProfileId: req.driverProfileId },
+          data: { currency: newCurrency },
+        });
+      }
+      this.logger.log(`Country change approved: driverProfile ${req.driverProfileId} → ${newCountry} (currency ${newCurrency})`);
     }
 
     return { success: true, status };
