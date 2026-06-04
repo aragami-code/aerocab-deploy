@@ -20,6 +20,8 @@ const PUBLIC_SETTING_KEYS = [
   'booking_passenger_timeout_ms',
   'passenger_confirm_timeout_min',
   'otp_channel',
+  'otp_channels_enabled',
+  'otp_default_channel',
   'google_maps_key',
   'workflow_arrival_enabled',
   'workflow_departure_enabled',
