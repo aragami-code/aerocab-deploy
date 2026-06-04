@@ -1,7 +1,7 @@
 import { Controller, Post, Get, Body, Query, Res, UseGuards, HttpCode } from '@nestjs/common';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
-import { SendOtpDto, VerifyOtpDto, RefreshTokenDto } from './dto';
+import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, ChannelsLookupDto } from './dto';
 import { JwtAuthGuard } from './guards';
 import { CurrentUser } from './decorators';
 
@@ -18,9 +18,9 @@ export class AuthController {
 
   @Post('otp/channels')
   @HttpCode(200)
-  @SkipThrottle()
-  async otpChannels(@Body() body: { identifier: string }) {
-    return this.authService.getOtpChannels(body.identifier);
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async otpChannels(@Body() dto: ChannelsLookupDto) {
+    return this.authService.getOtpChannels(dto.identifier);
   }
 
   @Post('otp/verify')
