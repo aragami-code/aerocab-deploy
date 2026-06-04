@@ -13,6 +13,7 @@ import { EmailRouterService } from '../email/email-router.service';
 import { SettingsService } from '../settings/settings.service';
 import { maskPhone } from '../common/helpers';
 import { extractCountryFromPhone } from '../common/phone-country';
+import { availableChannels, Channel } from '../otp/otp-channels';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -48,7 +49,7 @@ export class AuthService {
     return sv ? parseInt(sv, 10) : 0;
   }
 
-  async sendOtp(phone: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
+  async sendOtp(phone: string, lang = 'fr', channel?: 'sms' | 'whatsapp' | 'email'): Promise<{ message: string; expiresIn: number }> {
     // H6 — Rate limit global : empêche le spam via milliers de numéros différents.
     // Compteur global glissant sur 60s, seuil configurable (défaut : 500 req/min).
     const globalKey = 'otp_global_rate';
@@ -100,15 +101,40 @@ export class AuthService {
       await this.redis.expire(rateKey, OTP_RATE_LIMIT_TTL);
     }
 
-    // Send SMS (skip in test mode — code already stored in Redis)
+    // Send OTP via le canal choisi (skip in test mode — code already stored in Redis)
     if (!isTestMode) {
-      const sent = await this.sms.sendOtp(phone, code, lang);
+      const country = extractCountryFromPhone(phone);
+      const sent = await this.sms.sendOtp(phone, code, lang, { channel, country });
       if (!sent) {
-        throw new BadRequestException("Echec d'envoi du SMS. Reessayez.");
+        throw new BadRequestException("Echec d'envoi du code. Reessayez.");
       }
     }
 
     return { message: 'OTP envoye avec succes', expiresIn: OTP_TTL };
+  }
+
+  /**
+   * Canaux OTP disponibles pour un identifiant (numéro ou email), selon les
+   * contacts du compte ∩ canaux activés du pays. Anti-énumération : si aucun
+   * compte, on retombe sur les contacts de l'identifiant lui-même.
+   */
+  async getOtpChannels(identifier: string): Promise<{ channels: string[]; default: string }> {
+    const isEmail = identifier.includes('@');
+    const country = isEmail ? null : extractCountryFromPhone(identifier);
+    const account = isEmail
+      ? await this.prisma.user.findFirst({ where: { email: identifier }, select: { phone: true, email: true } })
+      : await this.prisma.user.findUnique({ where: { phone: identifier }, select: { phone: true, email: true } });
+
+    const hasPhone = account ? !!account.phone : !isEmail;
+    const hasEmail = account ? !!account.email : isEmail;
+
+    const enabledRaw = await this.settings.getForCountry('otp_channels_enabled', country, 'sms,email');
+    const enabled = enabledRaw.split(',').map((s) => s.trim()).filter(Boolean) as Channel[];
+
+    const channels = availableChannels({ hasPhone, hasEmail, mode: 'login' }, enabled);
+    const defRaw = await this.settings.getForCountry('otp_default_channel', country, '');
+    const def = channels.includes(defRaw as Channel) ? defRaw : (channels[0] ?? 'sms');
+    return { channels, default: def };
   }
 
   async sendEmailOtp(emailAddr: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
