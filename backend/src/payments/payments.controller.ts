@@ -800,7 +800,14 @@ export class PaymentsController {
     if (!tx) return;
 
     const meta   = tx.metadata as any;
-    const tariffs = await this.settings.getTariffs();
+    // Pays de l'utilisateur du wallet → taux de recharge local (rétro-compatible : null = global)
+    const owner = await this.prisma.wallet.findUnique({
+      where: { id: tx.walletId },
+      select: { user: { select: { phone: true, countryCode: true } } },
+    });
+    const rechargeCountry = owner?.user?.countryCode
+      ?? (owner?.user?.phone ? extractCountryFromPhone(owner.user.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(rechargeCountry);
     const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
 
     const { count } = await this.prisma.transaction.updateMany({

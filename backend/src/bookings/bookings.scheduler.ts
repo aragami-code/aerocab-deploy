@@ -4,6 +4,7 @@ import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RidesGateway } from './rides.gateway';
 import { SettingsService } from '../settings/settings.service';
+import { extractCountryFromPhone } from '../common/phone-country';
 import { PointsService } from '../points/points.service';
 import { AuditService } from '../audit/audit.service';
 import { RedisService } from '../redis/redis.service';
@@ -713,7 +714,14 @@ export class BookingsScheduler {
             data: { status: 'completed' },
           });
           if (count > 0) {
-            const tariffs = await this.settingsService.getTariffs();
+            // Pays de l'utilisateur du wallet → taux de recharge local (null = global)
+            const owner = await this.prisma.wallet.findUnique({
+              where: { id: tx.walletId },
+              select: { user: { select: { phone: true, countryCode: true } } },
+            });
+            const rechargeCountry = owner?.user?.countryCode
+              ?? (owner?.user?.phone ? extractCountryFromPhone(owner.user.phone) : null);
+            const tariffs = await this.settingsService.getTariffsByCountry(rechargeCountry);
             const pointsToCredit = (meta?.points as number | undefined) ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
             await this.prisma.wallet.update({
               where: { id: tx.walletId },
