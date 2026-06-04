@@ -388,6 +388,11 @@ export class BookingsService {
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
+    // Garde profil : un passager sans numéro vérifié ne peut pas réserver.
+    const passenger = await this.prisma.user.findUnique({ where: { id: passengerId }, select: { phone: true } });
+    if (!passenger?.phone) {
+      throw new ForbiddenException({ code: 'PROFILE_INCOMPLETE', message: 'Vérifiez votre numéro de téléphone avant de réserver.' });
+    }
     // P1.1 — Validation early du vehicleType contre la liste dynamique des véhicules
     // configurés. Évite d'exécuter tout le pipeline tarifaire pour rejeter un type invalide.
     const globalTariffs = await this.settingsService.getTariffs();
