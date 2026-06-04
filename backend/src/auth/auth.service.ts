@@ -15,6 +15,7 @@ import { maskPhone } from '../common/helpers';
 import { extractCountryFromPhone } from '../common/phone-country';
 import { availableChannels, Channel } from '../otp/otp-channels';
 import { phoneLinkAllowed } from './phone-link';
+import { randomInt } from 'crypto';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -163,7 +164,8 @@ export class AuthService {
     const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
     const testOtpValue    = await this.settings.get('test_otp_value', '000000');
     const isTestMode      = testModeEnabled === 'true';
-    const code = isTestMode ? testOtpValue : Math.floor(100000 + Math.random() * 900000).toString();
+    // OTP via RNG cryptographique (anti-prédiction)
+    const code = isTestMode ? testOtpValue : randomInt(100000, 1000000).toString();
 
     await this.redis.set(`otp:link:${userId}`, JSON.stringify({ code, attempts: 0, phone }), OTP_TTL);
 
