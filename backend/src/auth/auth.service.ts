@@ -14,6 +14,7 @@ import { SettingsService } from '../settings/settings.service';
 import { maskPhone } from '../common/helpers';
 import { extractCountryFromPhone } from '../common/phone-country';
 import { availableChannels, Channel } from '../otp/otp-channels';
+import { phoneLinkAllowed } from './phone-link';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -137,6 +138,73 @@ export class AuthService {
     const defRaw = await this.settings.getForCountry('otp_default_channel', country, '');
     const def = channels.includes(defRaw as Channel) ? defRaw : (channels[0] ?? 'sms');
     return { channels, default: def };
+  }
+
+  /**
+   * Envoie un OTP pour lier un numéro à un compte (email/Google sans téléphone).
+   * Canal sms/whatsapp uniquement (l'OTP doit aller au numéro pour prouver la possession).
+   */
+  async sendPhoneLinkOtp(userId: string, phone: string, channel: 'sms' | 'whatsapp' = 'sms'): Promise<{ message: string; expiresIn: number }> {
+    const me = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    const guard = phoneLinkAllowed(me?.phone ?? null);
+    if (!guard.ok) throw new BadRequestException(guard.reason);
+
+    const taken = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+    if (taken && taken.id !== userId) {
+      throw new BadRequestException('Ce numéro est déjà utilisé par un autre compte.');
+    }
+
+    // Rate-limit par userId (5 envois / 10 min)
+    const rlKey = `phone_link_rate:${userId}`;
+    const n = await this.redis.incr(rlKey);
+    if (n === 1) await this.redis.expire(rlKey, 600);
+    if (n > 5) throw new BadRequestException('Trop de tentatives. Réessayez plus tard.');
+
+    const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
+    const testOtpValue    = await this.settings.get('test_otp_value', '000000');
+    const isTestMode      = testModeEnabled === 'true';
+    const code = isTestMode ? testOtpValue : Math.floor(100000 + Math.random() * 900000).toString();
+
+    await this.redis.set(`otp:link:${userId}`, JSON.stringify({ code, attempts: 0, phone }), OTP_TTL);
+
+    if (!isTestMode) {
+      const country = extractCountryFromPhone(phone);
+      const sent = await this.sms.sendOtp(phone, code, 'fr', { channel, country });
+      if (!sent) throw new BadRequestException("Echec d'envoi du code. Reessayez.");
+    }
+    return { message: 'Code envoyé', expiresIn: OTP_TTL };
+  }
+
+  /**
+   * Vérifie l'OTP de liaison et pose phone + countryCode sur le compte.
+   */
+  async verifyPhoneLink(userId: string, phone: string, code: string): Promise<{ id: string; phone: string; countryCode: string | null; profileComplete: boolean }> {
+    const key = `otp:link:${userId}`;
+    const raw = await this.redis.get(key);
+    if (!raw) throw new UnauthorizedException('Code expiré ou invalide.');
+    const { code: storedCode, attempts, phone: storedPhone } = JSON.parse(raw);
+
+    if (attempts >= 3) { await this.redis.del(key); throw new UnauthorizedException('Trop de tentatives. Demandez un nouveau code.'); }
+    if (storedPhone !== phone) throw new UnauthorizedException('Numéro non concordant.');
+    if (storedCode !== code) {
+      await this.redis.set(key, JSON.stringify({ code: storedCode, attempts: attempts + 1, phone: storedPhone }), await this.redis.ttl(key));
+      throw new UnauthorizedException('Code incorrect.');
+    }
+    await this.redis.del(key);
+
+    // Anti-race : re-vérifier l'unicité + l'absence de numéro
+    const me = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    if (me?.phone) throw new BadRequestException('Un numéro est déjà associé à ce compte.');
+    const taken = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+    if (taken && taken.id !== userId) throw new BadRequestException('Ce numéro est déjà utilisé par un autre compte.');
+
+    const countryCode = extractCountryFromPhone(phone);
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { phone, countryCode },
+      select: { id: true, phone: true, countryCode: true },
+    });
+    return { id: updated.id, phone: updated.phone!, countryCode: updated.countryCode, profileComplete: true };
   }
 
   async sendEmailOtp(emailAddr: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
@@ -720,6 +788,7 @@ export class AuthService {
         status: true,
         avatarUrl: true,
         language: true,
+        countryCode: true,
         createdAt: true,
       },
     });
@@ -728,6 +797,6 @@ export class AuthService {
       throw new UnauthorizedException('Utilisateur introuvable');
     }
 
-    return user;
+    return { ...user, profileComplete: !!user.phone };
   }
 }
