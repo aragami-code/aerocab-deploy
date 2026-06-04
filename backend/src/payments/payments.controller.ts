@@ -93,7 +93,10 @@ export class PaymentsController {
       wallet = await this.prisma.wallet.create({ data: { userId, balance: 0 } });
     }
 
-    const tariffs = await this.settings.getTariffs();
+    // Valeur du point selon le pays de l'utilisateur (null = global)
+    const walletUser = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, countryCode: true } });
+    const userCountry = walletUser?.countryCode ?? (walletUser?.phone ? extractCountryFromPhone(walletUser.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(userCountry);
     const fcfaPerPoint = tariffs.fcfaPerPoint;
 
     const transactions = await this.prisma.transaction.findMany({
@@ -322,7 +325,10 @@ export class PaymentsController {
       label  = labelMap[points] ?? `${points} pts`;
     }
 
-    const tariffs    = await this.settings.getTariffs();
+    // Valeur du point selon le pays de l'utilisateur (null = global)
+    const rechargeUser = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, countryCode: true } });
+    const rechargeCountry = rechargeUser?.countryCode ?? (rechargeUser?.phone ? extractCountryFromPhone(rechargeUser.phone) : null);
+    const tariffs    = await this.settings.getTariffsByCountry(rechargeCountry);
     const amountFcfa = points * tariffs.fcfaPerPoint;
 
     // ── Contrôle montant maximum ─────────────────────────────────────────────

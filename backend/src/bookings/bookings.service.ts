@@ -2625,8 +2625,8 @@ export class BookingsService {
         Math.cos(startLat * Math.PI / 180) * Math.cos(newDestLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
       const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-      // Charge les tarifs pour recalculer
-      const tariffs = await this.settingsService.getTariffs();
+      // Charge les tarifs du pays de la course pour recalculer (null = global)
+      const tariffs = await this.settingsService.getTariffsByCountry((booking as any).operatingCountry ?? null);
       const priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distKm, booking.vehicleType, tariffs);
       const pointValue = tariffs.pointValue ?? 1;
       newPrice = Math.ceil(priceInFcfa / pointValue);
