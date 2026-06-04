@@ -11,4 +11,9 @@ export class SendOtpDto {
   @IsString()
   @IsIn(['fr', 'en', 'zh', 'pidgin'])
   lang?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['sms', 'whatsapp', 'email'])
+  channel?: 'sms' | 'whatsapp' | 'email';
 }

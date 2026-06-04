@@ -13,7 +13,14 @@ export class AuthController {
   @HttpCode(200)
   @SkipThrottle()
   async sendOtp(@Body() dto: SendOtpDto) {
-    return this.authService.sendOtp(dto.phone, dto.lang ?? 'fr');
+    return this.authService.sendOtp(dto.phone, dto.lang ?? 'fr', dto.channel);
+  }
+
+  @Post('otp/channels')
+  @HttpCode(200)
+  @SkipThrottle()
+  async otpChannels(@Body() body: { identifier: string }) {
+    return this.authService.getOtpChannels(body.identifier);
   }
 
   @Post('otp/verify')
