@@ -1,7 +1,7 @@
 import { Controller, Post, Get, Body, Query, Res, UseGuards, HttpCode } from '@nestjs/common';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
-import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, ChannelsLookupDto } from './dto';
+import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, ChannelsLookupDto, LinkPhoneSendDto, LinkPhoneVerifyDto } from './dto';
 import { JwtAuthGuard } from './guards';
 import { CurrentUser } from './decorators';
 
@@ -21,6 +21,22 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   async otpChannels(@Body() dto: ChannelsLookupDto) {
     return this.authService.getOtpChannels(dto.identifier);
+  }
+
+  @Post('phone/link/send')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  async linkPhoneSend(@CurrentUser('id') userId: string, @Body() dto: LinkPhoneSendDto) {
+    return this.authService.sendPhoneLinkOtp(userId, dto.phone, dto.channel ?? 'sms');
+  }
+
+  @Post('phone/link/verify')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async linkPhoneVerify(@CurrentUser('id') userId: string, @Body() dto: LinkPhoneVerifyDto) {
+    return this.authService.verifyPhoneLink(userId, dto.phone, dto.code);
   }
 
   @Post('otp/verify')
