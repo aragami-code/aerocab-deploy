@@ -119,11 +119,13 @@ export class AuthService {
    * compte, on retombe sur les contacts de l'identifiant lui-même.
    */
   async getOtpChannels(identifier: string): Promise<{ channels: string[]; default: string }> {
-    const isEmail = identifier.includes('@');
-    const country = isEmail ? null : extractCountryFromPhone(identifier);
+    const raw = (identifier ?? '').trim();
+    const isEmail = raw.includes('@');
+    const id = isEmail ? raw.toLowerCase() : raw;
+    const country = isEmail ? null : extractCountryFromPhone(id);
     const account = isEmail
-      ? await this.prisma.user.findFirst({ where: { email: identifier }, select: { phone: true, email: true } })
-      : await this.prisma.user.findUnique({ where: { phone: identifier }, select: { phone: true, email: true } });
+      ? await this.prisma.user.findFirst({ where: { email: id }, select: { phone: true, email: true } })
+      : await this.prisma.user.findUnique({ where: { phone: id }, select: { phone: true, email: true } });
 
     const hasPhone = account ? !!account.phone : !isEmail;
     const hasEmail = account ? !!account.email : isEmail;
