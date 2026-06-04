@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Patch, Body, Param, Query, Request, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PromosService } from './promos.service';
 import { CreatePromoDto } from './dto/create-promo.dto';
@@ -24,16 +24,20 @@ export class PromosController {
   list(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('country') country?: string,
   ) {
     return this.promosService.listPromos(
       page ? parseInt(page) : 1,
       limit ? parseInt(limit) : 20,
+      country || undefined,
     );
   }
 
   @Get('validate/:code')
-  async validate(@Param('code') code: string) {
-    const result = await this.promosService.validatePromo(code);
+  async validate(@Request() req: any, @Param('code') code: string) {
+    // L'endpoint est authentifié (JwtAuthGuard au niveau classe) → on scope le
+    // promo par le pays de l'utilisateur qui le saisit.
+    const result = await this.promosService.validatePromo(code, req.user?.id);
     if (!result) return { valid: false, discount: 0 };
     return { valid: true, discount: result.discount };
   }

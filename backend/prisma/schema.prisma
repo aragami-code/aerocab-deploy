@@ -440,6 +440,8 @@ model PromoCode {
   expiresAt  DateTime? @map("expires_at")
   isActive   Boolean   @default(true) @map("is_active")
   usagePerUser Boolean @default(false) @map("usage_per_user")
+  // Pays du code promo. null = global (valable dans tous les pays).
+  countryCode String?  @map("country_code") @db.VarChar(2)
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
   usages     PromoUsage[]
