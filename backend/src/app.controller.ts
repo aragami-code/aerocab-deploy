@@ -48,9 +48,13 @@ const PUBLIC_SETTING_KEYS = [
   'airport_neighborhood_coords',
 ];
 
-// Clés de PUBLIC_SETTING_KEYS qui se résolvent par pays
+// Clés de PUBLIC_SETTING_KEYS qui se résolvent par pays.
+// NB : workflow_international_enabled est volontairement EXCLU — INTERNATIONAL est
+// transfrontalier (il dépend du pays de DESTINATION, pas du domicile). On le laisse
+// donc en valeur globale (kill-switch admin) côté affichage ; l'enforcement réel
+// se fait à la réservation via getForCountry(..., operatingCountry) côté backend.
 const PER_COUNTRY_PUBLIC_KEYS = [
-  'workflow_arrival_enabled', 'workflow_departure_enabled', 'workflow_international_enabled',
+  'workflow_arrival_enabled', 'workflow_departure_enabled',
   'feature_referral_enabled', 'feature_cashback_enabled', 'feature_points_purchase_enabled',
   'feature_promo_enabled', 'feature_chat_enabled', 'feature_sos_enabled',
   'feature_destination_change_enabled', 'feature_rating_enabled',
