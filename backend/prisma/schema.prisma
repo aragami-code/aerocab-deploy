@@ -368,7 +368,6 @@ model Country {
   phonePrefix      String?       @map("phone_prefix")
   currencySymbol   String?       @map("currency_symbol")
   currencyDecimals Int           @default(0) @map("currency_decimals")
-  pointFxRate      Float         @default(1) @map("point_fx_rate")
   defaultLanguage  String        @default("fr") @map("default_language")
   status           CountryStatus @default(active)
   isDefault        Boolean       @default(false) @map("is_default")

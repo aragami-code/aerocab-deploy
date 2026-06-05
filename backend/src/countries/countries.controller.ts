@@ -18,7 +18,7 @@ export class CountriesController {
 
   @Post() create(@Body() dto: {
     code: string; name: string; currency: string; currencySymbol?: string;
-    currencyDecimals?: number; phonePrefix?: string; flagEmoji?: string; pointFxRate?: number;
+    currencyDecimals?: number; phonePrefix?: string; flagEmoji?: string;
   }) {
     return this.countries.createCountry(dto);
   }
