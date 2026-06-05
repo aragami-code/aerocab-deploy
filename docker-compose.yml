@@ -82,6 +82,8 @@ services:
     volumes:
       # Stockage persistant des APK (upload admin) — survit aux redéploiements.
       - ./apk-storage:/data/apk
+      # Stockage persistant des uploads (images annonces/tickets/chat, docs KYC, audio SOS).
+      - ./uploads-storage:/data/uploads
     dns:
       - 8.8.8.8
       - 1.1.1.1

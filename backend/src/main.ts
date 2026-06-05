@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import { AppModule } from './app.module';
 import { SettingsService } from './settings/settings.service';
 
-const UPLOAD_DIR = '/tmp/aerogo24-uploads';
+const UPLOAD_DIR = '/data/uploads';
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 function bootstrap_cors(): (string | RegExp)[] {

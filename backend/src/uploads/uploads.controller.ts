@@ -21,7 +21,7 @@ import { RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { SkipThrottle } from '@nestjs/throttler';
 
-const UPLOAD_DIR = '/tmp/aerogo24-uploads';
+const UPLOAD_DIR = '/data/uploads';
 // Volume persistant (bind-mount ./apk-storage:/data/apk) — survit aux redéploiements.
 const APK_DIR = '/data/apk';
 try { fs.mkdirSync(APK_DIR, { recursive: true }); } catch { /* ignore */ }
