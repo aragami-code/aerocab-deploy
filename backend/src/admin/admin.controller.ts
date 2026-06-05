@@ -25,6 +25,8 @@ import { RequirePermission } from '../rbac/require-permission.decorator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PayoutService } from '../payments/payout.service';
 import { SettingsService } from '../settings/settings.service';
+import { RevenueService } from './revenue.service';
+import { Granularity } from './revenue.types';
 
 @SkipThrottle()
 @Controller('admin')
@@ -37,6 +39,7 @@ export class AdminController {
     private driversService: DriversService,
     private payout: PayoutService,
     private settings: SettingsService,
+    private revenue: RevenueService,
   ) {}
 
   // ── Stats ────────────────────────────────────────────
@@ -45,6 +48,24 @@ export class AdminController {
   @RequirePermission('view_stats')
   async getStats(@Query('country') country?: string) {
     return this.adminService.getStats(country);
+  }
+
+  // ── Revenus / Compta centrale ────────────────────────
+  @Get('revenue')
+  @RequirePermission('view_stats')
+  async getRevenue(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('granularity') granularity?: string,
+  ) {
+    const now = new Date();
+    const defFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const fromD = from ? new Date(from) : defFrom;
+    const toD = to ? new Date(to) : now;
+    if (isNaN(fromD.getTime()) || isNaN(toD.getTime())) throw new BadRequestException('Dates invalides');
+    if (fromD > toD) throw new BadRequestException('from doit être antérieur à to');
+    const g: Granularity = granularity === 'monthly' ? 'monthly' : 'range';
+    return this.revenue.getRevenue(fromD, toD, g);
   }
 
   @Get('chart-data')

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { ExportService } from './export.service';
+import { RevenueService } from './revenue.service';
 import { RbacAdminController } from './rbac-admin.controller';
 import { RbacAdminService } from './rbac-admin.service';
 import { SettingsModule } from '../settings/settings.module';
@@ -15,7 +16,7 @@ import { DriversModule } from '../drivers/drivers.module';
 @Module({
   imports: [SettingsModule, RbacModule, PrismaModule, NotificationsModule, RedisModule, PaymentsModule, DriversModule],
   controllers: [AdminController, RbacAdminController],
-  providers: [AdminService, RbacAdminService, ExportService],
+  providers: [AdminService, RbacAdminService, ExportService, RevenueService],
   exports: [AdminService],
 })
 export class AdminModule {}
