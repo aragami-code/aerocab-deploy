@@ -19,3 +19,13 @@ export function getTenantContext(): TenantContext | undefined {
 export function getCurrentTenantId(): string | null {
   return storage.getStore()?.tenantId ?? null;
 }
+
+/**
+ * Établit le contexte tenant pour l'exécution asynchrone courante et ses descendants,
+ * SANS wrapper de callback. Nécessaire pour le flux requête (interceptor) car les
+ * promesses Prisma sont lazy : un `runWithTenant(ctx, () => obs)` perdrait le contexte
+ * au moment où l'opération est réellement exécutée (hors du scope run()).
+ */
+export function enterTenant(ctx: TenantContext): void {
+  storage.enterWith(ctx);
+}

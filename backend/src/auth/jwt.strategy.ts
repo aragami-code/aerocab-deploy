@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { ZERO_TENANT_ID } from '../tenancy/tenant.constants';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -19,7 +20,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub: string; role: string; sv?: number }) {
+  async validate(payload: { sub: string; role: string; sv?: number; tenantId?: string }) {
     // D3 — Session unique : vérifie que le token appartient à la session active
     if (payload.sv !== undefined) {
       const stored = await this.redis.get(`session_version:${payload.sub}`);
@@ -38,6 +39,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Compte désactivé ou supprimé');
     }
 
-    return { id: user.id, phone: user.phone, name: user.name, role: user.role };
+    return {
+      id: user.id, phone: user.phone, name: user.name, role: user.role,
+      tenantId: payload.tenantId ?? ZERO_TENANT_ID,
+    };
   }
 }
