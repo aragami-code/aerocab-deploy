@@ -1111,3 +1111,42 @@ model FavoriteDriver {
   @@index([passengerId])
   @@map("favorite_drivers")
 }
+
+enum TenantStatus { TRIAL ACTIVE SUSPENDED }
+enum LicenseMode  { ENFORCED PERPETUAL DISABLED }
+
+model Tenant {
+  id                String        @id                       // ex: "aerogo" (tenant zéro)
+  slug              String        @unique
+  name              String
+  status            TenantStatus  @default(ACTIVE)
+
+  licenseKey        String        @unique
+  licenseMode       LicenseMode   @default(ENFORCED)
+  licenseExpiry     DateTime?     @map("license_expiry")
+
+  logoUrl           String?       @map("logo_url")
+  primaryColor      String?       @map("primary_color")
+  appNamePassenger  String?       @map("app_name_passenger")
+  appNameDriver     String?       @map("app_name_driver")
+  bundleIdPassenger String?       @map("bundle_id_passenger")
+  bundleIdDriver    String?       @map("bundle_id_driver")
+
+  operatingModel    Json          @default("{}") @map("operating_model")
+
+  countries         TenantCountry[]
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt      @map("updated_at")
+
+  @@map("tenants")
+}
+
+model TenantCountry {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String  @map("tenant_id")
+  countryCode String  @map("country_code")
+  tenant      Tenant  @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, countryCode])
+  @@map("tenant_countries")
+}
