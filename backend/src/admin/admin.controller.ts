@@ -251,6 +251,31 @@ export class AdminController {
     return this.adminService.getBookingRatings(id);
   }
 
+  @Get('bookings/:id/detail')
+  @RequirePermission('view_bookings')
+  async getBookingDetail(@Param('id') id: string) {
+    return this.adminService.getBookingDetail(id);
+  }
+
+  // ── Stats par page (bande analytique réutilisable) ────────────────────────
+  @Get('stats/:domain')
+  @RequirePermission('view_stats')
+  async getPageStats(
+    @Param('domain') domain: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('granularity') granularity?: string,
+    @Query('country') country?: string,
+  ) {
+    const now = new Date();
+    const fromD = from ? new Date(from) : new Date(now.getTime() - 30 * 86400000);
+    const toD = to ? new Date(to) : now;
+    if (isNaN(fromD.getTime()) || isNaN(toD.getTime())) throw new BadRequestException('Dates invalides');
+    if (fromD > toD) throw new BadRequestException('from doit être antérieur à to');
+    const gran = granularity === 'month' ? 'month' : 'day';
+    return this.adminService.getPageStats(domain, fromD, toD, gran, country ?? null);
+  }
+
   @Patch('bookings/:id/cancel')
   @RequirePermission('cancel_booking')
   async cancelBooking(@Param('id') id: string) {

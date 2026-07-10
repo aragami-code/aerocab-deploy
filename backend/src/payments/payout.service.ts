@@ -191,26 +191,34 @@ export class PayoutService {
     let transferId: string;
     let transferStatus: string;
 
-    if (useEdoctor) {
-      const isMtn = profile.payoutMethod === 'mtn_momo';
-      const result = isMtn
-        ? await this.edoctor.withdrawMtn({ amount, phone: profile.payoutPhone, reference })
-        : await this.edoctor.withdrawOrange({ amount, phone: profile.payoutPhone, reference });
-      transferId     = result.id;
-      transferStatus = result.status;
-    } else {
-      if (!channel) throw new BadRequestException(`Méthode de paiement non supportée: ${profile.payoutMethod}`);
-      const result = await this.notchpay.transfer({
-        reference,
-        amount,
-        currency:        'XAF',
-        beneficiaryName:  profile.payoutName ?? '',
-        beneficiaryPhone: profile.payoutPhone,
-        channel,
-        description:     `Virement AeroCab — ${reference}`,
+    try {
+      if (useEdoctor) {
+        const isMtn = profile.payoutMethod === 'mtn_momo';
+        const result = isMtn
+          ? await this.edoctor.withdrawMtn({ amount, phone: profile.payoutPhone, reference })
+          : await this.edoctor.withdrawOrange({ amount, phone: profile.payoutPhone, reference });
+        transferId     = result.id;
+        transferStatus = result.status;
+      } else {
+        const result = await this.notchpay.transfer({
+          reference,
+          amount,
+          currency:        'XAF',
+          beneficiaryName:  profile.payoutName ?? '',
+          beneficiaryPhone: profile.payoutPhone,
+          channel,
+          description:     `Virement AeroCab — ${reference}`,
+        });
+        transferId     = result.id;
+        transferStatus = result.status;
+      }
+    } catch (apiErr) {
+      await this.prisma.driverEarningsWallet.update({
+        where: { driverProfileId },
+        data:  { balance: { increment: amount }, totalWithdrawn: { decrement: amount } },
       });
-      transferId     = result.id;
-      transferStatus = result.status;
+      this.logger.error(`Virement échoué, wallet restauré: ref=${reference} err=${apiErr.message}`);
+      throw apiErr;
     }
 
     this.logger.log(`Virement initié: ref=${reference} id=${transferId} status=${transferStatus} via=${useEdoctor ? 'edoctor' : 'notchpay'}`);

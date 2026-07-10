@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 export type FeedUserCtx = { app: 'passenger' | 'driver'; country: string | null; tier: string | null };
 
@@ -11,6 +12,7 @@ export class AnnouncementsService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly users: UsersService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Vrai si l'annonce cible cet utilisateur. Filtres vides = pas de restriction. */
@@ -82,8 +84,8 @@ export class AnnouncementsService {
     return this.prisma.announcement.findMany({ orderBy: { createdAt: 'desc' } });
   }
 
-  create(dto: any, adminId: string) {
-    return this.prisma.announcement.create({
+  async create(dto: any, adminId: string) {
+    const announcement = await this.prisma.announcement.create({
       data: {
         ...dto,
         startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
@@ -91,6 +93,50 @@ export class AnnouncementsService {
         createdBy: adminId,
       },
     });
+    // Notif push aux utilisateurs ciblés (non-bloquant — ne fait pas échouer la création).
+    this.notifyTargetedUsers(announcement).catch(() => {});
+    return announcement;
+  }
+
+  /**
+   * Envoie une notification push aux utilisateurs ciblés par l'annonce, seulement si
+   * elle est « live » (active et dans la fenêtre temporelle — une annonce programmée
+   * dans le futur ne déclenche pas de push à la création).
+   */
+  private async notifyTargetedUsers(a: {
+    id: string; title: string; body: string; isActive?: boolean;
+    startsAt?: Date | null; endsAt?: Date | null;
+    targetApps?: string[]; targetCountries?: string[]; targetTiers?: string[];
+  }): Promise<void> {
+    const now = new Date();
+    const live = a.isActive !== false
+      && (!a.startsAt || a.startsAt <= now)
+      && (!a.endsAt || a.endsAt >= now);
+    if (!live) return;
+
+    const apps = a.targetApps ?? [];
+    const tiers = a.targetTiers ?? [];
+    const countries = a.targetCountries ?? [];
+
+    // apps → rôles ciblés (tier-ciblé ⇒ passagers uniquement)
+    const roles: string[] = tiers.length
+      ? ['passenger']
+      : [
+          ...(apps.length === 0 || apps.includes('passenger') ? ['passenger'] : []),
+          ...(apps.length === 0 || apps.includes('driver') ? ['driver'] : []),
+        ];
+    if (roles.length === 0) return;
+
+    const where: any = { fcmToken: { not: null }, role: { in: roles } };
+    if (countries.length) where.countryCode = { in: countries.map((c) => c.toUpperCase()) };
+    if (tiers.length) where.loyaltyTier = { in: tiers };
+
+    const recipients = await this.prisma.user.findMany({ where, select: { id: true } });
+    await Promise.allSettled(
+      recipients.map((u) =>
+        this.notifications.sendToUser(u.id, a.title, a.body, { type: 'announcement', announcementId: a.id }),
+      ),
+    );
   }
 
   async update(id: string, dto: any) {

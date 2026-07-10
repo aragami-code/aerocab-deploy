@@ -3,6 +3,7 @@ import { PrismaService } from '../database/prisma.service';
 import { extractCountryFromPhone } from '../common/phone-country';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { TrustScoreService } from './trust-score.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
@@ -25,6 +26,7 @@ export class UsersService {
     private settings: SettingsService,
     private notifications: NotificationsService,
     private trustScoreService: TrustScoreService,
+    private adminNotifs: AdminNotificationService,
   ) {}
 
   async updateTrustScore(userId: string): Promise<void> {
@@ -63,6 +65,13 @@ export class UsersService {
       }
     }
 
+    if (dto.email) {
+      const existing = await this.prisma.user.findFirst({ where: { email: dto.email }, select: { id: true } });
+      if (existing && existing.id !== userId) {
+        throw new BadRequestException('Cette adresse email est déjà utilisée par un autre compte');
+      }
+    }
+
     const user = await this.prisma.user.update({
       where: { id: userId },
       data: {
@@ -84,6 +93,18 @@ export class UsersService {
       },
     });
 
+    if (dto.phone || dto.email) {
+      const changes: string[] = [];
+      if (dto.phone) changes.push(`tél→${dto.phone}`);
+      if (dto.email) changes.push(`email→${dto.email}`);
+      void this.adminNotifs.notify(
+        'user.profile_change',
+        'Modification profil sensible',
+        `Utilisateur ${userId} : ${changes.join(', ')}`,
+        { userId, changes },
+      );
+    }
+
     return user;
   }
 
@@ -103,6 +124,14 @@ export class UsersService {
         status:       'deleted',
       },
     });
+
+    void this.adminNotifs.notify(
+      'user.account_deleted',
+      'Compte supprimé',
+      `Utilisateur ${userId} a supprimé son compte`,
+      { userId },
+    );
+
     return { success: true };
   }
 

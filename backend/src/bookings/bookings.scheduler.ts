@@ -12,6 +12,9 @@ import { FlutterwaveService } from '../payments/flutterwave.service';
 import { DispatchService } from './dispatch.service';
 import { PayoutService } from '../payments/payout.service';
 import { ReceiptService } from '../payments/receipt.service';
+import { BookingsService } from './bookings.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 
 @Injectable()
 export class BookingsScheduler {
@@ -29,6 +32,9 @@ export class BookingsScheduler {
     private dispatch: DispatchService,
     private payout: PayoutService,
     private receiptSvc: ReceiptService,
+    private bookingsService: BookingsService,
+    private adminNotifs: AdminNotificationService,
+    private loyaltyService: LoyaltyService,
   ) {}
 
   /**
@@ -70,6 +76,12 @@ export class BookingsScheduler {
         });
         if (nextStatus === 'failed') {
           this.logger.error(`[Receipt] max attempts reached booking=${job.bookingId} — escalation requise`);
+          void this.adminNotifs.notify(
+            'receipt.max_retries',
+            'Reçu bloqué — intervention requise',
+            `Reçu de la course ${job.bookingId} a échoué après ${nextAttempts} tentatives`,
+            { bookingId: job.bookingId, attempts: nextAttempts, lastError: err?.message },
+          );
           this.audit.log({
             action: 'receipt.escalation',
             entity: 'booking',
@@ -111,6 +123,8 @@ export class BookingsScheduler {
         flightNumber: true,
         estimatedPrice: true,
         driverProfileId: true,
+        effectiveTier: true,
+        purchasedPerks: true,
       },
       take: 20,
     });
@@ -126,10 +140,13 @@ export class BookingsScheduler {
           ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
           : undefined;
         // Recherche d'un autre driver, en excluant celui qui n'a pas répondu
+        // Task 11 — utiliser le tier effectif persisté pour conserver la priorité de pool
+        const redispatchTier = (booking as any).effectiveTier ?? undefined;
         const nextDriver = await this.dispatch.findEligibleDrivers(
           booking as any,
           false,
           coords,
+          redispatchTier,
         ).then((list: any[]) => list.find((d) => d.id !== previousDriverId) ?? null);
 
         if (nextDriver) {
@@ -196,6 +213,10 @@ export class BookingsScheduler {
         destination: true,
         paymentMethod: true,
         estimatedPrice: true,
+        // Task 13 — champs pour le remboursement course garantie
+        purchasedPerks: true,
+        guaranteedRefunded: true,
+        operatingCountry: true,
         driverProfile: { select: { id: true, userId: true } },
       },
     });
@@ -207,34 +228,11 @@ export class BookingsScheduler {
     // H4 — Annulation + remboursement atomique par booking (transaction individuelle)
     for (const booking of expired) {
       try {
-        await this.prisma.$transaction(async (tx) => {
-          await tx.booking.update({
-            where: { id: booking.id },
-            data: { status: 'cancelled' },
-          });
+        // Task 13 — remboursement course garantie (idempotent) avant annulation
+        await this.refundGuaranteedIfUnmatched(booking as any);
 
-          const price = Math.ceil(booking.estimatedPrice as number);
-          if (
-            (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') &&
-            price > 0
-          ) {
-            await tx.pointsTransaction.create({
-              data: {
-                userId: booking.passengerId,
-                type: 'credit',
-                points: price,
-                label: `Remboursement expiration course ${booking.id.slice(0, 8)}`,
-              },
-            });
-            await tx.wallet.upsert({
-              where: { userId: booking.passengerId },
-              update: { balance: { increment: price } },
-              create: { userId: booking.passengerId, balance: price },
-            });
-          }
-        });
+        await this.bookingsService.cancelForExpiredAssignment(booking.id);
 
-        // Notifications hors-transaction (non-critiques)
         await this.notifications.sendToUser(
           booking.passengerId,
           'Aucun chauffeur disponible',
@@ -260,6 +258,28 @@ export class BookingsScheduler {
         this.logger.error(`[Scheduler] Expiration booking ${booking.id} échouée: ${e.message}`);
       }
     }
+  }
+
+  /**
+   * Task 13 — Remboursement « course garantie » idempotent.
+   * Appelé quand le scheduler conclut "aucun chauffeur trouvé" (booking expiré sans driver).
+   * Le flag guaranteedRefunded empêche tout double-crédit.
+   */
+  async refundGuaranteedIfUnmatched(booking: any): Promise<void> {
+    const perks: string[] = booking?.purchasedPerks ?? [];
+    if (!perks.includes('guaranteed') || booking.guaranteedRefunded) return;
+
+    const cost = await this.loyaltyService.costOf('guaranteed', booking.operatingCountry ?? null);
+    if (cost <= 0) return;
+
+    // Marquer d'abord (idempotence) puis créditer
+    await this.prisma.booking.update({ where: { id: booking.id }, data: { guaranteedRefunded: true } });
+    await this.points.addPoints(booking.passengerId, cost, 'Remboursement course garantie', 'refund');
+    await this.notifications.sendToUser(
+      booking.passengerId,
+      'Course garantie',
+      'Aucun chauffeur trouvé : vos points ont été remboursés.',
+    ).catch(() => {});
   }
 
   /**
@@ -298,6 +318,13 @@ export class BookingsScheduler {
 
       this.logger.warn(
         `[S221] Driver ${driver.userId} offline pendant course ${booking.id} (status: ${booking.status}, lastActive: ${driver.lastActive?.toISOString() ?? 'jamais'})`,
+      );
+
+      void this.adminNotifs.notify(
+        'booking.driver_offline',
+        'Chauffeur offline en course',
+        `Chauffeur ${driver.userId} offline pendant course ${booking.id}`,
+        { bookingId: booking.id, driverId: driver.userId, bookingStatus: booking.status, passengerId: booking.passengerId },
       );
 
       await this.audit.log({
@@ -348,27 +375,7 @@ export class BookingsScheduler {
 
     for (const booking of stale) {
       try {
-        await this.prisma.$transaction(async (tx) => {
-          const updated = await tx.booking.updateMany({
-            where: { id: booking.id, status: 'confirmed' },
-            data: { status: 'cancelled', cancelledAt: new Date() },
-          });
-          if (updated.count === 0) return; // déjà traité
-
-          if (
-            (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') &&
-            Number(booking.estimatedPrice) > 0
-          ) {
-            await tx.pointsTransaction.create({
-              data: {
-                userId: booking.passengerId,
-                type: 'credit',
-                points: Math.ceil(Number(booking.estimatedPrice)),
-                label: `Remboursement no-show chauffeur — course ${booking.id.slice(0, 8)}`,
-              },
-            });
-          }
-        });
+        await this.bookingsService.cancelForDriverNoShow(booking.id);
 
         this.ridesGateway.server
           .to(`passenger:${booking.passengerId}`)
@@ -393,8 +400,15 @@ export class BookingsScheduler {
           entity: 'booking',
           entityId: booking.id,
           userId: booking.driverProfile?.userId,
-          meta: { timeoutMin, passengerId: booking.passengerId, refunded: true },
+          meta: { timeoutMin, passengerId: booking.passengerId, paymentMethod: booking.paymentMethod, refunded: true },
         }).catch(() => {});
+
+        void this.adminNotifs.notify(
+          'booking.driver_noshow',
+          'No-show chauffeur',
+          `Course ${booking.id} annulée — chauffeur ${booking.driverProfile?.userId ?? 'inconnu'} non présenté, passager remboursé`,
+          { bookingId: booking.id, driverId: booking.driverProfile?.userId, passengerId: booking.passengerId },
+        );
 
         this.logger.log(`[Scheduler] Booking ${booking.id} annulé no-show, passager ${booking.passengerId} remboursé`);
       } catch (e: any) {
@@ -435,76 +449,7 @@ export class BookingsScheduler {
 
     for (const booking of pending) {
       try {
-        await this.prisma.booking.update({
-          where: { id: booking.id },
-          data: { status: 'completed' },
-        });
-
-        // Find or create conversation
-        let conversationId: string | undefined;
-        if (booking.driverProfile?.userId) {
-          const existing = await this.prisma.conversation.findFirst({
-            where: { passengerId: booking.passengerId, driverId: booking.driverProfile.userId },
-            select: { id: true },
-          });
-          conversationId = existing?.id ?? (await this.prisma.conversation.create({
-            data: { passengerId: booking.passengerId, driverId: booking.driverProfile.userId },
-            select: { id: true },
-          })).id;
-        }
-
-        this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking:completed', { id: booking.id, conversationId });
-        this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_status_changed', { id: booking.id, status: 'completed' });
-        this.notifications.sendToUser(booking.passengerId, 'Course validée automatiquement ✅', 'Votre course a été validée. Merci d\'utiliser AeroGo 24 !').catch(() => {});
-
-        // Wallet chauffeur
-        if (booking.driverProfile?.userId && booking.paymentMethod !== 'cash') {
-          const pointsEarned = Math.floor(Number(booking.estimatedPrice));
-          let driverWallet = await this.prisma.wallet.findUnique({ where: { userId: booking.driverProfile.userId } });
-          if (!driverWallet) {
-            driverWallet = await this.prisma.wallet.create({ data: { userId: booking.driverProfile.userId, balance: 0 } });
-          }
-          await this.prisma.wallet.update({
-            where: { id: driverWallet.id },
-            data: { balance: { increment: pointsEarned } },
-          });
-          await this.prisma.transaction.create({
-            data: {
-              walletId: driverWallet.id,
-              amount: booking.estimatedPrice,
-              type: 'deposit',
-              status: 'completed',
-              reference: `EARN-${booking.id}`,
-              metadata: { bookingId: booking.id, passengerId: booking.passengerId, points: pointsEarned },
-            },
-          });
-        }
-
-        // Cashback passager
-        try {
-          let cashbackCountryCode: string | null = null;
-          if (booking.departureAirport && booking.departureAirport !== 'INTERNATIONAL') {
-            const ap = await this.prisma.airport.findUnique({
-              where: { iataCode: booking.departureAirport },
-              select: { countryCode: true },
-            });
-            cashbackCountryCode = ap?.countryCode?.toUpperCase() ?? null;
-          }
-          const tariffs = await this.settingsService.getTariffsByCountry(cashbackCountryCode);
-          const cashbackRate = (tariffs as any).cashbackRate ?? 0.05;
-          const cashbackPtVal = (tariffs as any).pointValue ?? 1;
-          const priceLocal = Number(booking.estimatedPrice) || 0;
-          const cashbackPts = Math.floor((priceLocal * cashbackRate) / cashbackPtVal);
-          if (cashbackPts > 0) {
-            await this.points.addPoints(
-              booking.passengerId,
-              cashbackPts,
-              `Cashback auto — course ${booking.departureAirport} → ${booking.destination}`,
-              'cashback',
-            );
-          }
-        } catch { /* ignore */ }
-
+        await this.bookingsService.finalizeRide(booking);
         this.logger.log(`[Scheduler] Booking ${booking.id} auto-complété après ${timeoutMin}min sans confirmation passager`);
       } catch (e) {
         this.logger.error(`[Scheduler] Auto-complete échoué pour ${booking.id}: ${e.message}`);
@@ -764,6 +709,17 @@ export class BookingsScheduler {
         pickupLat: true,
         pickupLng: true,
         scheduledAt: true,
+        // Champs complémentaires pour un payload driver complet (sinon carte cassée)
+        flightNumber: true,
+        estimatedPrice: true,
+        departureAirport: true,
+        pickupAddress: true,
+        driverEtaMinutes: true,
+        // Task 11 — champs fidélité pour re-dispatch avec le bon tier
+        effectiveTier: true,
+        purchasedPerks: true,
+        meetAndGreet: true,
+        passenger: { select: { name: true, avatarUrl: true, status: true } },
       },
     });
 
@@ -781,12 +737,15 @@ export class BookingsScheduler {
           data: { status: 'pending' },
         });
 
+        // Task 11 — utiliser le tier effectif persisté pour conserver la priorité de pool
+        const scheduledBookingTier = (booking as any).effectiveTier ?? undefined;
         const eligibleDrivers = await this.dispatch.findEligibleDrivers(
           booking as any,
           false,
           booking.pickupLat && booking.pickupLng
             ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
             : undefined,
+          scheduledBookingTier,
         );
 
         const scheduledStr = booking.scheduledAt
@@ -801,12 +760,23 @@ export class BookingsScheduler {
             { bookingId: booking.id, type: 'scheduled_booking' },
           ).catch(() => {});
 
+          const etaMin = booking.driverEtaMinutes ?? 10;
           this.ridesGateway.notifyNewBooking(driver.id, {
             id: booking.id,
             passengerId: booking.passengerId,
+            passengerName: (booking as any).passenger?.name ?? null,
+            passengerAvatarUrl: (booking as any).passenger?.avatarUrl ?? null,
+            passengerVerified: (booking as any).passenger?.status === 'active',
+            flightNumber: booking.flightNumber,
             destination: booking.destination,
             vehicleType: booking.vehicleType,
+            estimatedPrice: booking.estimatedPrice,
+            departureAirport: booking.departureAirport,
             type: booking.type,
+            pickupAddress: booking.pickupAddress,
+            meetAndGreet: (booking as any).meetAndGreet ?? false,
+            distanceKm: parseFloat((etaMin * 0.5).toFixed(1)),
+            durationMin: etaMin,
             isScheduled: true,
             scheduledAt: booking.scheduledAt?.toISOString(),
           } as any);

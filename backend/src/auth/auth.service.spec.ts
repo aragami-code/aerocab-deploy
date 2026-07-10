@@ -8,6 +8,9 @@ import { ConfigService } from '@nestjs/config';
 import { OtpDeliveryService } from '../otp/otp-delivery.service';
 import { SettingsService } from '../settings/settings.service';
 import { EmailRouterService } from '../email/email-router.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
+
+const mockAdminNotifs = { notify: jest.fn().mockResolvedValue(undefined) };
 
 const mockPrisma = {
   user: {
@@ -37,6 +40,7 @@ const mockEmail = { send: jest.fn().mockResolvedValue(true) };
 const mockSettings = {
   get: jest.fn((key: string, fallback?: string) => Promise.resolve(fallback ?? '')),
   getTariffs: jest.fn().mockResolvedValue({}),
+  getTariffsByCountry: jest.fn().mockResolvedValue({}),
 };
 
 describe('AuthService', () => {
@@ -54,6 +58,7 @@ describe('AuthService', () => {
         { provide: OtpDeliveryService,  useValue: mockSms      },
         { provide: SettingsService,     useValue: mockSettings },
         { provide: EmailRouterService,  useValue: mockEmail    },
+        { provide: AdminNotificationService, useValue: mockAdminNotifs },
       ],
     }).compile();
 

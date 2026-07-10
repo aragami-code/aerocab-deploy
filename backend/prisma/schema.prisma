@@ -45,6 +45,7 @@ model User {
   currency               String              @default("XAF")
 
   bookings               Booking[]
+  favoriteDrivers        FavoriteDriver[]    @relation("PassengerFavorites")
   driverConversations    Conversation[]      @relation("DriverConversations")
   passengerConversations Conversation[]      @relation("PassengerConversations")
   driverProfile          DriverProfile?
@@ -111,6 +112,7 @@ model DriverProfile {
   countryCode           String?   @map("country_code") @db.VarChar(2)  // pays d'opération du chauffeur
 
   bookings             Booking[]
+  favoritedBy          FavoriteDriver[]
   documents            DriverDocument[]
   positions            DriverPosition[]
   bookingPayouts        BookingPayout[]
@@ -236,6 +238,12 @@ model Booking {
   displayCurrency    String?       @map("display_currency")      // devise vue par le passager (ex: EUR, MAD)
   displayAmount      Float?        @map("display_amount")         // montant converti affiché au passager
   exchangeRateUsed   Float?        @map("exchange_rate_used")     // taux XAF→displayCurrency au moment de la réservation
+
+  // ── Fidélité progressive (perks achetés, tier effectif, garanti) ──────────
+  purchasedPerks     String[]      @default([])    @map("purchased_perks")
+  effectiveTier      String?                       @map("effective_tier")
+  guaranteedRefunded Boolean       @default(false) @map("guaranteed_refunded")
+  meetAndGreet       Boolean       @default(false) @map("meet_and_greet")
 
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
@@ -1071,4 +1079,35 @@ model EmergencyContact {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("emergency_contacts")
+}
+
+// ── Notifications Admin (persistées) ────────────────────────────────────────
+
+model AdminNotification {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type       String
+  title      String
+  body       String
+  data       Json?
+  read       Boolean   @default(false)
+  readAt     DateTime? @map("read_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([read, createdAt])
+  @@index([type])
+  @@map("admin_notifications")
+}
+
+// ── Lot 2 — Chauffeurs favoris (universel) ──────────────────────────────────
+model FavoriteDriver {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  passengerId String        @map("passenger_id") @db.Uuid
+  driverId    String        @map("driver_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at")
+  passenger   User          @relation("PassengerFavorites", fields: [passengerId], references: [id], onDelete: Cascade)
+  driver      DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@unique([passengerId, driverId])
+  @@index([passengerId])
+  @@map("favorite_drivers")
 }

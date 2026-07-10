@@ -5,11 +5,15 @@ import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { TrustScoreService } from './trust-score.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { makeUser } from '../../test/factories';
+
+const mockAdminNotifs = { notify: jest.fn().mockResolvedValue(undefined) };
 
 const mockPrisma = {
   user: {
     findUnique: jest.fn(),
+    findFirst: jest.fn(),
     update: jest.fn(),
   },
 };
@@ -30,6 +34,7 @@ describe('UsersService', () => {
         { provide: SettingsService,     useValue: mockSettings },
         { provide: NotificationsService,useValue: mockNotifications },
         { provide: TrustScoreService,   useValue: mockTrustScore },
+        { provide: AdminNotificationService, useValue: mockAdminNotifs },
       ],
     }).compile();
     service = module.get<UsersService>(UsersService);

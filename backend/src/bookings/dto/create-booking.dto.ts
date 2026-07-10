@@ -1,6 +1,4 @@
-import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, Min, Max, Matches, Length } from 'class-validator';
-
-const VALID_PAYMENT_METHODS = ['cash', 'card', 'points', 'orange_money_cm', 'mtn_cm', 'wallet', 'orange_money', 'mtn_momo'];
+import { IsString, IsNumber, IsOptional, IsIn, IsNotEmpty, IsBoolean, IsArray, Min, Max, Matches, Length } from 'class-validator';
 
 export class CreateBookingDto {
   @IsString()
@@ -8,8 +6,8 @@ export class CreateBookingDto {
   vehicleType!: string; // Valeur libre — validée dynamiquement contre les tarifs DB
 
   @IsString()
-  @IsIn(VALID_PAYMENT_METHODS, { message: 'Méthode de paiement invalide' })
-  paymentMethod!: string;
+  @IsNotEmpty({ message: 'La méthode de paiement est requise' })
+  paymentMethod!: string; // Validé dynamiquement contre app_settings:enabled_payment_methods
 
   @IsOptional()
   @IsString()
@@ -107,4 +105,20 @@ export class CreateBookingDto {
   @IsOptional()
   @IsNumber()
   pointsUsed?: number; // Points fidélité utilisés en déduction
+
+  // ── Fidélité progressive — perks achetés à la carte via les points ──────────
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  purchasedPerks?: string[]; // ex: ["category:confort","top_rated"]
+
+  // ── Lot 2 — Meet & Greet (supplément cash) ──────────────────────────────────
+  @IsOptional()
+  @IsBoolean()
+  meetAndGreet?: boolean;
+
+  // ── Lot 2 — Chauffeur favori (privilégier un favori si disponible) ──────────
+  @IsOptional()
+  @IsBoolean()
+  preferFavorite?: boolean;
 }

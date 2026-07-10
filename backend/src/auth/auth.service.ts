@@ -11,6 +11,7 @@ import { RedisService } from '../redis/redis.service';
 import { OtpDeliveryService } from '../otp/otp-delivery.service';
 import { EmailRouterService } from '../email/email-router.service';
 import { SettingsService } from '../settings/settings.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { maskPhone } from '../common/helpers';
 import { extractCountryFromPhone } from '../common/phone-country';
 import { availableChannels, Channel } from '../otp/otp-channels';
@@ -25,7 +26,9 @@ import {
 const OTP_TTL = OTP_EXPIRY_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_TTL = OTP_COOLDOWN_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_MAX = OTP_MAX_ATTEMPTS;
-const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days
+// Durées configurables par env (défauts conservés : access 15 min, refresh 30 j)
+const REFRESH_TOKEN_TTL = parseInt(process.env.REFRESH_TOKEN_TTL ?? String(30 * 24 * 60 * 60), 10) || 30 * 24 * 60 * 60;
+const ACCESS_TOKEN_TTL = parseInt(process.env.ACCESS_TOKEN_TTL ?? String(15 * 60), 10) || 15 * 60;
 const SESSION_VERSION_KEY = (userId: string) => `session_version:${userId}`;
 
 @Injectable()
@@ -40,6 +43,7 @@ export class AuthService {
     private sms: OtpDeliveryService,
     private email: EmailRouterService,
     private settings: SettingsService,
+    private adminNotifs: AdminNotificationService,
   ) {}
 
   private async newSessionVersion(userId: string): Promise<number> {
@@ -297,6 +301,10 @@ export class AuthService {
     let user = await this.prisma.user.findFirst({ where: { email: emailAddr } });
     let isNewUser = false;
 
+    if (user && (user.status === 'suspended' || user.status === 'deleted')) {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
+    }
+
     if (!user) {
       const role = intendedRole ?? 'passenger';
       let newReferralCode: string | null = null;
@@ -321,6 +329,13 @@ export class AuthService {
       isNewUser = true;
       this.logger.log(`New user created via email: ${user.id} (${emailAddr}) role=${role}`);
 
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${emailAddr} s'est inscrit (${role}) via email`,
+        { userId: user.id, method: 'email', role },
+      );
+
       if (referrer) {
         const BONUS = 500;
         await Promise.all([
@@ -331,8 +346,8 @@ export class AuthService {
     }
 
     const sv = await this.newSessionVersion(user.id);
-    const accessToken  = this.jwt.sign({ sub: user.id, role: user.role, sv });
-    const refreshToken = this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: `${REFRESH_TOKEN_TTL}s` });
+    const accessToken  = this.jwt.sign({ sub: user.id, role: user.role, sv }, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ sub: user.id, role: user.role, sv, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
     await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
     return { accessToken, refreshToken, user: { id: user.id, email: user.email, name: user.name, role: user.role }, isNewUser };
@@ -372,7 +387,10 @@ export class AuthService {
   }
 
   async logout(userId: string): Promise<void> {
-    await this.redis.del(`refresh:${userId}`);
+    await Promise.all([
+      this.redis.del(`refresh:${userId}`),
+      this.newSessionVersion(userId),
+    ]);
   }
 
   async getReferralInfo(userId: string) {
@@ -493,6 +511,13 @@ export class AuthService {
       isNewUser = true;
       this.logger.log(`New user created: ${user.id} (${maskPhone(phone)}) role=${role}`);
 
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${maskPhone(phone)} s'est inscrit (${role}) via téléphone`,
+        { userId: user.id, method: 'phone', role },
+      );
+
       // Crédite parrain + filleul (500 pts chacun)
       if (referrer) {
         const REFERRAL_BONUS = 500;
@@ -511,15 +536,15 @@ export class AuthService {
     }
 
     // Check if user is suspended
-    if (user.status === 'suspended') {
-      throw new UnauthorizedException('Compte suspendu. Contactez le support.');
+    if (user.status === 'suspended' || user.status === 'deleted') {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
     }
 
     // Generate tokens — session unique (D3)
     const sv = await this.newSessionVersion(user.id);
     const payload = { sub: user.id, role: user.role, sv };
-    const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+    const accessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -558,8 +583,8 @@ export class AuthService {
       // Refresh conserve la session version courante (pas de nouvel login)
       const sv = await this.currentSessionVersion(user.id);
       const newPayload = { sub: user.id, role: user.role, sv };
-      const newAccessToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
-      const newRefreshToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
+      const newAccessToken = this.jwt.sign(newPayload, { expiresIn: ACCESS_TOKEN_TTL });
+      const newRefreshToken = this.jwt.sign({ ...newPayload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
       await this.redis.set(
         `refresh:${user.id}`,
@@ -643,24 +668,37 @@ export class AuthService {
     }
 
     if (!user) {
-      user = await this.prisma.user.create({
-        data: { googleId, email, name, role: intendedRole },
+      let newReferralCode: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        const candidate = this.generateReferralCode();
+        const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+        if (!exists) { newReferralCode = candidate; break; }
+      }
+      user = await (this.prisma.user as any).create({
+        data: { googleId, email, name, role: intendedRole, referralCode: newReferralCode },
       });
       isNewUser = true;
       this.logger.log(`New user created via Google: ${user.id} (${email}) role=${intendedRole}`);
+
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${email ?? user.id} s'est inscrit (${intendedRole}) via Google`,
+        { userId: user.id, method: 'google', role: intendedRole },
+      );
     } else {
       this.logger.log(`User logged in via Google: ${user.id} (${email})`);
     }
 
-    if (user.status === 'suspended') {
-      throw new UnauthorizedException('Compte suspendu. Contactez le support.');
+    if (user.status === 'suspended' || user.status === 'deleted') {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
     }
 
     // Generate tokens — session unique (D3)
     const svGoogle = await this.newSessionVersion(user.id);
     const payload = { sub: user.id, role: user.role, sv: svGoogle };
-    const newAccessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+    const newAccessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -728,13 +766,34 @@ export class AuthService {
       let user = await this.prisma.user.findUnique({ where: { googleId } });
       if (!user && email) user = await this.prisma.user.findFirst({ where: { email } });
       if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
-      if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: roleFromDeepLink } }); isNewUser = true; }
+      if (!user) {
+        let newReferralCode: string | null = null;
+        for (let i = 0; i < 5; i++) {
+          const candidate = this.generateReferralCode();
+          const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+          if (!exists) { newReferralCode = candidate; break; }
+        }
+        user = await (this.prisma.user as any).create({ data: { googleId, email, name, role: roleFromDeepLink, referralCode: newReferralCode } });
+        isNewUser = true;
+
+        void this.adminNotifs.notify(
+          'user.signup',
+          'Nouvel utilisateur',
+          `${email ?? user.id} s'est inscrit (${roleFromDeepLink}) via Google`,
+          { userId: user.id, method: 'google_callback', role: roleFromDeepLink },
+        );
+      }
+
+      if (user.status === 'suspended' || user.status === 'deleted') {
+        res.redirect(`${deepLink}?error=account_suspended`);
+        return;
+      }
 
       // Generate tokens — session unique (D3)
       const svCb = await this.newSessionVersion(user.id);
       const payload = { sub: user.id, role: user.role, sv: svCb };
-      const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-      const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+      const accessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+      const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
       await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
       // C1 — Sécurité : ne jamais exposer les tokens dans l'URL (logs, proxies, historique).

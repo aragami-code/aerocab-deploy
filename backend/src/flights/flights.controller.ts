@@ -12,13 +12,17 @@ import { FlightsService } from './flights.service';
 import { CreateFlightDto, SearchFlightDto } from './dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { SettingsService } from '../settings/settings.service';
 
 import { SkipThrottle } from '@nestjs/throttler';
 @SkipThrottle()
 @Controller('flights')
 @UseGuards(JwtAuthGuard)
 export class FlightsController {
-  constructor(private flightsService: FlightsService) {}
+  constructor(
+    private flightsService: FlightsService,
+    private settings: SettingsService,
+  ) {}
 
   /**
    * GET /flights/live/:flightNumber
@@ -26,7 +30,11 @@ export class FlightsController {
    */
   @Get('live/:flightNumber')
   async getLiveFlightDetails(@Param('flightNumber') flightNumber: string) {
-    const result = await this.flightsService.getLiveFlightDetails(flightNumber);
+    const [fr24Token, aeroDataBoxKey] = await Promise.all([
+      this.settings.get('flight_radar_token', ''),
+      this.settings.get('aerodatabox_api_key', ''),
+    ]);
+    const result = await this.flightsService.getLiveFlightDetails(flightNumber, { fr24Token, aeroDataBoxKey });
     if (!result) return { found: false };
     return { found: true, flight: result };
   }
@@ -37,7 +45,11 @@ export class FlightsController {
    */
   @Get('search')
   async searchFlight(@Query() query: SearchFlightDto) {
-    const result = await this.flightsService.searchFlight(query.flightNumber);
+    const [fr24Token, aeroDataBoxKey] = await Promise.all([
+      this.settings.get('flight_radar_token', ''),
+      this.settings.get('aerodatabox_api_key', ''),
+    ]);
+    const result = await this.flightsService.searchFlight(query.flightNumber, { fr24Token, aeroDataBoxKey });
 
     if (!result) {
       return {

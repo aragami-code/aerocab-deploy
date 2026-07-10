@@ -8,6 +8,15 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> = [
+  // ─── APIs vols ───────────────────────────────────────────────────────────
+  { key: 'flight_radar_token',    value: '', description: 'Clé API FlightRadar24 (FR24) — live positions vols en vol' },
+  { key: 'flight_radar_api_url',  value: 'https://fr24api.flightradar24.com/api', description: 'URL de base API FlightRadar24' },
+  { key: 'aerodatabox_api_key',   value: '', description: 'Clé API AeroDataBox (via RapidAPI) — statuts, horaires, vols programmés/atterris' },
+
+  // ─── Méthodes de paiement ────────────────────────────────────────────────
+  { key: 'enabled_payment_methods',  value: 'cash,card,wallet,points,orange_money_cm,mtn_cm', description: 'Méthodes de paiement disponibles pour les passagers (CSV)' },
+  { key: 'direct_payment_methods',   value: 'orange_money_cm,mtn_cm,card,cash',               description: 'Méthodes utilisant un PaymentIntent (pas de débit wallet) (CSV)' },
+
   // ─── Tracking / Localisation ─────────────────────────────────────────────
   { key: 'driver_position_interval_ms',    value: '30000',  description: 'Intervalle envoi position chauffeur (ms)' },
   { key: 'tracking_poll_2g_ms',            value: '15000',  description: 'Intervalle polling tracking passager en 2G (ms)' },
@@ -30,6 +39,7 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'booking_passenger_timeout_ms',    value: '60000', description: 'Délai annulation gratuite passager (ms)' },
   { key: 'passenger_confirm_timeout_min',   value: '5',     description: 'Délai confirmation passager après arrivée (min)' },
   { key: 'dispatch_scheduled_advance_min',  value: '60',    description: 'Avance (minutes) pour dispatcher les réservations programmées avant l\'heure' },
+  { key: 'scheduled_early_start_min',       value: '30',    description: 'Tolérance anticipation démarrage course programmée (min) — interdit >N min avant scheduledAt' },
 
   // ─── Objectifs journaliers chauffeur ──────────────────────────────────────
   { key: 'daily_goals', value: JSON.stringify({ rides: 5, earnings: 25000, rating: 4.5 }), description: 'Objectifs journaliers chauffeur (JSON : rides, earnings en FCFA, rating)' },
@@ -162,6 +172,24 @@ const APP_SETTINGS: Array<{ key: string; value: string; description?: string }> 
   { key: 'access_pass_duration_days',  value: '30',     description: 'Durée de validité du pass en jours (ex: 30 = mensuel, 7 = hebdomadaire)' },
   { key: 'access_pass_trial_days',     value: '7',      description: 'Jours d\'essai gratuit pour les nouveaux passagers (0 = pas d\'essai)' },
   { key: 'access_pass_grace_days',     value: '2',      description: 'Jours de grâce après expiration avant blocage complet' },
+
+  // ── Frais d'inscription chauffeur ────────────────────────────────────────────
+  { key: 'registration_fee_min',         value: '5000',  description: 'Montant des frais d\'inscription chauffeur (FCFA)' },
+  { key: 'registration_fee_max',         value: '10000', description: 'Montant maximum des frais d\'inscription (FCFA)' },
+  { key: 'registration_fee_deposit_pct', value: '50',    description: 'Pourcentage des frais crédité au wallet chauffeur après paiement (ex: 50 = 50%)' },
+
+  // ── Feature Flags ────────────────────────────────────────────────────────────
+  { key: 'feature_referral_enabled',           value: 'true',  description: 'Parrainage passager activé' },
+  { key: 'feature_cashback_enabled',           value: 'true',  description: 'Cashback points après chaque course' },
+  { key: 'feature_points_purchase_enabled',    value: 'true',  description: 'Achat de points (forfaits recharge)' },
+  { key: 'feature_promo_enabled',              value: 'true',  description: 'Codes promo lors de la réservation' },
+  { key: 'feature_destination_change_enabled', value: 'false', description: 'Modification de destination en cours de course — désactivé par défaut' },
+  { key: 'feature_registration_fee_enabled',   value: 'false', description: 'Activer les frais d\'inscription pour les chauffeurs (false = accès libre)' },
+  { key: 'feature_driver_withdrawal_enabled',  value: 'true',  description: 'Retrait wallet chauffeur' },
+  { key: 'feature_breakdown_report_enabled',   value: 'true',  description: 'Signalement panne chauffeur' },
+  { key: 'feature_chat_enabled',               value: 'true',  description: 'Chat in-app passager ↔ chauffeur' },
+  { key: 'feature_sos_enabled',                value: 'true',  description: 'Bouton SOS urgence' },
+  { key: 'feature_rating_enabled',             value: 'true',  description: 'Notation après chaque course' },
 
   // ── Bot Assistant ────────────────────────────────────────────────────────────
   { key: 'bot_enabled',          value: 'false',  description: 'Activer le bot assistant IA (true/false)' },

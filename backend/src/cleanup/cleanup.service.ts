@@ -36,7 +36,6 @@ export class CleanupService {
             { destLat: { not: null } },
             { destLng: { not: null } },
             { pickupAddress: { not: null } },
-            { destination: { not: null } },
           ],
         },
         data: {
@@ -45,7 +44,7 @@ export class CleanupService {
           destLat: null,
           destLng: null,
           pickupAddress: null,
-          destination: null,
+          destination: '[anonymized]',
         },
       });
 

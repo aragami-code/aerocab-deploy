@@ -180,7 +180,10 @@ export class AppController {
     };
   }
 
+  // Sécurité : données opérationnelles/business (revenus, comptes) → réservé aux utilisateurs
+  // authentifiés (le dashboard admin envoie son token). N'est plus public.
   @Get('metrics')
+  @UseGuards(JwtAuthGuard)
   async metrics() {
     const [
       totalUsers,

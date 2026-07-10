@@ -1,6 +1,8 @@
 import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, HttpCode } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards';
+import { RolesGuard } from '../auth/guards';
+import { Roles } from '../auth/decorators';
 import { ZonesService, ZonePrices } from './zones.service';
 import { AirportsService } from '../airports/airports.service';
 import { SettingsService } from '../settings/settings.service';
@@ -24,7 +26,8 @@ export class ZonesController {
    */
   @Get('admin/countries')
   @Throttle({ admin: { limit: 300, ttl: 60000 } })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async getAvailableCountries() {
     const [operated, withTariffs] = await Promise.all([
       this.airportsService.getOperatedCountryCodes(),
@@ -41,7 +44,8 @@ export class ZonesController {
    */
   @Get('admin/airports')
   @Throttle({ admin: { limit: 300, ttl: 60000 } })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async getAirportsForCountry(@Query('countryCode') countryCode: string) {
     const result = await this.airportsService.findAllAdmin({
       country: countryCode?.toUpperCase(),
@@ -66,7 +70,8 @@ export class ZonesController {
    */
   @Get('admin/all')
   @Throttle({ admin: { limit: 300, ttl: 60000 } })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   findAllAdmin(
     @Query('airportIata') airportIata?: string,
     @Query('countryCode') countryCode?: string,
@@ -85,7 +90,8 @@ export class ZonesController {
   }
 
   @Post()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   create(
     @Body()
     dto: {
@@ -103,7 +109,8 @@ export class ZonesController {
   }
 
   @Patch(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   update(
     @Param('id') id: string,
     @Body()
@@ -123,7 +130,8 @@ export class ZonesController {
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   @HttpCode(204)
   remove(@Param('id') id: string) {
     return this.zonesService.remove(id);

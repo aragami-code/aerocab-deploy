@@ -20,6 +20,8 @@ import { PayoutService } from '../payments/payout.service';
 import { CashCommissionService } from '../payments/cash-commission.service';
 import { ReceiptService } from '../payments/receipt.service';
 import { UsersService } from '../users/users.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 
 // ── Données de zones pour les tests ───────────────────────────────────────────
 const ZONE_A = { id: 'z-a', name: 'Zone A', minDistKm: 0,  maxDistKm: 12,  isActive: true, sortOrder: 1,
@@ -65,6 +67,31 @@ const mockNotifications = { sendToUser: jest.fn().mockResolvedValue(undefined) }
 const mockPoints = {
   deductPoints: jest.fn().mockResolvedValue(undefined),
   addPoints: jest.fn().mockResolvedValue(undefined),
+  deductPointsTx: jest.fn().mockResolvedValue(undefined),
+};
+
+// mockLoyalty : par défaut tout débloqué (bronze voit tout) — surchargé par les tests gating
+const mockLoyalty = {
+  resolveAvailability: jest.fn().mockResolvedValue({
+    categories: [
+      { key: 'eco',          unlocked: true,  cost: 0   },
+      { key: 'eco_plus',     unlocked: true,  cost: 0   },
+      { key: 'standard',     unlocked: true,  cost: 0   },
+      { key: 'confort',      unlocked: true,  cost: 0   },
+      { key: 'confort_plus', unlocked: true,  cost: 0   },
+    ],
+    services: [
+      { key: 'priority',   included: false, cost: 50  },
+      { key: 'top_rated',  included: false, cost: 150 },
+      { key: 'guaranteed', included: false, cost: 200 },
+      { key: 'flex_cancel', included: false, cost: 75  },
+      { key: 'scheduled',   included: false, cost: 100 },
+    ],
+  }),
+  effectiveTier: jest.fn().mockResolvedValue('bronze'),
+  costOf: jest.fn().mockResolvedValue(120),
+  // Lot 2 — par défaut flex_cancel inactif (surchargé dans les tests annulation flexible)
+  isServiceActive: jest.fn().mockResolvedValue(false),
 };
 const mockSettings = {
   isProximityAssignmentEnabled: jest.fn().mockResolvedValue(false),
@@ -72,6 +99,7 @@ const mockSettings = {
   getTariffs: jest.fn(),
   getTariffsByCountry: jest.fn(),
   get: jest.fn().mockResolvedValue('80'),
+  getForCountry: jest.fn().mockImplementation((_key: string, _country: string | null, def: string) => Promise.resolve(def)),
 };
 const mockPromos = { validatePromo: jest.fn().mockResolvedValue(null) };
 const mockGateway = {
@@ -135,6 +163,12 @@ const mockReceipt     = { generate: jest.fn().mockResolvedValue(undefined), getO
 const mockUsers       = {
   findById: jest.fn().mockResolvedValue(null),
   getPassengerTier: jest.fn().mockResolvedValue('standard'),
+  updateTrustScore: jest.fn().mockResolvedValue(undefined),
+  updateLoyaltyTier: jest.fn().mockResolvedValue(undefined),
+};
+const mockAdminNotifs = {
+  notifyAdmins: jest.fn().mockResolvedValue(undefined),
+  sendToAdmins: jest.fn().mockResolvedValue(undefined),
 };
 
 describe('BookingsService', () => {
@@ -161,8 +195,10 @@ describe('BookingsService', () => {
         { provide: PaymentIntentService,  useValue: mockPaymentIntent },
         { provide: PayoutService,         useValue: mockPayout },
         { provide: CashCommissionService, useValue: mockCashComm },
-        { provide: ReceiptService,        useValue: mockReceipt },
-        { provide: UsersService,          useValue: mockUsers },
+        { provide: ReceiptService,             useValue: mockReceipt },
+        { provide: UsersService,               useValue: mockUsers },
+        { provide: AdminNotificationService,   useValue: mockAdminNotifs },
+        { provide: LoyaltyService,             useValue: mockLoyalty },
       ],
     }).compile();
 
@@ -190,6 +226,46 @@ describe('BookingsService', () => {
     mockPrisma.booking.update.mockImplementation((args) => Promise.resolve({ id: args.where.id, ...args.data }));
     mockPrisma.$transaction.mockImplementation((cb: any) => cb(mockPrisma));
     mockNotifications.sendToUser.mockResolvedValue(undefined);
+    // Passenger with verified phone (required by PROFILE_INCOMPLETE guard in createBooking)
+    mockPrisma.user.findUnique.mockResolvedValue({ phone: '+237600000000' });
+    // Settings.get: return sensible defaults keyed by setting name, fallback to '80'
+    mockSettings.get.mockImplementation((key: string, def?: string) => {
+      const defaults: Record<string, string> = {
+        enabled_payment_methods:     'cash,card,wallet,points,orange_money_cm,mtn_cm',
+        direct_payment_methods:      'orange_money_cm,mtn_cm,card,cash',
+        access_pass_enabled:         'false',
+        max_route_distance_km:       '80',
+        price_change_tolerance_percent: '5',
+        international_surcharge_percent: '0',
+        dispatch_scheduled_advance_min: '60',
+        default_driver_eta_min:      '10',
+        default_airport_exit_delay_min: '15',
+        booking_assignment_timeout_min: '2',
+      };
+      return Promise.resolve(defaults[key] ?? def ?? '80');
+    });
+    mockSettings.getForCountry = jest.fn().mockImplementation((_key: string, _country: string | null, def: string) =>
+      Promise.resolve(def),
+    );
+    // Reset loyalty mock to safe default (all unlocked) so existing tests are unaffected
+    mockLoyalty.resolveAvailability.mockResolvedValue({
+      categories: [
+        { key: 'eco',          unlocked: true,  cost: 0   },
+        { key: 'eco_plus',     unlocked: true,  cost: 0   },
+        { key: 'standard',     unlocked: true,  cost: 0   },
+        { key: 'confort',      unlocked: true,  cost: 0   },
+        { key: 'confort_plus', unlocked: true,  cost: 0   },
+      ],
+      services: [
+        { key: 'priority',   included: false, cost: 50  },
+        { key: 'top_rated',  included: false, cost: 150 },
+        { key: 'guaranteed', included: false, cost: 200 },
+      ],
+    });
+    mockLoyalty.effectiveTier.mockResolvedValue('bronze');
+    mockLoyalty.costOf.mockResolvedValue(120);
+    mockLoyalty.isServiceActive.mockResolvedValue(false);
+    mockUsers.getPassengerTier.mockResolvedValue('bronze');
   });
 
   // ── createBooking ──────────────────────────────────────────────────────────
@@ -224,6 +300,23 @@ describe('BookingsService', () => {
         expect.objectContaining({
           data: expect.objectContaining({ estimatedPrice: 1400 }),
         }),
+      );
+    });
+
+    it('Meet & Greet : ajoute meet_greet_fee au prix et persiste le flag', async () => {
+      mockPrisma.driverProfile.findFirst.mockResolvedValue(null);
+      mockPrisma.booking.count.mockResolvedValue(5);
+      mockSettings.getForCountry.mockImplementation((key: string, _c: any, def: string) =>
+        Promise.resolve(key === 'meet_greet_fee' ? '2000' : def));
+
+      const res = await service.createBooking('user-1', {
+        vehicleType: 'eco', departureAirport: 'DLA', destination: 'Bonanjo',
+        roadDistanceKm: 15, paymentMethod: 'cash', meetAndGreet: true,
+      } as any);
+
+      expect(res.estimatedPrice).toBe(1400 + 2000); // base eco Zone B + fee
+      expect(mockPrisma.booking.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ meetAndGreet: true }) }),
       );
     });
 
@@ -565,7 +658,8 @@ describe('BookingsService', () => {
       // On simule un chauffeur disponible pour que le pipeline atteigne booking.create.
       mockDispatch.findEligibleDrivers.mockResolvedValue([{ id: 'drv-1', userId: 'u-drv-1' }]);
       mockDispatch.findGlobalEligibleDrivers.mockResolvedValue([]);
-      mockUsers.getPassengerTier.mockResolvedValue('standard');
+      mockUsers.getPassengerTier.mockResolvedValue('bronze');
+      mockPrisma.user.findUnique.mockResolvedValue({ phone: '+237600000000' });
     });
 
     it('should block eco in Zone D (50km) — eco absent from zone prices', async () => {
@@ -646,7 +740,38 @@ describe('BookingsService', () => {
         mockPrisma.wallet.upsert.mockResolvedValue({ balance: 0 });
         mockPrisma.wallet.updateMany.mockResolvedValue({ count: 1 });
         mockNotifications.sendToUser.mockResolvedValue(undefined);
-        mockUsers.getPassengerTier.mockResolvedValue('standard');
+        mockUsers.getPassengerTier.mockResolvedValue('bronze');
+        mockPrisma.user.findUnique.mockResolvedValue({ phone: '+237600000000' });
+        // Fix settings.get after clearAllMocks (was '80' which breaks payment method check)
+        mockSettings.get.mockImplementation((key: string, def?: string) => {
+          const defaults: Record<string, string> = {
+            enabled_payment_methods:     'cash,card,wallet,points,orange_money_cm,mtn_cm',
+            direct_payment_methods:      'orange_money_cm,mtn_cm,card,cash',
+            access_pass_enabled:         'false',
+            max_route_distance_km:       '80',
+            price_change_tolerance_percent: '5',
+            international_surcharge_percent: '0',
+            dispatch_scheduled_advance_min: '60',
+            default_driver_eta_min:      '10',
+            default_airport_exit_delay_min: '15',
+          };
+          return Promise.resolve(defaults[key] ?? def ?? '80');
+        });
+        mockSettings.getForCountry.mockImplementation((_key: string, _country: string | null, def: string) => Promise.resolve(def));
+        mockSettings.isProximityAssignmentEnabled.mockResolvedValue(false);
+        mockSettings.isCountrySupported.mockResolvedValue(true);
+        mockLoyalty.resolveAvailability.mockResolvedValue({
+          categories: [
+            { key: 'eco',          unlocked: true,  cost: 0 },
+            { key: 'eco_plus',     unlocked: true,  cost: 0 },
+            { key: 'standard',     unlocked: true,  cost: 0 },
+            { key: 'confort',      unlocked: true,  cost: 0 },
+            { key: 'confort_plus', unlocked: true,  cost: 0 },
+          ],
+          services: [],
+        });
+        mockLoyalty.effectiveTier.mockResolvedValue('bronze');
+        mockLoyalty.costOf.mockResolvedValue(0);
 
         await service.createBooking('user-1', {
           vehicleType: vType,
@@ -701,6 +826,204 @@ describe('BookingsService', () => {
       });
 
       await expect(service.getBookingPositions('stranger-id', 'b-1')).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  // ── cancelBooking — annulation flexible (Lot 2) ───────────────────────────
+
+  describe('cancelBooking — annulation flexible', () => {
+    const lateCancelBooking = {
+      id: 'bk-late-flex',
+      passengerId: 'u-1',
+      status: 'arrived_at_airport',  // late cancel
+      estimatedPrice: 5000,
+      paymentMethod: 'points',
+      operatingCountry: 'CM',
+      purchasedPerks: ['flex_cancel'],
+      effectiveTier: 'bronze',
+      flightNumber: null,
+      type: 'ARRIVAL',
+      driverProfile: { id: 'drv-1', userId: 'u-drv-1' },
+    };
+
+    beforeEach(() => {
+      mockPrisma.$transaction.mockImplementation((cb: any) => cb(mockPrisma));
+      mockPrisma.booking.update.mockImplementation((args: any) => Promise.resolve({ id: args.where.id, ...args.data }));
+      mockPrisma.pointsTransaction.create.mockResolvedValue({});
+      mockPrisma.wallet.upsert.mockResolvedValue({ balance: 0 });
+    });
+
+    it('annulation tardive AVEC flex_cancel actif → remboursement 100% (aucune pénalité)', async () => {
+      mockLoyalty.isServiceActive.mockResolvedValue(true);
+      mockPrisma.booking.findFirst.mockResolvedValue(lateCancelBooking);
+      mockPrisma.flight.findFirst.mockResolvedValue(null);
+
+      await service.cancelBooking('u-1', 'bk-late-flex');
+
+      // Vérifier que pointsTransaction.create a été appelé avec points == estimatedPrice (refund 100%)
+      const ptCall = mockPrisma.pointsTransaction.create.mock.calls.find(
+        (c: any[]) => c[0]?.data?.type === 'credit' && c[0]?.data?.source === 'refund',
+      );
+      expect(ptCall).toBeDefined();
+      expect(ptCall![0].data.points).toBe(5000); // 100% de 5000
+    });
+
+    it('annulation tardive SANS flex_cancel → pénalité appliquée (refund 50%)', async () => {
+      mockLoyalty.isServiceActive.mockResolvedValue(false);
+      // override getForCountry pour retourner 0.5 pour late_cancel_refund_rate
+      mockSettings.getForCountry.mockImplementation((key: string, _c: any, def: string) =>
+        Promise.resolve(key === 'late_cancel_refund_rate' ? '0.5' : def),
+      );
+      mockPrisma.booking.findFirst.mockResolvedValue({ ...lateCancelBooking, purchasedPerks: [] });
+      mockPrisma.flight.findFirst.mockResolvedValue(null);
+
+      await service.cancelBooking('u-1', 'bk-late-flex');
+
+      // refundRate = 0.5 → pointsToRefund = ceil(5000*0.5) = 2500
+      const ptCall = mockPrisma.pointsTransaction.create.mock.calls.find(
+        (c: any[]) => c[0]?.data?.type === 'credit' && c[0]?.data?.source === 'refund' && c[0]?.data?.userId === 'u-1',
+      );
+      expect(ptCall).toBeDefined();
+      expect(ptCall![0].data.points).toBe(2500); // 50% de 5000
+    });
+  });
+
+  // ── createBooking — gating catégories ─────────────────────────────────────
+
+  describe('createBooking — gating catégories', () => {
+    const baseDto = {
+      vehicleType: 'confort',
+      departureAirport: 'DLA',
+      destination: 'Bonanjo',
+      roadDistanceKm: 8,
+      paymentMethod: 'cash',
+    };
+
+    beforeEach(() => {
+      mockPrisma.booking.findFirst.mockResolvedValue(null);
+      mockPrisma.booking.count.mockResolvedValue(1);
+      mockPrisma.pointsTransaction.create.mockResolvedValue({});
+      mockPrisma.$transaction.mockImplementation((cb: any) => cb(mockPrisma));
+      mockDispatch.findEligibleDrivers.mockResolvedValue([{ id: 'drv-1', userId: 'u-drv-1' }]);
+      mockDispatch.estimateDelayedDispatch.mockResolvedValue({ globalDriversCount: 0, estimatedWaitMin: 45, closestDistanceKm: null });
+      // Passenger with verified phone (required by PROFILE_INCOMPLETE guard)
+      mockPrisma.user.findUnique.mockResolvedValue({ phone: '+237600000000' });
+    });
+
+    it('refuse une catégorie verrouillée non payée', async () => {
+      // bronze, vehicleType=confort, purchasedPerks=[]  → doit throw
+      mockUsers.getPassengerTier.mockResolvedValue('bronze');
+      mockLoyalty.resolveAvailability.mockResolvedValue({
+        categories: [
+          { key: 'eco',          unlocked: true,  cost: 0   },
+          { key: 'eco_plus',     unlocked: true,  cost: 0   },
+          { key: 'standard',     unlocked: true,  cost: 0   },
+          { key: 'confort',      unlocked: false, cost: 120 },
+          { key: 'confort_plus', unlocked: false, cost: 200 },
+        ],
+        services: [
+          { key: 'priority',   included: false, cost: 50  },
+          { key: 'top_rated',  included: false, cost: 150 },
+          { key: 'guaranteed', included: false, cost: 200 },
+        ],
+      });
+      await expect(service.createBooking('u-1', {
+        ...baseDto, vehicleType: 'confort', purchasedPerks: [],
+      } as any)).rejects.toThrow(/non débloquée|verrouillée|forbidden/i);
+    });
+
+    it('accepte une catégorie verrouillée payée et débite les points', async () => {
+      mockUsers.getPassengerTier.mockResolvedValue('bronze');
+      mockLoyalty.resolveAvailability.mockResolvedValue({
+        categories: [
+          { key: 'eco',          unlocked: true,  cost: 0   },
+          { key: 'eco_plus',     unlocked: true,  cost: 0   },
+          { key: 'standard',     unlocked: true,  cost: 0   },
+          { key: 'confort',      unlocked: false, cost: 120 },
+          { key: 'confort_plus', unlocked: false, cost: 200 },
+        ],
+        services: [
+          { key: 'priority',   included: false, cost: 50  },
+          { key: 'top_rated',  included: false, cost: 150 },
+          { key: 'guaranteed', included: false, cost: 200 },
+        ],
+      });
+      mockLoyalty.costOf.mockResolvedValue(120);
+      await service.createBooking('u-1', {
+        ...baseDto, vehicleType: 'confort', purchasedPerks: ['category:confort'],
+      } as any);
+      expect(mockPoints.deductPointsTx).toHaveBeenCalledWith(
+        expect.anything(), 'u-1', 120, expect.stringContaining('confort'),
+      );
+    });
+
+    it('refuse une réservation programmée choisie sans perk scheduled', async () => {
+      mockUsers.getPassengerTier.mockResolvedValue('bronze');
+      mockLoyalty.resolveAvailability.mockResolvedValue({
+        categories: [{ key: 'confort', unlocked: true, cost: 0 }],
+        services: [{ key: 'scheduled', included: false, cost: 100 }],
+      });
+      await expect(service.createBooking('u-1', {
+        ...baseDto, type: 'DEPARTURE',
+        scheduledAt: new Date(Date.now() + 3 * 3600e3).toISOString(),
+        purchasedPerks: [],
+      } as any)).rejects.toThrow(/programmée non débloquée/i);
+    });
+
+    it('accepte une réservation programmée si scheduled inclus par le niveau', async () => {
+      mockUsers.getPassengerTier.mockResolvedValue('silver');
+      mockLoyalty.resolveAvailability.mockResolvedValue({
+        categories: [{ key: 'confort', unlocked: true, cost: 0 }],
+        services: [{ key: 'scheduled', included: true, cost: 0 }],
+      });
+      await expect(service.createBooking('u-1', {
+        ...baseDto, type: 'DEPARTURE',
+        scheduledAt: new Date(Date.now() + 3 * 3600e3).toISOString(),
+      } as any)).resolves.toBeDefined();
+    });
+  });
+
+  describe('relaunchBooking (Option A — réactive la même course)', () => {
+    const cancelledBooking = {
+      id: 'b-relaunch', passengerId: 'pax-1', status: 'cancelled',
+      paymentMethod: 'cash', estimatedPrice: 4980, departureAirport: 'DLA',
+      vehicleType: 'standard', destination: 'stade Cicam', type: 'ARRIVAL',
+      flightNumber: null, pickupAddress: 'DLA', pickupLat: 4.006, pickupLng: 9.719,
+      estimatedDistanceKm: 10, effectiveTier: 'bronze', purchasedPerks: [],
+      operatingCountry: 'CM', pricingMode: 'zone', meetAndGreet: false,
+      createdAt: new Date(),
+      passenger: { name: 'Test', avatarUrl: null, status: 'active' },
+    };
+
+    it('réactive la MÊME course en préservant le prix (status→pending, aucun re-pricing, aucun booking.create)', async () => {
+      mockPrisma.booking.findUnique.mockResolvedValue({ ...cancelledBooking });
+      mockPrisma.booking.findFirst.mockResolvedValue(null);
+      mockDispatch.findEligibleDrivers.mockResolvedValue([]);
+      mockPrisma.driverProfile.findMany.mockResolvedValue([]);
+
+      const res = await service.relaunchBooking('pax-1', 'b-relaunch');
+
+      expect(res).toEqual({ id: 'b-relaunch', status: 'pending', estimatedPrice: 4980 });
+      expect(mockPrisma.booking.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'b-relaunch' }, data: { status: 'pending', driverProfileId: null } }),
+      );
+      expect(mockPrisma.booking.create).not.toHaveBeenCalled();
+    });
+
+    it('bloque la relance pour un paiement en points', async () => {
+      mockPrisma.booking.findUnique.mockResolvedValue({ ...cancelledBooking, paymentMethod: 'points' });
+      await expect(service.relaunchBooking('pax-1', 'b-relaunch')).rejects.toThrow(/points/i);
+      expect(mockPrisma.booking.update).not.toHaveBeenCalled();
+    });
+
+    it('refuse une course non relançable (completed)', async () => {
+      mockPrisma.booking.findUnique.mockResolvedValue({ ...cancelledBooking, status: 'completed' });
+      await expect(service.relaunchBooking('pax-1', 'b-relaunch')).rejects.toThrow(/ne peut pas être relancée/i);
+    });
+
+    it('refuse si la course appartient à un autre passager', async () => {
+      mockPrisma.booking.findUnique.mockResolvedValue({ ...cancelledBooking, passengerId: 'autre' });
+      await expect(service.relaunchBooking('pax-1', 'b-relaunch')).rejects.toThrow(/vous appartient/i);
     });
   });
 });

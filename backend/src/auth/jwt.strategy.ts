@@ -34,8 +34,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       select: { id: true, phone: true, name: true, role: true, status: true },
     });
 
-    if (!user || user.status === 'suspended') {
-      throw new UnauthorizedException();
+    if (!user || user.status === 'suspended' || user.status === 'deleted') {
+      throw new UnauthorizedException('Compte désactivé ou supprimé');
     }
 
     return { id: user.id, phone: user.phone, name: user.name, role: user.role };
