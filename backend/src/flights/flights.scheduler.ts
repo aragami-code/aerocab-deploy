@@ -7,6 +7,7 @@ import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RidesGateway } from '../bookings/rides.gateway';
 import { BookingsService } from '../bookings/bookings.service';
+import { PlatformScoped } from '../tenancy/platform-scoped.decorator';
 
 @Injectable()
 export class FlightsScheduler {
@@ -24,6 +25,7 @@ export class FlightsScheduler {
 
   // Toutes les 10 minutes — met à jour les vols pas encore atterris
   @Cron(CronExpression.EVERY_10_MINUTES)
+  @PlatformScoped()
   async syncFlightStatuses() {
     const token = this.config.get<string>('FLIGHT_RADAR_TOKEN', '');
     if (!token) return;

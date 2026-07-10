@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { PlatformScoped } from '../tenancy/platform-scoped.decorator';
 
 @Injectable()
 export class CleanupService {
@@ -14,6 +15,7 @@ export class CleanupService {
 
   // D4 — RGPD : purge quotidienne des données GPS au-delà de la période de rétention
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  @PlatformScoped()
   async purgeOldGpsData(): Promise<void> {
     const retentionMonths = await this.settings.getDataRetentionMonths();
     const cutoff = new Date();

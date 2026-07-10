@@ -15,6 +15,7 @@ import { ReceiptService } from '../payments/receipt.service';
 import { BookingsService } from './bookings.service';
 import { AdminNotificationService } from '../admin/admin-notification.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { PlatformScoped } from '../tenancy/platform-scoped.decorator';
 
 @Injectable()
 export class BookingsScheduler {
@@ -43,6 +44,7 @@ export class BookingsScheduler {
    * Backoff exponentiel simple : skip si updatedAt < now - attempts * backoff_min.
    */
   @Cron('* * * * *')
+  @PlatformScoped()
   async processReceiptJobs() {
     const maxRaw = await this.settingsService.get('receipt_max_attempts', '5');
     const backoffRaw = await this.settingsService.get('receipt_backoff_minutes', '2');
@@ -99,6 +101,7 @@ export class BookingsScheduler {
    * Évite que le passager attende indéfiniment un driver qui ne répond pas.
    */
   @Cron('*/30 * * * * *')
+  @PlatformScoped()
   async reassignUnacceptedBookings() {
     const raw = await this.settingsService.get('accept_timeout_seconds', '60');
     const timeoutSec = parseInt(raw, 10) || 60;
@@ -196,6 +199,7 @@ export class BookingsScheduler {
    * depuis plus de DRIVER_ASSIGNMENT_TIMEOUT_MIN minutes.
    */
   @Cron('*/2 * * * *')
+  @PlatformScoped()
   async expireUnassignedBookings() {
     // 0.B13 — timeout lu depuis AppSetting (défaut 2 min depuis suppression setTimeout)
     const raw = await this.settingsService.get('booking_assignment_timeout_min', '2');
@@ -288,6 +292,7 @@ export class BookingsScheduler {
    * Alerte admin via audit log.
    */
   @Cron('*/5 * * * *')
+  @PlatformScoped()
   async detectOfflineDriversDuringRide() {
     const threshold = new Date(Date.now() - 10 * 60 * 1000); // 10 min sans activité
 
@@ -349,6 +354,7 @@ export class BookingsScheduler {
    * Remboursement 100% passager + alerte admin via audit log.
    */
   @Cron('*/5 * * * *')
+  @PlatformScoped()
   async handleDriverNoShow() {
     const raw = await this.settingsService.get('driver_noshow_timeout_min', '30');
     const timeoutMin = parseInt(raw, 10) || 30;
@@ -422,6 +428,7 @@ export class BookingsScheduler {
    * si le passager n'a pas confirmé dans le délai `passenger_confirm_timeout_min` (défaut 5 min).
    */
   @Cron('* * * * *')
+  @PlatformScoped()
   async autoCompletePassengerConfirming() {
     const raw = await this.settingsService.get('passenger_confirm_timeout_min', '5');
     const timeoutMin = parseInt(raw, 10) || 5;
@@ -462,6 +469,7 @@ export class BookingsScheduler {
    * la création du marqueur d'idempotence. Détecte via les clés Redis `referral:pending:*`.
    */
   @Cron('0 * * * *')
+  @PlatformScoped()
   async retryPendingReferrals() {
     const keys = await this.redis.scan('referral:pending:*').catch(() => [] as string[]);
     if (keys.length === 0) return;
@@ -508,6 +516,7 @@ export class BookingsScheduler {
    * au prochain cycle (inactifs depuis >11 mois). Délai configurable via points_expiry_warning_days.
    */
   @Cron('0 9 15 * *')
+  @PlatformScoped()
   async warnExpiringPoints() {
     const warningDaysRaw = await this.settingsService.get('points_expiry_warning_days', '30');
     const warningDays = parseInt(warningDaysRaw, 10) || 30;
@@ -568,6 +577,7 @@ export class BookingsScheduler {
    * WAL·076 — 1er du mois à 3h : expirer les points des wallets inactifs depuis >12 mois.
    */
   @Cron('0 3 1 * *')
+  @PlatformScoped()
   async expireInactivePoints() {
     const cutoff = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
 
@@ -630,6 +640,7 @@ export class BookingsScheduler {
    * depuis plus de 2h (webhook manqué côté Flutterwave).
    */
   @Cron('0 */2 * * *')
+  @PlatformScoped()
   async retryStuckFlutterwaveTransactions() {
     const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000);
     const stuckTxs = await this.prisma.transaction.findMany({
@@ -690,6 +701,7 @@ export class BookingsScheduler {
    * d'exécution est dans moins de 60 minutes (dispatch_scheduled_advance_min configurable).
    */
   @Cron('*/5 * * * *')
+  @PlatformScoped()
   async dispatchScheduledBookings() {
     const advanceRaw = await this.settingsService.get('dispatch_scheduled_advance_min', '60');
     const advanceMin = parseInt(advanceRaw, 10) || 60;
@@ -798,6 +810,7 @@ export class BookingsScheduler {
   // ── C.1 — Retrait automatique chauffeurs (48h post-completion) ───────────────
 
   @Cron('0 * * * *') // toutes les heures
+  @PlatformScoped()
   async autoWithdrawDrivers() {
     const enabled = await this.settingsService.get('auto_withdrawal_enabled', 'false');
     if (enabled !== 'true') return;

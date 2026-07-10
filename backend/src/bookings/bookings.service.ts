@@ -41,6 +41,7 @@ import { UsersService } from '../users/users.service';
 import { AdminNotificationService } from '../admin/admin-notification.service';
 import { resolveCommissionRate } from './commission-resolver';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { PlatformScoped } from '../tenancy/platform-scoped.decorator';
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -3014,6 +3015,7 @@ export class BookingsService {
   // Toutes les 10 minutes, vérifie les bookings actifs liés à un vol
   // Si le vol est annulé → annule le booking + notifie
   @Cron(CronExpression.EVERY_10_MINUTES)
+  @PlatformScoped()
   async checkCancelledFlights() {
     const activeBookings = await this.prisma.booking.findMany({
       where: {

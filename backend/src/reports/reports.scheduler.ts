@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PlatformScoped } from '../tenancy/platform-scoped.decorator';
 
 @Injectable()
 export class ReportsScheduler {
@@ -14,6 +15,7 @@ export class ReportsScheduler {
 
   // Toutes les heures — lève les suspensions temporaires expirées
   @Cron('0 * * * *')
+  @PlatformScoped()
   async liftExpiredSuspensions() {
     const now = new Date();
 
