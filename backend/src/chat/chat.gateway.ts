@@ -11,6 +11,8 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ChatService } from './chat.service';
+import { SocketTenantScoped } from '../tenancy/socket-tenant-scoped.decorator';
+import { ZERO_TENANT_ID } from '../tenancy/tenant.constants';
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -41,6 +43,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const payload = this.jwtService.verify(token as string);
       const userId = payload.sub;
       client.data.userId = userId;
+      client.data.tenantId = payload.tenantId ?? ZERO_TENANT_ID;
 
       const sockets = this.userSockets.get(userId) || [];
       sockets.push(client.id);
@@ -85,6 +88,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('message')
+  @SocketTenantScoped()
   async handleMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: {
@@ -129,6 +133,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('read')
+  @SocketTenantScoped()
   async handleRead(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { conversationId: string },

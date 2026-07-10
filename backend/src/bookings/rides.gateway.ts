@@ -13,6 +13,8 @@ import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../database/prisma.service';
 import { TrustScoreService } from '../users/trust-score.service';
 import { FavoritesService } from '../favorites/favorites.service';
+import { SocketTenantScoped } from '../tenancy/socket-tenant-scoped.decorator';
+import { ZERO_TENANT_ID } from '../tenancy/tenant.constants';
 
 // CORS WebSocket configurable par env : si CORS_ORIGINS défini (liste séparée par virgules),
 // on restreint aux origines ; sinon '*' (défaut — les clients mobiles natifs n'envoient pas
@@ -60,6 +62,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const payload = this.jwtService.verify(token as string);
       client.data.userId = payload.sub;
       client.data.role = payload.role;
+      client.data.tenantId = payload.tenantId ?? ZERO_TENANT_ID;
 
       if (payload.role === 'passenger') {
         client.join(`passenger:${payload.sub}`);
@@ -81,6 +84,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  @SocketTenantScoped()
   handleDisconnect(client: Socket) {
     const userId = client.data.userId;
     if (userId) {
@@ -107,6 +111,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * emit('join:driver', { driverId: profile.id })
    */
   @SubscribeMessage('join:driver')
+  @SocketTenantScoped()
   async handleJoinDriver(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { driverId: string },
