@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { createTenantExtension } from '../tenancy/prisma-tenant.middleware';
 
 @Injectable()
 export class PrismaService
@@ -7,6 +8,40 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(PrismaService.name);
+
+  /** Client étendu (isolation tenant). Les délégués de modèle passent par lui. */
+  private readonly extended: any;
+
+  constructor() {
+    super();
+    this.extended = this.$extends(
+      createTenantExtension({
+        mode: process.env.TENANT_ISOLATION_MODE === 'enforce' ? 'enforce' : 'warn',
+        onViolation: (msg) => this.logger.warn(msg),
+      }),
+    );
+
+    // Proxy : les accès aux délégués de modèle (prisma.booking, prisma.user, …)
+    // et $transaction sont routés vers le client étendu (donc filtrés par tenant).
+    // Le cycle de vie ($connect, $disconnect, raw, logger, hooks) reste sur la base.
+    return new Proxy(this, {
+      get: (target: any, prop: string | symbol, receiver: any) => {
+        const ext = target.extended;
+        if (
+          ext &&
+          (prop === '$transaction' ||
+            (typeof prop === 'string' &&
+              /^[a-z]/.test(prop) &&
+              prop in ext &&
+              typeof ext[prop] === 'object'))
+        ) {
+          const val = ext[prop];
+          return typeof val === 'function' ? val.bind(ext) : val;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+  }
 
   async onModuleInit() {
     await this.$connect();

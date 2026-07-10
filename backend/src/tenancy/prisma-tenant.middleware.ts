@@ -84,6 +84,33 @@ export function createTenantExtension(opts: TenantMiddlewareOptions) {
     query: {
       $allModels: {
         async $allOperations({ model, operation, args, query }: any) {
+          // findUnique ne peut pas être réécrit en findFirst dans une extension
+          // ($allOperations ne change pas l'opération) : on post-filtre le résultat
+          // par tenantId pour éviter une lecture cross-tenant par clé unique.
+          if (operation === 'findUnique' || operation === 'findUniqueOrThrow') {
+            const ctx = getTenantContext();
+            if (!model || !TENANT_SCOPED_MODELS.has(model) || ctx?.platformScope) {
+              return query(args);
+            }
+            const tenantId = ctx?.tenantId ?? null;
+            if (!tenantId) {
+              const msg = `[tenant-isolation] ${model}.${operation} sans tenant résolu`;
+              if (opts.mode === 'enforce') {
+                throw new Error(msg + ' — requête bloquée (fail-closed)');
+              }
+              opts.onViolation(msg);
+              return query(args);
+            }
+            const res: any = await query(args);
+            if (res && res.tenantId !== undefined && res.tenantId !== tenantId) {
+              if (operation === 'findUniqueOrThrow') {
+                throw new Error(`No ${model} found (tenant scope)`);
+              }
+              return null;
+            }
+            return res;
+          }
+
           const scoped = applyTenantScope(model, operation, args ?? {}, opts);
           return query(scoped.args);
         },
