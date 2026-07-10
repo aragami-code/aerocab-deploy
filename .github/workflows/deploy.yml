@@ -45,6 +45,6 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd ~
-            docker compose pull api
-            docker compose up -d api
+            docker-compose pull api
+            docker-compose up -d api
             docker exec aerocab_api npx prisma migrate deploy
