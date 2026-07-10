@@ -46,5 +46,9 @@ jobs:
           script: |
             cd ~
             docker-compose pull api
+            # Applique le schéma AVANT de basculer le conteneur (évite la fenêtre
+            # nouveau-code/ancien-schéma). Modèle de déploiement du projet = db push.
+            # Sans --accept-data-loss : un changement destructif fait échouer le
+            # déploiement (sécurité) au lieu de perdre des données.
+            docker-compose run --rm api npx prisma db push --skip-generate
             docker-compose up -d api
-            docker exec aerocab_api npx prisma migrate deploy
