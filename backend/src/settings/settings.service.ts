@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { getCurrentTenantId } from '../tenancy/tenant-context';
+import { ZERO_TENANT_ID } from '../tenancy/tenant.constants';
 
 const CONFIG_CACHE_KEY = 'config:cache';
 
@@ -88,6 +90,28 @@ export class SettingsService {
       if (scoped !== ' ') return scoped;
     }
     return this.get(key, defaultValue);
+  }
+
+  /**
+   * Cascade complète : tenant+pays → tenant → pays (plateforme) → plateforme → défaut.
+   * Le tenant zéro (aerogo) EST la plateforme : on saute les niveaux tenant.
+   */
+  async getScoped(key: string, countryCode?: string | null, defaultValue = ''): Promise<string> {
+    const tenantId = getCurrentTenantId();
+    const country = countryCode ? countryCode.toUpperCase() : null;
+    const SENTINEL = ' ';
+
+    if (tenantId && tenantId !== ZERO_TENANT_ID) {
+      if (country) {
+        const tc = await this.get(`tenant:${tenantId}:${key}:${country}`, SENTINEL);
+        if (tc !== SENTINEL) return tc;
+      }
+      const t = await this.get(`tenant:${tenantId}:${key}`, SENTINEL);
+      if (t !== SENTINEL) return t;
+    }
+
+    // Niveaux plateforme (réutilise la cascade pays existante)
+    return this.getForCountry(key, country, defaultValue);
   }
 
   async set(key: string, value: string): Promise<void> {
