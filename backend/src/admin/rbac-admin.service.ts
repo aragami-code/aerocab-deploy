@@ -117,7 +117,7 @@ export class RbacAdminService {
 
   // ── Role assignment ───────────────────────────────────
 
-  async assignRole(userId: string, roleId: string) {
+  async assignRole(userId: string, roleId: string, countryScope: string[] = []) {
     const [user, role] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: userId } }),
       this.prisma.adminRole.findUnique({ where: { id: roleId } }),
@@ -128,7 +128,7 @@ export class RbacAdminService {
     const existing = await this.prisma.userAdminRole.findFirst({ where: { userId, roleId } });
     if (existing) throw new ConflictException('Rôle déjà assigné');
 
-    await this.prisma.userAdminRole.create({ data: { userId, roleId } });
+    await this.prisma.userAdminRole.create({ data: { userId, roleId, countryScope } });
     await this.permissionsService.invalidateCache(userId);
     return { success: true };
   }

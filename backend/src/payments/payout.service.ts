@@ -43,9 +43,16 @@ export class PayoutService {
     const { bookingId, driverProfileId, grossAmount, isCash } = params;
     const tipAmount = params.tipAmount ?? 0;
 
-    // Lire les paramètres financiers dynamiquement
-    const commissionRaw    = await this.settings.get('commission_rate_pct', '15');
-    const vipCommissionRaw = await this.settings.get('commission_rate_vip_pct', '25');
+    // Résoudre le pays du chauffeur pour les paramètres par pays
+    const driver = await this.prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      select: { countryCode: true },
+    });
+    const driverCountry = driver?.countryCode ?? null;
+
+    // Lire les paramètres financiers dynamiquement (par pays du chauffeur)
+    const commissionRaw    = await this.settings.getForCountry('commission_rate_pct', driverCountry, '15');
+    const vipCommissionRaw = await this.settings.getForCountry('commission_rate_vip_pct', driverCountry, '25');
     const providerFeeRaw   = await this.settings.get('payment_provider_fee_pct', '2');
 
     const booking = await this.prisma.booking.findUnique({
@@ -128,7 +135,7 @@ export class PayoutService {
       select: {
         payoutPhone: true, payoutMethod: true, payoutName: true, payoutVerified: true,
         cashCommissionDebt: true, cashDepositBalance: true,
-        earningsWallet: true,
+        earningsWallet: true, countryCode: true,
       },
     });
     if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
@@ -158,7 +165,7 @@ export class PayoutService {
       );
     }
 
-    const minWithdrawal = parseFloat(await this.settings.get('min_withdrawal_amount', '5000'));
+    const minWithdrawal = parseFloat(await this.settings.getForCountry('min_withdrawal_amount', profile.countryCode, '5000'));
     if (amount < minWithdrawal) {
       throw new BadRequestException(`Montant minimum de retrait: ${minWithdrawal} XAF`);
     }
@@ -184,26 +191,34 @@ export class PayoutService {
     let transferId: string;
     let transferStatus: string;
 
-    if (useEdoctor) {
-      const isMtn = profile.payoutMethod === 'mtn_momo';
-      const result = isMtn
-        ? await this.edoctor.withdrawMtn({ amount, phone: profile.payoutPhone, reference })
-        : await this.edoctor.withdrawOrange({ amount, phone: profile.payoutPhone, reference });
-      transferId     = result.id;
-      transferStatus = result.status;
-    } else {
-      if (!channel) throw new BadRequestException(`Méthode de paiement non supportée: ${profile.payoutMethod}`);
-      const result = await this.notchpay.transfer({
-        reference,
-        amount,
-        currency:        'XAF',
-        beneficiaryName:  profile.payoutName ?? '',
-        beneficiaryPhone: profile.payoutPhone,
-        channel,
-        description:     `Virement AeroCab — ${reference}`,
+    try {
+      if (useEdoctor) {
+        const isMtn = profile.payoutMethod === 'mtn_momo';
+        const result = isMtn
+          ? await this.edoctor.withdrawMtn({ amount, phone: profile.payoutPhone, reference })
+          : await this.edoctor.withdrawOrange({ amount, phone: profile.payoutPhone, reference });
+        transferId     = result.id;
+        transferStatus = result.status;
+      } else {
+        const result = await this.notchpay.transfer({
+          reference,
+          amount,
+          currency:        'XAF',
+          beneficiaryName:  profile.payoutName ?? '',
+          beneficiaryPhone: profile.payoutPhone,
+          channel,
+          description:     `Virement AeroCab — ${reference}`,
+        });
+        transferId     = result.id;
+        transferStatus = result.status;
+      }
+    } catch (apiErr) {
+      await this.prisma.driverEarningsWallet.update({
+        where: { driverProfileId },
+        data:  { balance: { increment: amount }, totalWithdrawn: { decrement: amount } },
       });
-      transferId     = result.id;
-      transferStatus = result.status;
+      this.logger.error(`Virement échoué, wallet restauré: ref=${reference} err=${apiErr.message}`);
+      throw apiErr;
     }
 
     this.logger.log(`Virement initié: ref=${reference} id=${transferId} status=${transferStatus} via=${useEdoctor ? 'edoctor' : 'notchpay'}`);

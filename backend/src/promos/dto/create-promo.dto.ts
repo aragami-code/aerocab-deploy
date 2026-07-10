@@ -21,4 +21,10 @@ export class CreatePromoDto {
 
   @IsOptional()
   usagePerUser?: boolean;
+
+  // Pays (ISO-2). Absent/vide = global (valable partout).
+  @IsOptional()
+  @IsString()
+  @MaxLength(2)
+  countryCode?: string;
 }

@@ -38,9 +38,9 @@ import { PayoutService } from '../payments/payout.service';
 import { CashCommissionService } from '../payments/cash-commission.service';
 import { ReceiptService } from '../payments/receipt.service';
 import { UsersService } from '../users/users.service';
-
-// Méthodes de paiement direct (F4) — pas de débit wallet points
-const F4_PAYMENT_METHODS = ['orange_money_cm', 'mtn_cm', 'card', 'cash'];
+import { AdminNotificationService } from '../admin/admin-notification.service';
+import { resolveCommissionRate } from './commission-resolver';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -75,12 +75,14 @@ export class BookingsService {
     private readonly cashCommissionSvc: CashCommissionService,
     private readonly receiptSvc: ReceiptService,
     private readonly usersService: UsersService,
+    private readonly adminNotifs: AdminNotificationService,
+    private readonly loyaltyService: LoyaltyService,
   ) {}
 
   /** 0.B17 — Capacité d'un type de véhicule depuis AppSetting vehicle_capacity (JSON). */
-  private async getVehicleSeats(vehicleType: string): Promise<number> {
+  private async getVehicleSeats(vehicleType: string, country?: string | null): Promise<number> {
     try {
-      const raw = await this.settingsService.get('vehicle_capacity', '');
+      const raw = await this.settingsService.getForCountry('vehicle_capacity', country ?? null, '');
       if (raw) {
         const capacity: Record<string, number> = JSON.parse(raw);
         if (capacity[vehicleType] !== undefined) return capacity[vehicleType];
@@ -89,10 +91,23 @@ export class BookingsService {
     return DEFAULT_VEHICLE_SEATS[vehicleType] ?? 4;
   }
 
+  /** Résout les clés API vols depuis app_settings (priorité) ou variables d'env (fallback) */
+  private async resolveFlightApiKeys() {
+    const [fr24Token, aeroDataBoxKey] = await Promise.all([
+      this.settingsService.get('flight_radar_token', ''),
+      this.settingsService.get('aerodatabox_api_key', ''),
+    ]);
+    return {
+      fr24Token:    fr24Token    || this.config.get<string>('FLIGHT_RADAR_TOKEN', ''),
+      aeroDataBoxKey: aeroDataBoxKey || this.config.get<string>('AERODATABOX_API_KEY', ''),
+    };
+  }
+
   /** Recherche le vol via FlightRadar24 et le sauvegarde en DB si introuvable */
   private async fetchAndSaveFlight(passengerId: string, flightNumber: string) {
     try {
-      const f = await this.flightsService.searchFlight(flightNumber);
+      const apiKeys = await this.resolveFlightApiKeys();
+      const f = await this.flightsService.searchFlight(flightNumber, apiKeys);
       if (!f) return null;
 
       return this.prisma.flight.create({
@@ -289,22 +304,36 @@ export class BookingsService {
     grossAmount: number,
     vehicleType: string,
     forfaitId: string | null,
+    operatingCountry: string | null,
   ): Promise<number> {
-    let rate: number | null = null;
-    // 1. Forfait spécifique
+    let forfaitPercent: number | null = null;
     if (forfaitId) {
       const forfait = await this.forfaitsService.findOne(forfaitId).catch(() => null);
-      if (forfait?.companyPercent != null) rate = forfait.companyPercent / 100;
+      forfaitPercent = forfait?.companyPercent ?? null;
     }
-    // 2. Setting global ou tarifs véhicule
-    if (rate === null) {
-      const rideTariffs = await this.settingsService.getTariffs();
-      const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate;
-      const settingRaw = await this.settingsService.get('commission_rate_pct', '');
-      const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
-      rate = vehicleRate ?? settingRate ?? rideTariffs.commissionRate ?? 0.15;
-    }
+    const rideTariffs = await this.settingsService.getTariffsByCountry(operatingCountry);
+    const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate ?? null;
+    const settingRaw = await this.settingsService.getForCountry('commission_rate_pct', operatingCountry, '');
+    const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
+    const tariffsRate = rideTariffs.commissionRate ?? null;
+    const rate = resolveCommissionRate({ forfaitPercent, vehicleRate, settingRate, tariffsRate });
     return Math.round(grossAmount * rate * 100) / 100;
+  }
+
+  /** Taux de commission effectif (0–1) pour un nouveau booking, country-aware. */
+  private async resolveBookingCommissionRate(
+    vehicleType: string, forfaitId: string | null, operatingCountry: string | null,
+  ): Promise<number> {
+    let forfaitPercent: number | null = null;
+    if (forfaitId) {
+      const forfait = await this.forfaitsService.findOne(forfaitId).catch(() => null);
+      forfaitPercent = forfait?.companyPercent ?? null;
+    }
+    const rideTariffs = await this.settingsService.getTariffsByCountry(operatingCountry);
+    const vehicleRate = rideTariffs.vehicles?.[vehicleType]?.commissionRate ?? null;
+    const settingRaw = await this.settingsService.getForCountry('commission_rate_pct', operatingCountry, '');
+    const settingRate = settingRaw ? parseFloat(settingRaw) / 100 : null;
+    return resolveCommissionRate({ forfaitPercent, vehicleRate, settingRate, tariffsRate: rideTariffs.commissionRate ?? null });
   }
 
   /**
@@ -369,13 +398,62 @@ export class BookingsService {
     return Promise.resolve(Math.max(minFare, startupFee + distancePrice));
   }
 
+  /**
+   * Mode tarifaire applicable à un trajet : 'zone' (prix fixe par tranche de distance)
+   * ou 'kilometrage' (formule au km). Résolution en cascade :
+   *   pricing_mode:<AÉROPORT> → pricing_mode:<PAYS> → pricing_mode (global) → 'zone'
+   * Permet de choisir, par aéroport, comment chaque course est tarifée.
+   */
+  private async resolvePricingMode(
+    airportIata: string | null | undefined,
+    countryCode: string | null,
+  ): Promise<'zone' | 'kilometrage'> {
+    if (airportIata) {
+      const perAirport = await this.settingsService.get(`pricing_mode:${airportIata.toUpperCase()}`, '');
+      if (perAirport === 'zone' || perAirport === 'kilometrage') return perAirport;
+    }
+    const resolved = await this.settingsService.getForCountry('pricing_mode', countryCode, 'zone');
+    return resolved === 'kilometrage' ? 'kilometrage' : 'zone';
+  }
+
   // ─── Fin méthodes partagées ───────────────────────────────────────────────
+
+  /** Proxy vers PaymentIntentService.refund — exposé pour les modules qui ne peuvent pas l'injecter directement */
+  async refundPaymentIntent(bookingId: string, params: { reason: string; penaltyPct?: number }): Promise<void> {
+    return this.paymentIntentSvc.refund(bookingId, params);
+  }
+
+  /** Méthodes qui passent par PaymentIntent (pas de débit wallet). Chargées depuis app_settings. */
+  private async getDirectPaymentMethods(): Promise<string[]> {
+    const raw = await this.settingsService.get(
+      'direct_payment_methods',
+      'orange_money_cm,mtn_cm,card,cash',
+    );
+    return raw.split(',').map((m) => m.trim()).filter(Boolean);
+  }
+
+  /** Méthodes disponibles pour le passager. Chargées depuis app_settings. */
+  private async getEnabledPaymentMethods(): Promise<string[]> {
+    const raw = await this.settingsService.get(
+      'enabled_payment_methods',
+      'cash,card,wallet,points,orange_money_cm,mtn_cm',
+    );
+    return raw.split(',').map((m) => m.trim()).filter(Boolean);
+  }
 
   async createBooking(passengerId: string, dto: CreateBookingDto) {
     try {
+    // Garde profil : un passager sans numéro vérifié ne peut pas réserver.
+    const passenger = await this.prisma.user.findUnique({ where: { id: passengerId }, select: { phone: true } });
+    if (!passenger?.phone) {
+      throw new ForbiddenException({ code: 'PROFILE_INCOMPLETE', message: 'Vérifiez votre numéro de téléphone avant de réserver.' });
+    }
     // P1.1 — Validation early du vehicleType contre la liste dynamique des véhicules
     // configurés. Évite d'exécuter tout le pipeline tarifaire pour rejeter un type invalide.
-    const globalTariffs = await this.settingsService.getTariffs();
+    const [globalTariffs, enabledPaymentMethods] = await Promise.all([
+      this.settingsService.getTariffs(),
+      this.getEnabledPaymentMethods(),
+    ]);
     const allowedVehicleTypes = Object.keys(globalTariffs.vehicles ?? {})
       .filter((k) => globalTariffs.vehicles[k]?.isActive !== false);
     if (!allowedVehicleTypes.includes(dto.vehicleType)) {
@@ -383,12 +461,17 @@ export class BookingsService {
         `Type de véhicule "${dto.vehicleType}" non disponible. Choix possibles : ${allowedVehicleTypes.join(', ')}.`,
       );
     }
+    if (!enabledPaymentMethods.includes(dto.paymentMethod)) {
+      throw new BadRequestException(
+        `Méthode de paiement "${dto.paymentMethod}" non disponible. Choix possibles : ${enabledPaymentMethods.join(', ')}.`,
+      );
+    }
 
     // 2. Guard : workflow activé/désactivé par l'admin
     const workflowKey = dto.type === 'ARRIVAL' ? 'workflow_arrival_enabled'
       : dto.type === 'DEPARTURE' ? 'workflow_departure_enabled'
       : 'workflow_international_enabled';
-    const workflowEnabled = await this.settingsService.get(workflowKey, 'true');
+    const workflowEnabled = await this.settingsService.getForCountry(workflowKey, dto.countryCode?.toUpperCase() ?? null, 'true');
     if (workflowEnabled === 'false') {
       const labels: Record<string, string> = {
         ARRIVAL: 'Arrivée aéroport',
@@ -426,12 +509,29 @@ export class BookingsService {
     }
 
     // 5. Réservation programmée — validation date
-    const scheduledAt = dto.scheduledAt ? new Date(dto.scheduledAt) : null;
-    const SCHEDULE_MIN_ADVANCE_MIN = 30; // min 30 min à l'avance
-    const SCHEDULE_MAX_ADVANCE_DAYS = 7; // max 7 jours
-    if (scheduledAt) {
+    // ARRIVAL with a far-future flight also uses scheduledAt (deferred dispatch via cron)
+    // INTERNATIONAL: scheduledAt = heure d'arrivée du vol (auto, pas choisi par l'utilisateur)
+
+    const dispatchAdvanceRaw = await this.settingsService.get('dispatch_scheduled_advance_min', '60');
+    const dispatchAdvanceMin = parseInt(dispatchAdvanceRaw, 10) || 60;
+    const SCHEDULE_MAX_ADVANCE_DAYS = 7;
+
+    let rawScheduledAt = dto.scheduledAt ? new Date(dto.scheduledAt) : null;
+
+    if (rawScheduledAt && dto.type === 'INTERNATIONAL') {
+      // Pour INTERNATIONAL, scheduledAt est l'heure d'atterrissage du vol (auto-défini, non choisi).
+      // Si le vol atterrit dans moins de dispatchAdvanceMin → dispatch immédiat (pas de scheduled).
+      const diffMin = (rawScheduledAt.getTime() - Date.now()) / 60000;
+      if (diffMin <= dispatchAdvanceMin) {
+        rawScheduledAt = null; // trop proche → dispatch immédiat
+      } else if (diffMin > SCHEDULE_MAX_ADVANCE_DAYS * 24 * 60) {
+        throw new BadRequestException(`La réservation ne peut pas dépasser ${SCHEDULE_MAX_ADVANCE_DAYS} jours à l'avance`);
+      }
+      // Pas de minimum arbitraire pour INTERNATIONAL — le vol peut atterrir dans 2h, c'est valide
+    } else if (rawScheduledAt) {
+      const SCHEDULE_MIN_ADVANCE_MIN = dispatchAdvanceMin + 30;
       const nowMs = Date.now();
-      const diffMin = (scheduledAt.getTime() - nowMs) / 60000;
+      const diffMin = (rawScheduledAt.getTime() - nowMs) / 60000;
       if (diffMin < SCHEDULE_MIN_ADVANCE_MIN) {
         throw new BadRequestException(`La réservation programmée doit être au moins ${SCHEDULE_MIN_ADVANCE_MIN} min à l'avance`);
       }
@@ -440,6 +540,8 @@ export class BookingsService {
       }
     }
 
+    const scheduledAt = rawScheduledAt;
+
     // 6. Distance et prix de base
     const isDeparture = dto.type === 'DEPARTURE';
     const distanceKm = await this.computeDistanceKm(dto);
@@ -447,17 +549,16 @@ export class BookingsService {
     // 5.B3 — Guard distance lu depuis AppSetting (max_route_distance_km, défaut 80km)
     const maxRouteRaw = await this.settingsService.get('max_route_distance_km', '80');
     const maxRouteKm = parseFloat(maxRouteRaw) || 80;
-    if (dto.type !== 'INTERNATIONAL' && distanceKm > maxRouteKm) {
+    if (distanceKm > maxRouteKm) {
       throw new BadRequestException('DISTANCE_EXCEEDED');
     }
 
-    // P3 — Refus précoce : ARRIVAL et DEPARTURE EXIGENT un aéroport IATA valide.
-    // Le sentinel 'INTERNATIONAL' est réservé aux bookings type=INTERNATIONAL sans aéroport.
-    // Sans ce guard, un client envoyant `departureAirport: ''` se voyait créer un booking
-    // avec departureAirport='INTERNATIONAL' (fallback ligne plus bas) → bypass du Filtre 2.
-    if (dto.type !== 'INTERNATIONAL') {
+    // P3 — Refus précoce : tous les types exigent un aéroport IATA valide.
+    // Pour INTERNATIONAL, l'aéroport est l'aéroport d'atterrissage (ex: DLA pour Douala),
+    // récupéré automatiquement depuis les données du vol.
+    {
       const code = dto.departureAirport?.trim().toUpperCase();
-      if (!code || code === 'INTERNATIONAL' || !/^[A-Z]{3}$/.test(code)) {
+      if (!code || !/^[A-Z]{3}$/.test(code)) {
         throw new BadRequestException(
           `Un aéroport de départ valide (code IATA 3 lettres) est requis pour les courses ${dto.type}.`,
         );
@@ -465,10 +566,8 @@ export class BookingsService {
     }
 
     // Filtre 2 — refus si l'aéroport n'est pas opéré par AeroCab (source de vérité backend).
-    // Le frontend applique le Filtre 1 pour l'UX, mais cette garde est obligatoire car
-    // un client modifié ou une requête forgée pourrait contourner le filtrage UI.
-    // Le sentinel 'INTERNATIONAL' (pas un vrai IATA) est utilisé pour les bookings sans aéroport.
-    if (dto.departureAirport && dto.departureAirport.toUpperCase() !== 'INTERNATIONAL') {
+    // Le guard P3 ci-dessus garantit déjà un IATA valide à ce stade.
+    if (dto.departureAirport) {
       const airport = await this.prisma.airport.findUnique({
         where: { iataCode: dto.departureAirport.toUpperCase() },
         select: { isActive: true, isOperated: true, city: true },
@@ -504,34 +603,46 @@ export class BookingsService {
     const bookingTariffs = await this.settingsService.getTariffsByCountry(bookingCountryCode);
     const bookingPointValue = bookingTariffs.pointValue ?? 1; // pts par unité monétaire locale
 
-    // ── Zone pricing ───────────────────────────────────────────────────────────
-    // Cascade aéroport → pays → global
-    const pricingMode = 'zone';
-    const zones = await this.zonesService.findForCountry(bookingCountryCode, dto.departureAirport ?? null);
+    // ── Tarification : mode par aéroport (cascade aéroport → pays → global) ──────
+    const pricingMode = await this.resolvePricingMode(dto.departureAirport, bookingCountryCode);
 
-    const matchedZone = this.zonesService.matchZone(distanceKm, zones);
-    if (!matchedZone) {
-      const airportLabel = dto.departureAirport ? `l'aéroport ${dto.departureAirport.toUpperCase()}` : `le pays ${bookingCountryCode}`;
-      throw new BadRequestException(
-        `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
+    let finalPricePoints: number;
+    let pricingZoneId: string | null = null;
+    if (pricingMode === 'kilometrage') {
+      finalPricePoints = Math.round(
+        await this.computeBasePriceForVehicleWithTariffs(distanceKm, dto.vehicleType, bookingTariffs),
       );
+      this.logger.log(`[KM Pricing] ${distanceKm.toFixed(1)}km | ${dto.vehicleType} | ${finalPricePoints} pts | ${Math.round(finalPricePoints * bookingPointValue)} ${bookingTariffs.currency ?? 'XAF'}`);
+    } else {
+      const zones = await this.zonesService.findForCountry(bookingCountryCode, dto.departureAirport ?? null);
+      const matchedZone = this.zonesService.matchZone(distanceKm, zones);
+      if (!matchedZone) {
+        const airportLabel = dto.departureAirport ? `l'aéroport ${dto.departureAirport.toUpperCase()}` : `le pays ${bookingCountryCode}`;
+        throw new BadRequestException(
+          `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
+        );
+      }
+      const zonePrice = matchedZone.prices[dto.vehicleType];
+      if (zonePrice === undefined) {
+        throw new BadRequestException(
+          `Le type de véhicule "${dto.vehicleType}" n'est pas disponible pour un trajet de ${distanceKm.toFixed(1)} km (${matchedZone.name}).`,
+        );
+      }
+      finalPricePoints = zonePrice;
+      pricingZoneId = matchedZone.id;
+      this.logger.log(`[Zone Pricing] ${distanceKm.toFixed(1)}km → ${matchedZone.name} | ${dto.vehicleType} | ${finalPricePoints} pts | ${Math.round(finalPricePoints * bookingPointValue)} ${bookingTariffs.currency ?? 'XAF'}`);
     }
-
-    const zonePrice = matchedZone.prices[dto.vehicleType];
-    if (zonePrice === undefined) {
-      throw new BadRequestException(
-        `Le type de véhicule "${dto.vehicleType}" n'est pas disponible pour un trajet de ${distanceKm.toFixed(1)} km (${matchedZone.name}).`,
-      );
-    }
-
-    const finalPricePoints = zonePrice;
-    const zoneMatch = { zone: matchedZone, pricePoints: finalPricePoints };
     const priceInFcfa = Math.round(finalPricePoints * bookingPointValue);
-
-    this.logger.log(`[Zone Pricing] ${distanceKm.toFixed(1)}km → ${zoneMatch.zone.name} | ${dto.vehicleType} | ${finalPricePoints} pts | ${priceInFcfa} ${bookingTariffs.currency ?? 'XAF'}`);
 
     // 7. Prix fixe zone garanti : modèle Blacklane, aucune surcharge nuit/pluie/pointe
     let bookingPricePoints = finalPricePoints;
+
+    // Lot 2 — Meet & Greet : supplément cash (unité de prix = points, 1 pt = 1 FCFA),
+    // ajouté au prix de la course et donc payé au chauffeur.
+    if (dto.meetAndGreet) {
+      const meetGreetFee = parseInt(await this.settingsService.getForCountry('meet_greet_fee', bookingCountryCode, '0'), 10) || 0;
+      bookingPricePoints += meetGreetFee;
+    }
 
     // 8. Surcharge INTERNATIONAL (configurable via admin) — tarif pays différent, conservé
     if (dto.type === 'INTERNATIONAL') {
@@ -637,14 +748,19 @@ export class BookingsService {
           ? { lat: dto.pickupLat, lng: dto.pickupLng }
           : undefined;
 
-    // F8 — Récupérer tier passager pour dispatch prioritaire
-    const passengerTierForDispatch = await this.usersService.getPassengerTier(passengerId).catch(() => 'bronze');
+    // F8 + Task 11 — Calcul du tier effectif AVANT le dispatch initial
+    // (hissé ici pour que la priorité de pool s'applique dès le 1er dispatch)
+    const perks: string[] = Array.isArray(dto.purchasedPerks) ? dto.purchasedPerks : [];
+    const passengerTierRaw = await this.usersService.getPassengerTier(passengerId).catch(() => 'bronze' as const);
+    const passengerTier = passengerTierRaw as import('../loyalty/loyalty.constants').TierKey;
+    const loyaltyAvail = await this.loyaltyService.resolveAvailability(passengerTier, bookingCountryCode, dto.vehicleType);
+    const effTier = await this.loyaltyService.effectiveTier(passengerTier, perks, bookingCountryCode);
 
     const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
-      { departureAirport: dto.departureAirport } as any,
+      { departureAirport: dto.departureAirport, operatingCountry: bookingCountryCode, purchasedPerks: perks, effectiveTier: effTier, vehicleType: dto.vehicleType, passengerId, preferFavorite: !!dto.preferFavorite } as any,
       isPreLanding,
       dispatchCustomCoords,
-      passengerTierForDispatch,
+      effTier,
     );
 
     // P1.3 — Dispatch différé explicite
@@ -652,10 +768,10 @@ export class BookingsService {
     // Si des chauffeurs existent globalement, on calcule un ETA réaliste depuis le
     // plus proche et on demande au passager une confirmation explicite (acceptDelay).
     // Pas de bypass via flag opaque "force=true" — chaque délai accepté est tracé.
-    if (eligibleDrivers.length === 0 && !isPreLanding && dto.acceptDelay !== true) {
+    if (!scheduledAt && eligibleDrivers.length === 0 && !isPreLanding && dto.acceptDelay !== true) {
       const pickupCoords = dispatchCustomCoords
         ?? (knownAirportCoords ? { lat: knownAirportCoords.lat, lng: knownAirportCoords.lng } : undefined);
-      const delay = await this.dispatchService.estimateDelayedDispatch(dto.vehicleType, pickupCoords);
+      const delay = await this.dispatchService.estimateDelayedDispatch(dto.vehicleType, pickupCoords, bookingCountryCode);
       if (delay.globalDriversCount > 0) {
         throw new BadRequestException(
           JSON.stringify({
@@ -672,6 +788,9 @@ export class BookingsService {
     }
 
     // Broadcast model : pas d'auto-assign — tous les chauffeurs notifiés, le 1er à accepter obtient la course.
+
+    // Chargement des méthodes directes (PaymentIntent) depuis app_settings
+    const directPaymentMethods = await this.getDirectPaymentMethods();
 
     // Sanity check: Coordinates (guards against NaN from client)
     const cleanDestLat = (typeof dto.destLat === 'number' && !isNaN(dto.destLat)) ? dto.destLat : null;
@@ -696,6 +815,39 @@ export class BookingsService {
         needsAsyncGeocoding = true;
       }
     }
+
+    // ── Gating fidélité — revalidation SERVEUR (never trust the front) ───────
+    // perks / passengerTier / loyaltyAvail / effTier déjà calculés avant le dispatch (hissage Task 11)
+    const catEntry = loyaltyAvail.categories.find((c) => c.key === dto.vehicleType);
+    if (catEntry && !catEntry.unlocked) {
+      if (!perks.includes(`category:${dto.vehicleType}`)) {
+        throw new ForbiddenException(`Catégorie ${dto.vehicleType} non débloquée pour votre niveau`);
+      }
+    }
+
+    // Lot 2 — gating réservation programmée : UNIQUEMENT la programmation choisie par
+    // l'utilisateur = scheduledAt SANS vol associé. Un scheduledAt dérivé d'un vol
+    // (INTERNATIONAL = heure d'atterrissage ; ARRIVAL vol lointain = dispatch différé)
+    // ne doit JAMAIS bloquer la réservation, quel que soit le niveau.
+    if (rawScheduledAt && !dto.flightNumber) {
+      const scheduledActive = perks.includes('scheduled')
+        || (loyaltyAvail.services.find((s) => s.key === 'scheduled')?.included ?? false);
+      if (!scheduledActive) {
+        throw new ForbiddenException('Réservation programmée non débloquée pour votre niveau');
+      }
+    }
+
+    // perks réellement à facturer = demandés ET non déjà inclus par le niveau
+    const loyaltyIncludedServices = loyaltyAvail.services.filter((s) => s.included).map((s) => s.key);
+    const isIncludedFree = (perk: string): boolean => {
+      if (perk.startsWith('category:')) {
+        const key = perk.slice('category:'.length);
+        return !!loyaltyAvail.categories.find((c) => c.key === key && c.unlocked);
+      }
+      return loyaltyIncludedServices.includes(perk as any);
+    };
+    const paidPerks = perks.filter((p) => !isIncludedFree(p));
+    // ── Fin gating fidélité ─────────────────────────────────────────────────
 
     // Taux de conversion : 1 point = 1 FCFA
     const pointsRequired = Math.ceil(pointsAfterDiscount);
@@ -725,8 +877,8 @@ export class BookingsService {
       // D5 — Débit atomique wallet (protection race condition double-dépense)
       // wallet.updateMany avec WHERE balance >= pointsRequired est une opération atomique :
       // si deux bookings concurrents lisent le même solde, le second obtiendra count=0 et sera rejeté.
-      // F4 — Les méthodes de paiement direct (Mobile Money, Carte, Cash) ne débitent pas le wallet.
-      const isF4Payment = F4_PAYMENT_METHODS.includes(dto.paymentMethod);
+      // Les méthodes de paiement direct (Mobile Money, Carte, Cash) ne débitent pas le wallet.
+      const isF4Payment = directPaymentMethods.includes(dto.paymentMethod);
       if (!isF4Payment && (dto.paymentMethod === 'wallet' || dto.paymentMethod === 'points')) {
         // Garantir l'existence du wallet avant le débit
         await tx.wallet.upsert({
@@ -752,13 +904,22 @@ export class BookingsService {
         }
       }
 
+      // 1.A — Débiter les perks fidélité payants (atomique avec le booking)
+      for (const perk of paidPerks) {
+        const perkCost = await this.loyaltyService.costOf(perk, bookingCountryCode);
+        if (perkCost > 0) {
+          await this.points.deductPointsTx(tx, passengerId, perkCost, `Upgrade fidélité: ${perk}`);
+        }
+      }
+
       // 1. Créer le booking en premier
+      const frozenCommissionRate = await this.resolveBookingCommissionRate(dto.vehicleType, null, bookingCountryCode);
       const newBooking = await tx.booking.create({
         data: {
           passengerId,
           driverProfileId: null,
           flightNumber: dto.flightNumber || null,
-          departureAirport: dto.departureAirport?.toUpperCase() || 'INTERNATIONAL',
+          departureAirport: dto.departureAirport!.toUpperCase(),
           destination: dto.destination || 'Destination',
           destLat: cleanDestLat,
           destLng: cleanDestLng,
@@ -789,8 +950,13 @@ export class BookingsService {
           airportFee:  null,
           // Forfait
           forfaitId:     null,
-          pricingZoneId: zoneMatch.zone.id,
+          commissionRate: frozenCommissionRate,
+          pricingZoneId: pricingZoneId,
           pricingMode:   pricingMode as any,
+          // Fidélité progressive
+          purchasedPerks: paidPerks,
+          effectiveTier:  effTier,
+          meetAndGreet:   !!dto.meetAndGreet,
         } as any,
         include: {
           passenger: { select: { name: true, avatarUrl: true, status: true } },
@@ -866,7 +1032,7 @@ export class BookingsService {
       where: { passengerId, id: { not: booking.id } },
     });
     if (totalBookings === 0) {
-      const firstRideBonus = parseInt(await this.settingsService.get('first_ride_bonus_points', '500'), 10) || 500;
+      const firstRideBonus = parseInt(await this.settingsService.getForCountry('first_ride_bonus_points', bookingCountryCode, '500'), 10) || 500;
       this.points.addPoints(passengerId, firstRideBonus, 'Bonus première course', 'bonus').catch(() => {});
     }
 
@@ -925,6 +1091,7 @@ export class BookingsService {
           pickupAddress: booking.pickupAddress,
           pricingMode: (booking as any).pricingMode ?? 'kilometrage',
           isPreLanding: isPreLanding,
+          meetAndGreet: (booking as any).meetAndGreet ?? false,
           distanceKm: parseFloat(distanceKm.toFixed(1)),
           durationMin: Math.max(5, Math.round(distanceKm / 30 * 60)),
         });
@@ -1098,7 +1265,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         vehicleBrand: booking.driverProfile?.vehicleBrand || '',
         vehicleModel: booking.driverProfile?.vehicleModel || '',
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
         estimatedPrice: booking.estimatedPrice,
         paymentMethod: booking.paymentMethod,
         driverEtaMinutes: liveEtaMinutes,
@@ -1209,12 +1376,69 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Réservation introuvable');
 
     // M8 — Fenêtre d'annulation étendue à arrived_at_airport, avec pénalité.
+    // - scheduled             → remboursement 100% (aucun chauffeur assigné)
     // - pending / confirmed   → remboursement 100% ou 50% selon règle 48h
     // - arrived_at_airport    → remboursement 50% (driver a fait le déplacement)
     // - in_progress et au-delà → annulation interdite
-    const cancellableStatuses = ['pending', 'confirmed', 'arrived_at_airport'];
+    const cancellableStatuses = ['scheduled', 'pending', 'confirmed', 'arrived_at_airport'];
     if (!cancellableStatuses.includes(booking.status)) {
       throw new BadRequestException('Cette réservation ne peut plus être annulée');
+    }
+
+    // Annulation d'une réservation programmée avant dispatch → 100% garanti
+    if (booking.status === 'scheduled') {
+      const price = Number(booking.estimatedPrice) || 0;
+      const directMethods = await this.getDirectPaymentMethods();
+      const isF4 = directMethods.includes(booking.paymentMethod);
+      const isWalletPayment = !isF4 && (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points');
+
+      // F4 (card/mobile money) : void si pas encore capturé, refund si capturé
+      if (isF4 && booking.paymentMethod !== 'cash') {
+        const intent = await this.prisma.paymentIntent.findUnique({ where: { bookingId } });
+        if (intent) {
+          if (['pending', 'authorized'].includes(intent.status)) {
+            await this.paymentIntentSvc.void(bookingId).catch(() => {});
+          } else if (intent.status === 'captured') {
+            await this.paymentIntentSvc.refund(bookingId, { reason: 'passenger_cancelled', penaltyPct: 0 }).catch(() => {});
+          }
+        }
+      }
+
+      const cancelled = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.booking.update({
+          where: { id: bookingId },
+          data: { status: 'cancelled', cancelledAt: new Date() },
+        });
+        // wallet/points : re-créditer le solde (cash et F4 ne débitent pas le wallet)
+        if (isWalletPayment && price > 0) {
+          await tx.pointsTransaction.create({
+            data: {
+              userId: passengerId,
+              type: 'credit',
+              points: price,
+              label: `Remboursement 100% annulation réservation programmée ${bookingId.slice(0, 8)}`,
+              source: 'refund',
+            },
+          });
+          await tx.wallet.upsert({
+            where: { userId: passengerId },
+            update: { balance: { increment: price } },
+            create: { userId: passengerId, balance: price },
+          });
+        }
+        return updated;
+      });
+      // Libérer le lock Redis au cas où le cron de dispatch a déjà posé un verrou
+      await this.redis.del(`scheduled:dispatch:${bookingId}`).catch(() => {});
+      this.audit.log({
+        action: 'booking.cancelled',
+        entity: 'booking',
+        entityId: bookingId,
+        userId: passengerId,
+        meta: { previousStatus: 'scheduled', paymentMethod: booking.paymentMethod, refundRate: 1.0 },
+      }).catch(() => {});
+      this.usersService.updateTrustScore(passengerId).catch(() => {});
+      return cancelled;
     }
 
     // S465 — Règle 48h : pénalité si annulation < 48h avant le vol (INTERNATIONAL/DEPARTURE)
@@ -1234,13 +1458,21 @@ export class BookingsService {
 
     const isLateCancel = booking.status === 'arrived_at_airport' || isLateCancelBy48h;
     const price = Number(booking.estimatedPrice) || 0;
-    const lateCancelRate = parseFloat(await this.settingsService.get('late_cancel_refund_rate', '0.5')) || 0.5;
-    const refundRate = isLateCancel ? lateCancelRate : 1.0;
+    const lateCancelRate = parseFloat(await this.settingsService.getForCountry('late_cancel_refund_rate', booking.operatingCountry ?? null, '0.5')) || 0.5;
+    // Lot 2 — Annulation flexible : si le perk est actif (payé ou inclus par le niveau),
+    // aucune pénalité même en annulation tardive.
+    const flexCancelActive = await this.loyaltyService.isServiceActive(
+      (booking.purchasedPerks as string[]) ?? [],
+      ((booking.effectiveTier as any) ?? (await this.usersService.getPassengerTier(passengerId).catch(() => 'bronze'))),
+      booking.operatingCountry ?? null,
+      'flex_cancel',
+    );
+    const refundRate = (isLateCancel && !flexCancelActive) ? lateCancelRate : 1.0;
     const pointsToRefund = Math.ceil(price * refundRate);
     const penaltyPoints  = Math.floor(price * (1 - refundRate));
 
     // ── F4 — Remboursement PaymentIntent (avant transaction DB pour éviter débit sans annulation) ──
-    const isCancelF4 = F4_PAYMENT_METHODS.includes(booking.paymentMethod);
+    const isCancelF4 = (await this.getDirectPaymentMethods()).includes(booking.paymentMethod);
     if (isCancelF4) {
       // penaltyPct selon la décision architecture : 0% avant dispatch, 20% après dispatch
       const penaltyPct = isLateCancel ? 20 : 0;
@@ -1567,7 +1799,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       },
     };
   }
@@ -1691,7 +1923,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       });
       this.notifications.sendToUser(
         nextDriver.user.id,
@@ -1720,6 +1952,116 @@ export class BookingsService {
       .catch((err) => this.logger.warn(`[Audit] booking.no_driver_available ${bookingId} failed: ${err?.message}`));
 
     return { id: bookingId, status: 'no_driver_available' };
+  }
+
+  /**
+   * Option A — Relance d'une course restée sans chauffeur : on RÉACTIVE la MÊME
+   * réservation (status → pending) et on re-broadcast aux chauffeurs éligibles.
+   * AUCUN recalcul : prix, distance, zone, code promo = préservés à l'identique
+   * (corrige le bug « le prix change à la relance »). Bloqué pour points/wallet
+   * (débit immédiat à la création → un re-débit serait nécessaire).
+   */
+  async relaunchBooking(passengerId: string, bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { passenger: { select: { name: true, avatarUrl: true, status: true } } },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+    if (booking.passengerId !== passengerId) {
+      throw new ForbiddenException('Cette réservation ne vous appartient pas.');
+    }
+    // 'pending' toléré : l'annulation côté app (fire-and-forget) peut ne pas avoir atterri.
+    if (!['cancelled', 'no_driver_available', 'pending'].includes(booking.status)) {
+      throw new BadRequestException('Cette course ne peut pas être relancée.');
+    }
+    // Anti-réactivation d'une course ancienne (fenêtre 60 min)
+    const ageMin = (Date.now() - new Date(booking.createdAt).getTime()) / 60000;
+    if (ageMin > 60) {
+      throw new BadRequestException('Cette course est trop ancienne pour être relancée. Veuillez en créer une nouvelle.');
+    }
+    // Paiements à débit immédiat → relance non supportée (éviter tout risque financier)
+    if (booking.paymentMethod === 'points' || booking.paymentMethod === 'wallet') {
+      throw new BadRequestException("Pour un paiement en points, veuillez refaire la réservation depuis l'accueil.");
+    }
+    // Pas de double course active (hors la course relancée elle-même)
+    const existingActive = await this.prisma.booking.findFirst({
+      where: { passengerId, id: { not: bookingId }, status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress', 'scheduled'] } },
+    });
+    if (existingActive) {
+      throw new BadRequestException('Vous avez déjà une course en cours.');
+    }
+
+    const coords = (booking.pickupLat && booking.pickupLng)
+      ? { lat: Number(booking.pickupLat), lng: Number(booking.pickupLng) }
+      : (booking.departureAirport ? (await this.resolveAirportCoords(booking.departureAirport)) ?? undefined : undefined);
+
+    const effTier = (booking as any).effectiveTier ?? undefined;
+    const eligibleDrivers = await this.dispatchService.findEligibleDrivers(
+      {
+        departureAirport: booking.departureAirport,
+        operatingCountry: (booking as any).operatingCountry,
+        purchasedPerks: (booking as any).purchasedPerks ?? [],
+        effectiveTier: effTier,
+        vehicleType: booking.vehicleType,
+        passengerId: booking.passengerId,
+        preferFavorite: false,
+      } as any,
+      false,
+      coords,
+      effTier,
+    );
+
+    // Réactiver la MÊME course — aucun re-pricing.
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'pending', driverProfileId: null },
+    });
+
+    const distKm = Number((booking as any).estimatedDistanceKm ?? 0);
+    if (eligibleDrivers.length > 0) {
+      for (const d of eligibleDrivers) {
+        this.notifications.sendToUser(
+          d.userId, 'Nouvelle course disponible 🚗',
+          `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
+          { bookingId: booking.id, type: 'new_booking' },
+        ).catch(() => {});
+        this.ridesGateway.notifyNewBooking(d.id, {
+          id: booking.id,
+          passengerId: booking.passengerId,
+          passengerName: booking.passenger?.name || 'Client',
+          passengerAvatarUrl: (booking.passenger as any)?.avatarUrl ?? null,
+          passengerVerified: (booking.passenger as any)?.status === 'active',
+          flightNumber: booking.flightNumber,
+          destination: booking.destination,
+          vehicleType: booking.vehicleType,
+          estimatedPrice: booking.estimatedPrice,
+          departureAirport: booking.departureAirport,
+          type: booking.type,
+          pickupAddress: booking.pickupAddress,
+          pricingMode: (booking as any).pricingMode ?? 'zone',
+          isPreLanding: false,
+          meetAndGreet: (booking as any).meetAndGreet ?? false,
+          distanceKm: parseFloat(distKm.toFixed(1)),
+          durationMin: Math.max(5, Math.round(distKm / 30 * 60)),
+        });
+      }
+      this.logger.log(`[Relaunch] Booking ${bookingId} réactivé + broadcast à ${eligibleDrivers.length} chauffeurs (prix préservé: ${booking.estimatedPrice}).`);
+    } else {
+      const allApprovedDrivers = await this.prisma.driverProfile.findMany({
+        where: { status: 'approved', user: { fcmToken: { not: null } } },
+        select: { userId: true },
+      });
+      for (const d of allApprovedDrivers) {
+        this.notifications.sendToUser(
+          d.userId, 'Nouvelle course disponible 🚗',
+          `Course vers ${booking.destination} — ${booking.estimatedPrice.toLocaleString()} FCFA`,
+          { bookingId: booking.id, type: 'new_booking' },
+        ).catch(() => {});
+      }
+      this.logger.log(`[Relaunch] Booking ${bookingId} réactivé — aucun chauffeur online, FCM à tous les approuvés.`);
+    }
+
+    return { id: bookingId, status: 'pending', estimatedPrice: booking.estimatedPrice };
   }
 
   // ── D2 : Panne chauffeur ────────────────────────────────────────────────────
@@ -1754,10 +2096,17 @@ export class BookingsService {
       { bookingId, type: 'driver_breakdown' },
     ).catch(() => {});
 
+    void this.adminNotifs.notify(
+      'booking.driver_offline',
+      'Panne chauffeur en course',
+      `Chauffeur ${driverUserId} en panne — course ${bookingId}`,
+      { bookingId, driverId: driverUserId, passengerId: booking.passengerId },
+    );
+
     // Libérer le chauffeur en panne
     await this.prisma.driverProfile.update({
       where: { id: driverProfile.id },
-      data: { isAvailable: true },
+      data: { isAvailable: false },
     });
 
     // Tenter de trouver un remplaçant
@@ -1787,7 +2136,7 @@ export class BookingsService {
         vehicleType: booking.vehicleType,
         estimatedPrice: booking.estimatedPrice,
         departureAirport: booking.departureAirport,
-        seats: await this.getVehicleSeats(booking.vehicleType),
+        seats: await this.getVehicleSeats(booking.vehicleType, (booking as any).operatingCountry ?? null),
       });
       this.notifications.sendToUser(
         nextDriver.user.id,
@@ -2021,6 +2370,17 @@ export class BookingsService {
     if (booking.driverProfileId !== driverProfile.id) throw new ForbiddenException('Accès refusé');
     if (booking.status !== 'arrived_at_airport') throw new BadRequestException('Statut incorrect');
 
+    // Guard réservation programmée : interdire le démarrage > 30 min avant l'heure prévue
+    if (booking.scheduledAt) {
+      const earlyLimitRaw = await this.settingsService.get('scheduled_early_start_min', '30');
+      const earlyLimitMin = parseInt(earlyLimitRaw, 10) || 30;
+      const minutesBefore = (new Date(booking.scheduledAt).getTime() - Date.now()) / 60000;
+      if (minutesBefore > earlyLimitMin) {
+        const scheduledStr = new Date(booking.scheduledAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+        throw new BadRequestException(`Cette course est programmée pour le ${scheduledStr}. Vous ne pouvez pas la démarrer plus de ${earlyLimitMin} min avant l'heure prévue.`);
+      }
+    }
+
     // D5 — Vérification solde au démarrage (fenêtre longue entre réservation et prise en charge)
     if (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') {
       const wallet = await this.prisma.wallet.findUnique({ where: { userId: booking.passengerId } });
@@ -2072,7 +2432,7 @@ export class BookingsService {
       }),
       this.prisma.driverProfile.update({
         where: { id: driverProfile.id },
-        data: { totalRides: { increment: 1 }, isAvailable: true },
+        data: { isAvailable: true },
       }),
     ]);
 
@@ -2143,21 +2503,25 @@ export class BookingsService {
     this.ridesGateway.server.to(`passenger:${booking.passengerId}`).emit('booking_updated', { id: booking.id, status: 'completed' });
     this.notifications.sendToUser(booking.passengerId, 'Course terminée ✅', 'Votre course est terminée. Merci d\'utiliser AeroGo 24 !').catch(() => {});
 
-    const isF4 = F4_PAYMENT_METHODS.includes(booking.paymentMethod);
+    const isF4 = (await this.getDirectPaymentMethods()).includes(booking.paymentMethod);
 
-    // ── F4 — Capture PaymentIntent (Stripe card = capture manuelle à la fin de course) ──────
+    // ── Capture PaymentIntent (Stripe card = capture manuelle à la fin de course) ──────
     if (isF4) {
       try {
         await this.paymentIntentSvc.capture(booking.id);
       } catch (err) {
         this.logger.warn(`[F4] Capture PaymentIntent échouée pour ${booking.id}: ${err.message}`);
+        void this.adminNotifs.notify(
+          'payment.capture_failed',
+          'Capture paiement échouée',
+          `Course ${booking.id} — capture F4 échouée : ${err.message}`,
+          { bookingId: booking.id, error: err.message },
+        );
       }
     }
 
-    // F5.1+F5.9 — Versement chauffeur unifié.
-    // Tous les paiements actuels passent par F4 (cash inclus dans F4_PAYMENT_METHODS).
-    // La branche legacy "wallet/points" était inatteignable (isF4 inclut cash) → supprimée.
-    if (isF4 && booking.driverProfile?.id) {
+    // F5.1+F5.9 — Versement chauffeur unifié
+    if (booking.driverProfile?.id) {
       const grossAmount = Number(booking.estimatedPrice) + Number(booking.discountAmount ?? 0);
       try {
         await this.payoutSvc.creditFromRide({
@@ -2167,15 +2531,21 @@ export class BookingsService {
           isCash:          booking.paymentMethod === 'cash',
         });
 
-        // Pour le cash : le passager paie le driver en main. Le driver doit la commission
-        // à AeroCab → on enregistre la dette pour qu'elle soit déduite de ses retraits futurs.
         if (booking.paymentMethod === 'cash') {
-          const commissionAmount = await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId);
+          const commissionAmount = booking.commissionRate != null
+            ? Math.round(grossAmount * booking.commissionRate * 100) / 100
+            : await this.computeCommissionAmount(grossAmount, booking.vehicleType, booking.forfaitId ?? null, booking.operatingCountry ?? null);
           await this.cashCommissionSvc.recordDebt(booking.driverProfile.id, commissionAmount)
             .catch((err) => this.logger.warn(`[CashCommission] recordDebt ${booking.id} failed: ${err?.message}`));
         }
       } catch (err) {
-        this.logger.warn(`[F4] Payout échoué pour ${booking.id}: ${err.message}`);
+        this.logger.warn(`[Payout] échoué pour ${booking.id}: ${err.message}`);
+        void this.adminNotifs.notify(
+          'payment.payout_failed',
+          'Versement chauffeur échoué',
+          `Course ${booking.id} — payout échoué : ${err.message}`,
+          { bookingId: booking.id, driverProfileId: booking.driverProfile?.id, error: err.message },
+        );
       }
     }
 
@@ -2258,7 +2628,8 @@ export class BookingsService {
           where: { passengerId: booking.passengerId, status: 'completed', id: { not: booking.id } },
         });
         if (completedRidesCount === 0) {
-          const tariffs = await this.settingsService.getTariffs();
+          // Bonus 1ère course selon le pays de la course (null = global)
+          const tariffs = await this.settingsService.getTariffsByCountry((booking as any).operatingCountry ?? null);
           const onFirstRideBonus = tariffs.referralBonus?.onFirstRide ?? 1000;
           if (onFirstRideBonus > 0) {
             const idempotencyRef = `REFERRAL-FIRST-RIDE-${booking.passengerId}`;
@@ -2272,6 +2643,10 @@ export class BookingsService {
             if (referrerWallet) {
               await this.prisma.transaction.create({
                 data: { walletId: referrerWallet.id, amount: onFirstRideBonus, type: 'deposit', status: 'completed', reference: idempotencyRef },
+              });
+              await this.prisma.wallet.update({
+                where: { id: referrerWallet.id },
+                data: { balance: { increment: onFirstRideBonus } },
               });
             }
             await this.points.addPoints(
@@ -2300,7 +2675,7 @@ export class BookingsService {
       const completedCount = await this.prisma.booking.count({
         where: { passengerId: booking.passengerId, status: 'completed' },
       });
-      const nRaw = await this.settingsService.get('loyalty_bonus_every_n_rides', '10');
+      const nRaw = await this.settingsService.getForCountry('loyalty_bonus_every_n_rides', booking.operatingCountry ?? null, '10');
       const n = parseInt(nRaw, 10) || 10;
       if (completedCount > 0 && completedCount % n === 0) {
         const ref = `LOYALTY-RIDE-${completedCount}-${booking.passengerId}`;
@@ -2313,7 +2688,7 @@ export class BookingsService {
           label = `🎁 Course offerte Platine — ${completedCount}ème trajet`;
           this.logger.log(`[Loyalty/Platine] Course offerte ${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
         } else {
-          const bonusRaw = await this.settingsService.get('loyalty_bonus_points', '500');
+          const bonusRaw = await this.settingsService.getForCountry('loyalty_bonus_points', booking.operatingCountry ?? null, '500');
           bonus = parseInt(bonusRaw, 10) || 500;
           label = `Fidélité — ${completedCount}ème course`;
           this.logger.log(`[Loyalty] +${bonus} pts → passager ${booking.passengerId} (${completedCount}e course)`);
@@ -2322,6 +2697,10 @@ export class BookingsService {
         if (passengerWallet) {
           await this.prisma.transaction.create({
             data: { walletId: passengerWallet.id, amount: bonus, type: 'deposit', status: 'completed', reference: ref },
+          });
+          await this.prisma.wallet.update({
+            where: { id: passengerWallet.id },
+            data: { balance: { increment: bonus } },
           });
         }
         await this.points.addPoints(booking.passengerId, bonus, label, 'loyalty');
@@ -2334,10 +2713,118 @@ export class BookingsService {
 
     this.audit.log({ action: 'booking.completed', entity: 'booking', entityId: booking.id, userId: booking.passengerId, meta: { finalPrice: booking.estimatedPrice, paymentMethod: booking.paymentMethod } }).catch(() => {});
 
+    if (booking.driverProfile?.id) {
+      this.prisma.driverProfile.update({
+        where: { id: booking.driverProfile.id },
+        data: { totalRides: { increment: 1 } },
+      }).catch(() => {});
+    }
+
     this.usersService.updateLoyaltyTier(booking.passengerId).catch(() => {});
     this.usersService.updateTrustScore(booking.passengerId).catch(() => {});
 
     return { id: booking.id, status: 'completed' };
+  }
+
+  async cancelForDriverNoShow(bookingId: string): Promise<void> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true,
+        passengerId: true,
+        destination: true,
+        paymentMethod: true,
+        estimatedPrice: true,
+        driverProfile: { select: { id: true, userId: true } },
+      },
+    });
+    if (!booking) return;
+
+    const directMethods = await this.getDirectPaymentMethods();
+    const isF4 = directMethods.includes(booking.paymentMethod);
+    const price = Number(booking.estimatedPrice) || 0;
+
+    if (isF4) {
+      try {
+        await this.paymentIntentSvc.refund(bookingId, { reason: 'driver_noshow', penaltyPct: 0 });
+      } catch (err) {
+        this.logger.warn(`[NoShow] F4 refund failed ${bookingId}: ${err.message}`);
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.booking.updateMany({
+        where: { id: bookingId, status: 'confirmed' },
+        data: { status: 'cancelled', cancelledAt: new Date() },
+      });
+      if (updated.count === 0) return;
+
+      if (!isF4 && (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') && price > 0) {
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'credit',
+            points: Math.ceil(price),
+            label: `Remboursement no-show chauffeur — course ${bookingId.slice(0, 8)}`,
+            source: 'refund',
+          },
+        });
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { increment: price } },
+          create: { userId: booking.passengerId, balance: price },
+        });
+      }
+    });
+  }
+
+  async cancelForExpiredAssignment(bookingId: string): Promise<void> {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true,
+        passengerId: true,
+        paymentMethod: true,
+        estimatedPrice: true,
+      },
+    });
+    if (!booking) return;
+
+    const directMethods = await this.getDirectPaymentMethods();
+    const isF4 = directMethods.includes(booking.paymentMethod);
+    const price = Number(booking.estimatedPrice) || 0;
+
+    if (isF4) {
+      try {
+        await this.paymentIntentSvc.void(bookingId).catch(() => {});
+      } catch (err) {
+        this.logger.warn(`[Expire] F4 void failed ${bookingId}: ${err.message}`);
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: bookingId },
+        data: { status: 'cancelled' },
+      });
+
+      if (!isF4 && (booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') && price > 0) {
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'credit',
+            points: Math.ceil(price),
+            label: `Remboursement expiration course ${bookingId.slice(0, 8)}`,
+            source: 'refund',
+          },
+        });
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { increment: price } },
+          create: { userId: booking.passengerId, balance: price },
+        });
+      }
+    });
   }
 
   async getBookingPositions(userId: string, bookingId: string) {
@@ -2447,59 +2934,70 @@ export class BookingsService {
     const tariffs = await this.settingsService.getTariffsByCountry(countryCode);
     const pointValue = tariffs.pointValue ?? 1;
 
-    // Chargement des zones tarifaires actives — cascade aéroport → pays → global
-    const zones = await this.zonesService.findForCountry(countryCode ?? null, dto.departureAirport ?? null);
+    // Mode tarifaire par aéroport (cascade aéroport → pays → global)
+    const pricingMode = await this.resolvePricingMode(dto.departureAirport, countryCode);
 
-    // Zone unique pour cette distance (commune à tous les types de véhicules)
-    const matchedZone = this.zonesService.matchZone(distanceKm, zones);
-
-    if (!matchedZone) {
-      const airportLabel = dto.departureAirport
-        ? `l'aéroport ${dto.departureAirport.toUpperCase()}`
-        : `le pays ${countryCode}`;
-      throw new BadRequestException(
-        `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
-      );
-    }
-
-    // Prix par type de véhicule — seuls les véhicules ayant un prix dans cette zone sont inclus
     const estimates: Record<string, {
       priceInFcfa: number; priceInPoints: number;
       baseFcfa: number;
       zoneName?: string; label?: string; maxPassengers?: number;
     }> = {};
 
-    for (const vType of Object.keys(tariffs.vehicles)) {
-      if (tariffs.vehicles[vType]?.isActive === false) continue;
-
-      const zonePrice = matchedZone.prices[vType];
-      // Véhicule non disponible pour cette zone → on ne l'affiche pas
-      if (zonePrice === undefined) continue;
-
-      let pts = zonePrice;
-
-      // Supply/demand pricing (offre/demande) — conservé
-      try {
-        if (dto.departureAirport) {
-          pts = await this.pricingService.calculateEstimatedPrice(pts, dto.departureAirport);
-        }
-      } catch { /* ignore */ }
-
-      // Prix fixe garanti : aucune surcharge contextuelle (modèle Blacklane)
-      const priceInFcfa = Math.round(pts * pointValue);
-      const baseFcfa    = priceInFcfa;
-
-      estimates[vType] = {
-        priceInFcfa,
-        priceInPoints: pts,
-        baseFcfa,
-        zoneName:      matchedZone.name,
-        label:         tariffs.vehicles[vType]?.label,
-        maxPassengers: tariffs.vehicles[vType]?.maxPassengers,
-      };
+    if (pricingMode === 'kilometrage') {
+      // ── Mode kilométrage : formule au km par véhicule ──────────────────────
+      for (const vType of Object.keys(tariffs.vehicles)) {
+        if (tariffs.vehicles[vType]?.isActive === false) continue;
+        let pts = Math.round(await this.computeBasePriceForVehicleWithTariffs(distanceKm, vType, tariffs));
+        try {
+          if (dto.departureAirport) {
+            pts = await this.pricingService.calculateEstimatedPrice(pts, dto.departureAirport);
+          }
+        } catch { /* ignore */ }
+        const priceInFcfa = Math.round(pts * pointValue);
+        estimates[vType] = {
+          priceInFcfa,
+          priceInPoints: pts,
+          baseFcfa:      priceInFcfa,
+          zoneName:      'Kilométrage',
+          label:         tariffs.vehicles[vType]?.label,
+          maxPassengers: tariffs.vehicles[vType]?.maxPassengers,
+        };
+      }
+      this.logger.log(`[KM Pricing] ${distanceKm.toFixed(1)}km | pays=${countryCode}`);
+    } else {
+      // ── Mode zone : prix fixe par tranche de distance ──────────────────────
+      const zones = await this.zonesService.findForCountry(countryCode ?? null, dto.departureAirport ?? null);
+      const matchedZone = this.zonesService.matchZone(distanceKm, zones);
+      if (!matchedZone) {
+        const airportLabel = dto.departureAirport
+          ? `l'aéroport ${dto.departureAirport.toUpperCase()}`
+          : `le pays ${countryCode}`;
+        throw new BadRequestException(
+          `Aucune zone tarifaire configurée pour ${airportLabel} (distance : ${distanceKm.toFixed(1)} km). Contactez l'administrateur pour configurer les tarifs.`,
+        );
+      }
+      for (const vType of Object.keys(tariffs.vehicles)) {
+        if (tariffs.vehicles[vType]?.isActive === false) continue;
+        const zonePrice = matchedZone.prices[vType];
+        if (zonePrice === undefined) continue;
+        let pts = zonePrice;
+        try {
+          if (dto.departureAirport) {
+            pts = await this.pricingService.calculateEstimatedPrice(pts, dto.departureAirport);
+          }
+        } catch { /* ignore */ }
+        const priceInFcfa = Math.round(pts * pointValue);
+        estimates[vType] = {
+          priceInFcfa,
+          priceInPoints: pts,
+          baseFcfa:      priceInFcfa,
+          zoneName:      matchedZone.name,
+          label:         tariffs.vehicles[vType]?.label,
+          maxPassengers: tariffs.vehicles[vType]?.maxPassengers,
+        };
+      }
+      this.logger.log(`[Zone Pricing] ${distanceKm.toFixed(1)}km | pays=${countryCode}`);
     }
-
-    this.logger.log(`[Zone Pricing] ${distanceKm.toFixed(1)}km | pays=${countryCode}`);
 
     return {
       distanceKm,
@@ -2527,7 +3025,7 @@ export class BookingsService {
 
     if (!activeBookings.length) return;
 
-    const aeroDataBoxKey = this.config.get<string>('AERODATABOX_API_KEY');
+    const aeroDataBoxKey = (await this.settingsService.get('aerodatabox_api_key', '')) || this.config.get<string>('AERODATABOX_API_KEY', '');
     if (!aeroDataBoxKey) return; // pas de clé API → skip
 
     for (const booking of activeBookings) {
@@ -2606,8 +3104,8 @@ export class BookingsService {
         Math.cos(startLat * Math.PI / 180) * Math.cos(newDestLat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
       const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-      // Charge les tarifs pour recalculer
-      const tariffs = await this.settingsService.getTariffs();
+      // Charge les tarifs du pays de la course pour recalculer (null = global)
+      const tariffs = await this.settingsService.getTariffsByCountry((booking as any).operatingCountry ?? null);
       const priceInFcfa = await this.computeBasePriceForVehicleWithTariffs(distKm, booking.vehicleType, tariffs);
       const pointValue = tariffs.pointValue ?? 1;
       newPrice = Math.ceil(priceInFcfa / pointValue);
@@ -2700,10 +3198,13 @@ export class BookingsService {
     await this.prisma.$transaction(async (tx) => {
       // Débit ou remboursement de la différence
       if (data.priceDiff > 0) {
-        await tx.wallet.update({
-          where: { userId: data.passengerId },
+        const debitRes = await tx.wallet.updateMany({
+          where: { userId: data.passengerId, balance: { gte: data.priceDiff } },
           data: { balance: { decrement: data.priceDiff } },
         });
+        if (debitRes.count === 0) {
+          throw new BadRequestException('Solde insuffisant pour le supplément');
+        }
         await tx.pointsTransaction.create({
           data: {
             userId: data.passengerId,
@@ -2903,24 +3404,27 @@ export class BookingsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      // Débit passager
-      const balRes = await tx.pointsTransaction.aggregate({
-        where: { userId: passengerId },
-        _sum: { points: true },
+      const debitRes = await tx.wallet.updateMany({
+        where: { userId: passengerId, balance: { gte: amount } },
+        data: { balance: { decrement: amount } },
       });
-      const balance = balRes._sum.points ?? 0;
-      if (balance < amount) {
-        throw new BadRequestException(`Solde insuffisant : ${balance} pts disponibles`);
+      if (debitRes.count === 0) {
+        const wallet = await tx.wallet.findUnique({ where: { userId: passengerId } });
+        throw new BadRequestException(`Solde insuffisant : ${wallet?.balance ?? 0} pts disponibles`);
       }
       await tx.pointsTransaction.create({
         data: { userId: passengerId, type: 'debit', source: 'payment', points: -amount, label: `Pourboire course #${bookingId.slice(-6)}` },
       });
 
-      // Crédit chauffeur
       const driverUserId = booking.driverProfile?.user?.id;
       if (driverUserId) {
         await tx.pointsTransaction.create({
           data: { userId: driverUserId, type: 'credit', source: 'bonus', points: amount, label: `Pourboire reçu #${bookingId.slice(-6)}` },
+        });
+        await tx.wallet.upsert({
+          where: { userId: driverUserId },
+          update: { balance: { increment: amount } },
+          create: { userId: driverUserId, balance: amount },
         });
       }
 

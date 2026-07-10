@@ -2,11 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { SmartSmsRouter } from '../sms/smart-sms.router';
 import { EmailRouterService } from '../email/email-router.service';
 import { SettingsService } from '../settings/settings.service';
+import { WhatsAppRouter } from '../whatsapp/whatsapp.router';
 
-const TEMPLATES: Record<string, Record<string, { sms: string; emailSubject: string; emailHtml: string }>> = {
+const TEMPLATES: Record<string, Record<string, { sms: string; whatsapp: string; emailSubject: string; emailHtml: string }>> = {
   fr: {
     otp: {
       sms: 'AeroGo 24 — Votre code de vérification : {{code}}. Valide {{expiry}} min.',
+      whatsapp: 'AeroGo 24 — Votre code de vérification : {{code}}. Valide {{expiry}} min.',
       emailSubject: 'AeroGo 24 — Code de vérification',
       emailHtml: '<p>Bonjour,</p><p>Votre code de vérification AeroGo 24 est : <strong>{{code}}</strong></p><p>Ce code expire dans {{expiry}} minutes.</p>',
     },
@@ -14,6 +16,7 @@ const TEMPLATES: Record<string, Record<string, { sms: string; emailSubject: stri
   en: {
     otp: {
       sms: 'AeroGo 24 — Your verification code: {{code}}. Valid {{expiry}} min.',
+      whatsapp: 'AeroGo 24 — Your verification code: {{code}}. Valid {{expiry}} min.',
       emailSubject: 'AeroGo 24 — Verification code',
       emailHtml: '<p>Hello,</p><p>Your AeroGo 24 verification code is: <strong>{{code}}</strong></p><p>This code expires in {{expiry}} minutes.</p>',
     },
@@ -40,6 +43,7 @@ export class OtpDeliveryService {
     private readonly sms: SmartSmsRouter,
     private readonly email: EmailRouterService,
     private readonly settings: SettingsService,
+    private readonly whatsapp: WhatsAppRouter,
   ) {}
 
   /**
@@ -48,42 +52,39 @@ export class OtpDeliveryService {
    * @param code     6-digit OTP
    * @param lang     language for message template (default: 'fr')
    */
-  async sendOtp(contact: string, code: string, lang = 'fr'): Promise<boolean> {
-    const channel = await this.settings.get('otp_channel') ?? 'sms';
+  async sendOtp(
+    contact: string,
+    code: string,
+    lang = 'fr',
+    opts: { channel?: 'sms' | 'whatsapp' | 'email'; country?: string | null } = {},
+  ): Promise<boolean> {
+    const country = opts.country ?? null;
+    // Canal : explicite > défaut pays > otp_channel legacy global
+    const channel =
+      opts.channel
+      ?? ((await this.settings.getForCountry('otp_default_channel', country, ''))
+        || (await this.settings.get('otp_channel', 'sms')));
+
     const expiryRaw = await this.settings.get('otp_expiry_minutes');
     const expiry = expiryRaw || '5';
-
     const locale = TEMPLATES[lang] ? lang : 'fr';
     const tpl = TEMPLATES[locale].otp;
     const vars = { code, expiry };
-
     const isEmail = contact.includes('@');
 
-    let sent = false;
-
-    if (channel === 'both') {
-      if (isEmail) {
-        sent = await this.sendEmail(contact, tpl, vars);
-      } else {
-        const smsSent  = await this.sendSms(contact, tpl, vars);
-        sent = smsSent;
-      }
-    } else if (channel === 'email') {
-      if (!isEmail) {
-        this.logger.warn(`otp_channel=email mais contact semble être un numéro: ${contact.slice(0, 6)}***`);
-        return false;
-      }
-      sent = await this.sendEmail(contact, tpl, vars);
-    } else {
-      // default: sms
-      if (isEmail) {
-        this.logger.warn(`otp_channel=sms mais contact semble être un email: ${contact.slice(0, 4)}***`);
-        return false;
-      }
-      sent = await this.sendSms(contact, tpl, vars);
+    if (channel === 'whatsapp') {
+      if (isEmail) { this.logger.warn('canal whatsapp mais contact email'); return false; }
+      return this.whatsapp.send(contact, renderTemplate(tpl.whatsapp, vars), country);
     }
-
-    return sent;
+    if (channel === 'email') {
+      if (!isEmail) { this.logger.warn('canal email mais contact numéro'); return false; }
+      return this.sendEmail(contact, tpl, vars);
+    }
+    if (channel === 'both') {
+      return isEmail ? this.sendEmail(contact, tpl, vars) : this.sendSms(contact, tpl, vars);
+    }
+    if (isEmail) { this.logger.warn('canal sms mais contact email'); return false; }
+    return this.sendSms(contact, tpl, vars);
   }
 
   private async sendSms(phone: string, tpl: typeof TEMPLATES['fr']['otp'], vars: Record<string, string>): Promise<boolean> {

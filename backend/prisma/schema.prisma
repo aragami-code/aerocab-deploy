@@ -10,6 +10,8 @@ datasource db {
 
 model User {
   id                     String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   phone                  String?             @unique
   name                   String?
   email                  String?
@@ -45,6 +47,7 @@ model User {
   currency               String              @default("XAF")
 
   bookings               Booking[]
+  favoriteDrivers        FavoriteDriver[]    @relation("PassengerFavorites")
   driverConversations    Conversation[]      @relation("DriverConversations")
   passengerConversations Conversation[]      @relation("PassengerConversations")
   driverProfile          DriverProfile?
@@ -69,6 +72,8 @@ model User {
 
 model DriverProfile {
   id                String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId            String                   @unique @map("user_id") @db.Uuid
   vehicleBrand      String                   @map("vehicle_brand")
   vehicleModel      String                   @map("vehicle_model")
@@ -111,6 +116,7 @@ model DriverProfile {
   countryCode           String?   @map("country_code") @db.VarChar(2)  // pays d'opération du chauffeur
 
   bookings             Booking[]
+  favoritedBy          FavoriteDriver[]
   documents            DriverDocument[]
   positions            DriverPosition[]
   bookingPayouts        BookingPayout[]
@@ -127,6 +133,8 @@ model DriverProfile {
 
 model DriverDocument {
   id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   driverProfileId String         @map("driver_profile_id") @db.Uuid
   type            DocumentType
   fileUrl         String         @map("file_url")
@@ -143,6 +151,8 @@ model DriverDocument {
 
 model CountryChangeRequest {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   driverProfileId String        @map("driver_profile_id") @db.Uuid
   currentCountry  String        @map("current_country") @db.VarChar(2)
   requestedCountry String       @map("requested_country") @db.VarChar(2)
@@ -162,6 +172,8 @@ model CountryChangeRequest {
 
 model Flight {
   id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId           String         @map("user_id") @db.Uuid
   flightNumber     String?        @map("flight_number")
   airline          String?
@@ -183,6 +195,8 @@ model Flight {
 
 model Booking {
   id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   passengerId      String         @map("passenger_id") @db.Uuid
   driverProfileId  String?        @map("driver_profile_id") @db.Uuid
   flightNumber     String?        @map("flight_number")
@@ -191,6 +205,7 @@ model Booking {
   vehicleType      String         @map("vehicle_type")
   paymentMethod    String         @map("payment_method")
   estimatedPrice   Float          @map("estimated_price")
+  commissionRate   Float?         @map("commission_rate")
   promoCode        String?        @map("promo_code")
   discountAmount   Float?         @default(0) @map("discount_amount")
   status           BookingStatus  @default(pending)
@@ -236,6 +251,12 @@ model Booking {
   displayAmount      Float?        @map("display_amount")         // montant converti affiché au passager
   exchangeRateUsed   Float?        @map("exchange_rate_used")     // taux XAF→displayCurrency au moment de la réservation
 
+  // ── Fidélité progressive (perks achetés, tier effectif, garanti) ──────────
+  purchasedPerks     String[]      @default([])    @map("purchased_perks")
+  effectiveTier      String?                       @map("effective_tier")
+  guaranteedRefunded Boolean       @default(false) @map("guaranteed_refunded")
+  meetAndGreet       Boolean       @default(false) @map("meet_and_greet")
+
   driverProfile    DriverProfile? @relation(fields: [driverProfileId], references: [id])
   passenger        User           @relation(fields: [passengerId], references: [id], onDelete: Cascade)
   positions        DriverPosition[]
@@ -254,6 +275,8 @@ model Booking {
 
 model Conversation {
   id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   passengerId String             @map("passenger_id") @db.Uuid
   driverId    String             @map("driver_id") @db.Uuid
   flightId    String?            @map("flight_id") @db.Uuid
@@ -272,6 +295,8 @@ model Conversation {
 
 model Message {
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   conversationId String       @map("conversation_id") @db.Uuid
   senderId       String       @map("sender_id") @db.Uuid
   content        String       @default("")
@@ -288,6 +313,8 @@ model Message {
 
 model Rating {
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   fromUserId     String       @map("from_user_id") @db.Uuid
   toUserId       String       @map("to_user_id") @db.Uuid
   conversationId String       @map("conversation_id") @db.Uuid
@@ -308,6 +335,8 @@ model Rating {
 
 model Report {
   id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   reporterId     String          @map("reporter_id") @db.Uuid
   reportedId     String?         @map("reported_id") @db.Uuid
   bookingId      String?         @map("booking_id") @db.Uuid
@@ -326,6 +355,8 @@ model Report {
 
 model TicketMessage {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   reportId   String   @map("report_id") @db.Uuid
   senderId   String   @map("sender_id") @db.Uuid
   senderRole String   @map("sender_role")
@@ -340,6 +371,8 @@ model TicketMessage {
 
 model PointsTransaction {
   id        String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId    String               @map("user_id") @db.Uuid
   type      PointsTransactionType
   source    PointsSource         @default(bonus)
@@ -363,6 +396,13 @@ model Country {
   airports       Json     @default("[]")
   paymentMethods Json     @default("[]") @map("payment_methods")
   isActive       Boolean  @default(true) @map("is_active")
+  flagEmoji        String?       @map("flag_emoji")
+  phonePrefix      String?       @map("phone_prefix")
+  currencySymbol   String?       @map("currency_symbol")
+  currencyDecimals Int           @default(0) @map("currency_decimals")
+  defaultLanguage  String        @default("fr") @map("default_language")
+  status           CountryStatus @default(active)
+  isDefault        Boolean       @default(false) @map("is_default")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -371,6 +411,7 @@ model Country {
 
 model AppSetting {
   key       String   @id
+  tenantId  String?  @map("tenant_id")
   value     String
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -379,6 +420,8 @@ model AppSetting {
 
 model Wallet {
   id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId    String        @unique @map("user_id") @db.Uuid
   balance   Float         @default(0)
   currency  String        @default("XAF")
@@ -392,6 +435,8 @@ model Wallet {
 
 model Transaction {
   id        String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   walletId  String            @map("wallet_id") @db.Uuid
   amount    Float
   type      TransactionType
@@ -406,6 +451,8 @@ model Transaction {
 
 model WithdrawalRequest {
   id            String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId        String                  @map("user_id") @db.Uuid
   amount        Float
   currency      String                  @default("XAF")
@@ -424,6 +471,8 @@ model WithdrawalRequest {
 
 model PromoCode {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   code       String    @unique @db.VarChar(20)
   discount   Int
   maxUses    Int       @default(1) @map("max_uses")
@@ -431,6 +480,8 @@ model PromoCode {
   expiresAt  DateTime? @map("expires_at")
   isActive   Boolean   @default(true) @map("is_active")
   usagePerUser Boolean @default(false) @map("usage_per_user")
+  // Pays du code promo. null = global (valable dans tous les pays).
+  countryCode String?  @map("country_code") @db.VarChar(2)
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
   usages     PromoUsage[]
@@ -440,6 +491,8 @@ model PromoCode {
 
 model PromoUsage {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   promoCodeId String    @map("promo_code_id") @db.Uuid
   userId      String    @map("user_id") @db.Uuid
   usedAt      DateTime  @default(now()) @map("used_at")
@@ -475,6 +528,8 @@ model Airport {
 
 model Forfait {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   name            String
   airportCode     String        @map("airport_code") @db.VarChar(3)
   destinationName String        @map("destination_name")
@@ -504,6 +559,8 @@ model Forfait {
 
 model PricingZone {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   name        String
   minDistKm   Float    @default(0)   @map("min_dist_km")
   maxDistKm   Float    @default(999) @map("max_dist_km")
@@ -529,6 +586,8 @@ model PricingZone {
 
 model DriverPosition {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId       String        @map("booking_id") @db.Uuid
   driverProfileId String        @map("driver_profile_id") @db.Uuid
   latitude        Float
@@ -539,6 +598,46 @@ model DriverPosition {
 
   @@index([bookingId, recordedAt])
   @@map("driver_positions")
+}
+
+model Announcement {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
+  type            AnnouncementType
+  title           String
+  body            String
+  imageUrl        String?               @map("image_url")
+  priority        AnnouncementPriority  @default(normal)
+  ctaType         AnnouncementCtaType   @default(none) @map("cta_type")
+  ctaLabel        String?               @map("cta_label")
+  ctaValue        String?               @map("cta_value")
+  targetApps      String[]              @default([]) @map("target_apps")
+  targetCountries String[]              @default([]) @map("target_countries")
+  targetTiers     String[]              @default([]) @map("target_tiers")
+  startsAt        DateTime?             @map("starts_at")
+  endsAt          DateTime?             @map("ends_at")
+  isActive        Boolean               @default(true) @map("is_active")
+  createdBy       String?               @map("created_by") @db.Uuid
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+  reads           AnnouncementRead[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("announcements")
+}
+
+model AnnouncementRead {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
+  announcementId String       @map("announcement_id") @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  seenAt         DateTime     @default(now()) @map("seen_at")
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId])
+  @@map("announcement_reads")
 }
 
 enum UserRole {
@@ -595,6 +694,29 @@ enum BookingType {
   ARRIVAL        // À l'aéroport → destination
   DEPARTURE      // Lieu quelconque → aéroport
   INTERNATIONAL  // Hors du pays, réservation à l'avance (vol arrivée → destination)
+}
+
+enum CountryStatus {
+  draft
+  active
+  suspended
+}
+
+enum AnnouncementType {
+  promo
+  info
+  ad
+}
+
+enum AnnouncementPriority {
+  high
+  normal
+}
+
+enum AnnouncementCtaType {
+  none
+  screen
+  promo_code
 }
 
 enum PricingMode {
@@ -746,11 +868,14 @@ model RolePermission {
 model UserAdminRole {
   userId    String    @map("user_id") @db.Uuid
   roleId    String    @map("role_id") @db.Uuid
+  countryScope String[]  @default([]) @map("country_scope")
   grantedAt DateTime  @default(now()) @map("granted_at")
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   role      AdminRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([userId, roleId])
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   @@map("user_admin_roles")
 }
 
@@ -763,11 +888,15 @@ model UserPermission {
   permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([userId, permissionId])
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   @@map("user_permissions")
 }
 
 model TariffSnapshot {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   countryCode String?  @map("country_code")  // null = global
   data        Json
   createdBy   String?  @map("created_by") @db.Uuid
@@ -781,6 +910,8 @@ model TariffSnapshot {
 // Job pické toutes les minutes par un cron tant que status='pending' et attempts < max.
 model ReceiptJob {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId  String   @unique @map("booking_id") @db.Uuid
   status     String   @default("pending")   // pending | sent | failed
   attempts   Int      @default(0)
@@ -794,6 +925,8 @@ model ReceiptJob {
 
 model AuditLog {
   id         String   @id @default(cuid())
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   action     String
   entity     String
   entityId   String?
@@ -814,6 +947,8 @@ model AuditLog {
 
 model PaymentIntent {
   id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId     String        @unique @map("booking_id") @db.Uuid
   participantId String?       @map("participant_id") @db.Uuid
   provider      String        // orange_money_cm | mtn_cm | card | cash
@@ -840,6 +975,8 @@ model PaymentIntent {
 
 model BookingParticipant {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId       String    @map("booking_id") @db.Uuid
   userId          String?   @map("user_id") @db.Uuid
   name            String?
@@ -861,6 +998,8 @@ model BookingParticipant {
 
 model BookingPayout {
   id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId        String        @unique @map("booking_id") @db.Uuid
   driverProfileId  String        @map("driver_profile_id") @db.Uuid
   grossAmount      Float         @map("gross_amount")
@@ -886,6 +1025,8 @@ model BookingPayout {
 
 model TipTransaction {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId       String    @map("booking_id") @db.Uuid
   payerId         String    @map("payer_id") @db.Uuid
   driverProfileId String    @map("driver_profile_id") @db.Uuid
@@ -905,6 +1046,8 @@ model TipTransaction {
 
 model RideReceipt {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   bookingId   String    @unique @map("booking_id") @db.Uuid
   emailSentAt DateTime? @map("email_sent_at")
   smsSentAt   DateTime? @map("sms_sent_at")
@@ -918,6 +1061,8 @@ model RideReceipt {
 
 model PaymentLink {
   id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   token         String    @unique
   bookingId     String    @map("booking_id") @db.Uuid
   participantId String?   @map("participant_id") @db.Uuid
@@ -939,6 +1084,8 @@ model PaymentLink {
 
 model DriverRegistrationPayment {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   driverProfileId String        @unique @map("driver_profile_id") @db.Uuid
   totalAmount     Float         @map("total_amount")
   revenueAmount   Float         @map("revenue_amount")
@@ -957,6 +1104,8 @@ model DriverRegistrationPayment {
 
 model DriverEarningsWallet {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   driverProfileId String        @unique @map("driver_profile_id") @db.Uuid
   balance         Float         @default(0)
   pendingBalance  Float         @default(0) @map("pending_balance")
@@ -974,6 +1123,8 @@ model DriverEarningsWallet {
 
 model KycDocument {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId          String        @map("user_id") @db.Uuid
   type            KycDocType
   fileUrl         String        @map("file_url")
@@ -993,6 +1144,8 @@ model KycDocument {
 
 model EmergencyContact {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
   userId    String   @map("user_id") @db.Uuid
   name      String
   phone     String
@@ -1001,4 +1154,86 @@ model EmergencyContact {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("emergency_contacts")
+}
+
+// ── Notifications Admin (persistées) ────────────────────────────────────────
+
+model AdminNotification {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
+  type       String
+  title      String
+  body       String
+  data       Json?
+  read       Boolean   @default(false)
+  readAt     DateTime? @map("read_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([read, createdAt])
+  @@index([type])
+  @@map("admin_notifications")
+}
+
+// ── Lot 2 — Chauffeurs favoris (universel) ──────────────────────────────────
+model FavoriteDriver {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String?  @map("tenant_id")
+  @@index([tenantId])
+  passengerId String        @map("passenger_id") @db.Uuid
+  driverId    String        @map("driver_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at")
+  passenger   User          @relation("PassengerFavorites", fields: [passengerId], references: [id], onDelete: Cascade)
+  driver      DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@unique([passengerId, driverId])
+  @@index([passengerId])
+  @@map("favorite_drivers")
+}
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+}
+enum LicenseMode {
+  ENFORCED
+  PERPETUAL
+  DISABLED
+}
+
+model Tenant {
+  id                String        @id                       // ex: "aerogo" (tenant zéro)
+  slug              String        @unique
+  name              String
+  status            TenantStatus  @default(ACTIVE)
+
+  licenseKey        String        @unique
+  licenseMode       LicenseMode   @default(ENFORCED)
+  licenseExpiry     DateTime?     @map("license_expiry")
+
+  logoUrl           String?       @map("logo_url")
+  primaryColor      String?       @map("primary_color")
+  appNamePassenger  String?       @map("app_name_passenger")
+  appNameDriver     String?       @map("app_name_driver")
+  bundleIdPassenger String?       @map("bundle_id_passenger")
+  bundleIdDriver    String?       @map("bundle_id_driver")
+
+  operatingModel    Json          @default("{}") @map("operating_model")
+
+  countries         TenantCountry[]
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt      @map("updated_at")
+
+  @@map("tenants")
+}
+
+model TenantCountry {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String  @map("tenant_id")
+  countryCode String  @map("country_code")
+  tenant      Tenant  @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, countryCode])
+  @@map("tenant_countries")
 }

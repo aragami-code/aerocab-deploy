@@ -5,6 +5,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { PrismaModule } from './database/prisma.module';
+import { TenancyModule } from './tenancy/tenancy.module';
 import { RedisModule } from './redis/redis.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -30,6 +31,11 @@ import { BotModule } from './bot/bot.module';
 import { KycModule } from './kyc/kyc.module';
 import { SosModule } from './sos/sos.module';
 import { CallsModule } from './calls/calls.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
+import { CountriesModule } from './countries/countries.module';
+import { LoyaltyModule } from './loyalty/loyalty.module';
+import { FavoritesModule } from './favorites/favorites.module';
 
 @Module({
   imports: [
@@ -37,15 +43,18 @@ import { CallsModule } from './calls/calls.module';
       isGlobal: true,
       envFilePath: '../../.env',
     }),
+    MetricsModule,
     // 0.B6 — Rate limiting différencié par type d'endpoint
     ThrottlerModule.forRoot([
-      { name: 'otp',    ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 10  : 50  },
-      { name: 'auth',   ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 120 : 200 },
-      { name: 'admin',  ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 300 : 600 },
-      { name: 'global', ttl: 60000, limit: process.env.NODE_ENV === 'production' ? 500 : 1000 },
+      // Limites configurables par env (THROTTLE_*_LIMIT) ; défauts = valeurs prod/dev actuelles.
+      { name: 'otp',    ttl: 60000, limit: parseInt(process.env.THROTTLE_OTP_LIMIT    ?? (process.env.NODE_ENV === 'production' ? '10'  : '50'),   10) || 10 },
+      { name: 'auth',   ttl: 60000, limit: parseInt(process.env.THROTTLE_AUTH_LIMIT   ?? (process.env.NODE_ENV === 'production' ? '120' : '200'),  10) || 120 },
+      { name: 'admin',  ttl: 60000, limit: parseInt(process.env.THROTTLE_ADMIN_LIMIT  ?? (process.env.NODE_ENV === 'production' ? '300' : '600'),  10) || 300 },
+      { name: 'global', ttl: 60000, limit: parseInt(process.env.THROTTLE_GLOBAL_LIMIT ?? (process.env.NODE_ENV === 'production' ? '500' : '1000'), 10) || 500 },
     ]),
     ScheduleModule.forRoot(),
     PrismaModule,
+    TenancyModule,
     RedisModule,
     AuthModule,
     UsersModule,
@@ -71,6 +80,10 @@ import { CallsModule } from './calls/calls.module';
     KycModule,
     SosModule,
     CallsModule,
+    AnnouncementsModule,
+    CountriesModule,
+    LoyaltyModule,
+    FavoritesModule,
   ],
   controllers: [AppController],
   providers: [

@@ -1,10 +1,12 @@
-import { Controller, Get, Headers, UnauthorizedException } from '@nestjs/common';
+import { Controller, Get, Headers, UnauthorizedException, UseGuards, Request } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PrismaService } from './database/prisma.service';
 import { RedisService } from './redis/redis.service';
 import { AirportsService } from './airports/airports.service';
 import { SettingsService } from './settings/settings.service';
+import { JwtAuthGuard } from './auth/guards';
+import { extractCountryFromPhone } from './common/phone-country';
 
 const CONFIG_CACHE_KEY = 'config:cache';
 const CONFIG_CACHE_TTL = 300; // 5 min
@@ -18,6 +20,8 @@ const PUBLIC_SETTING_KEYS = [
   'booking_passenger_timeout_ms',
   'passenger_confirm_timeout_min',
   'otp_channel',
+  'otp_channels_enabled',
+  'otp_default_channel',
   'google_maps_key',
   'workflow_arrival_enabled',
   'workflow_departure_enabled',
@@ -42,6 +46,20 @@ const PUBLIC_SETTING_KEYS = [
   'max_destination_km',
   'airport_neighborhoods',
   'airport_neighborhood_coords',
+];
+
+// Clés de PUBLIC_SETTING_KEYS qui se résolvent par pays.
+// NB : workflow_international_enabled est volontairement EXCLU — INTERNATIONAL est
+// transfrontalier (il dépend du pays de DESTINATION, pas du domicile). On le laisse
+// donc en valeur globale (kill-switch admin) côté affichage ; l'enforcement réel
+// se fait à la réservation via getForCountry(..., operatingCountry) côté backend.
+const PER_COUNTRY_PUBLIC_KEYS = [
+  'workflow_arrival_enabled', 'workflow_departure_enabled',
+  'feature_referral_enabled', 'feature_cashback_enabled', 'feature_points_purchase_enabled',
+  'feature_promo_enabled', 'feature_chat_enabled', 'feature_sos_enabled',
+  'feature_destination_change_enabled', 'feature_rating_enabled',
+  'feature_driver_withdrawal_enabled', 'feature_breakdown_report_enabled',
+  'driver_document_config', 'vehicle_capacity', 'tariffs_config',
 ];
 
 @Controller()
@@ -102,6 +120,44 @@ export class AppController {
   }
 
   /**
+   * Config par pays — bundle authentifié pour l'utilisateur connecté.
+   * Résout les clés par pays (key:PAYS → key → default) selon le pays
+   * de l'utilisateur (countryCode, ou dérivé du téléphone ; pour un chauffeur
+   * le pays d'opération du driverProfile a priorité).
+   */
+  @Get('config/bundle')
+  @UseGuards(JwtAuthGuard)
+  async getConfigBundle(@Request() req: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { phone: true, countryCode: true, role: true },
+    });
+    let country: string | null = user?.countryCode ?? (user?.phone ? extractCountryFromPhone(user.phone) : null);
+    if (user?.role === 'driver') {
+      const dp = await this.prisma.driverProfile.findFirst({
+        where: { userId: req.user.id }, select: { countryCode: true },
+      });
+      if (dp?.countryCode) country = dp.countryCode;
+    }
+    const cc = country ? country.toUpperCase() : null;
+
+    const entries = await Promise.all(
+      PER_COUNTRY_PUBLIC_KEYS.map(async (k) => [k, await this.settings.getForCountry(k, cc, '')] as const),
+    );
+    const settings: Record<string, string> = {};
+    for (const [k, v] of entries) if (v !== '') settings[k] = v;
+
+    const countryRow = cc
+      ? await this.prisma.country.findUnique({
+          where: { code: cc },
+          select: { code: true, currency: true, currencySymbol: true, currencyDecimals: true },
+        })
+      : null;
+
+    return { countryCode: cc, country: countryRow, settings };
+  }
+
+  /**
    * 0.B25 — Health check pour Render et monitoring.
    */
   @Get('health')
@@ -124,7 +180,10 @@ export class AppController {
     };
   }
 
+  // Sécurité : données opérationnelles/business (revenus, comptes) → réservé aux utilisateurs
+  // authentifiés (le dashboard admin envoie son token). N'est plus public.
   @Get('metrics')
+  @UseGuards(JwtAuthGuard)
   async metrics() {
     const [
       totalUsers,

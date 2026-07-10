@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 
 const VALID_TYPES = ['cni_front', 'cni_back', 'passport', 'selfie'] as const;
 type KycDocType = typeof VALID_TYPES[number];
@@ -10,6 +11,7 @@ export class KycService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private adminNotifs: AdminNotificationService,
   ) {}
 
   async getStatus(userId: string) {
@@ -73,6 +75,13 @@ export class KycService {
       where: { id: userId },
       data: { kycStatus: 'submitted' },
     });
+
+    void this.adminNotifs.notify(
+      'kyc.submitted',
+      'KYC passager à vérifier',
+      `Passager ${userId} a soumis ses documents d'identité`,
+      { userId },
+    );
 
     return { success: true, kycStatus: 'submitted' };
   }

@@ -12,11 +12,13 @@ import { RidesGateway } from '../bookings/rides.gateway';
 import { SettingsService } from '../settings/settings.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { NotchPayService } from '../payments/notchpay.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { RegisterDriverDto } from './dto/register-driver.dto';
 import { UpdateDriverDto } from './dto/update-driver.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import { extractCountryFromPhone } from '../common/phone-country';
+import { canChangeCountry } from './wallet-guard';
 
 @Injectable()
 export class DriversService {
@@ -29,6 +31,7 @@ export class DriversService {
     @Inject(forwardRef(() => BookingsService))
     private bookingsService: BookingsService,
     private notchpay: NotchPayService,
+    private adminNotifs: AdminNotificationService,
   ) {}
 
   async register(userId: string, dto: RegisterDriverDto) {
@@ -72,6 +75,14 @@ export class DriversService {
         });
 
     this.logger.log(`Driver registered: ${userId}${derivedCountryCode && !existing ? ` countryCode=${derivedCountryCode}` : ''}`);
+
+    void this.adminNotifs.notify(
+      'driver.register',
+      'Nouveau chauffeur inscrit',
+      `${profile.user?.name ?? userId} — ${dto.vehicleBrand} ${dto.vehicleModel}`,
+      { driverProfileId: profile.id, userId, vehicle: `${dto.vehicleBrand} ${dto.vehicleModel}` },
+    );
+
     return profile;
   }
 
@@ -183,6 +194,14 @@ export class DriversService {
     this.logger.log(
       `Document uploaded: ${dto.type} for driver ${profile.id}`,
     );
+
+    void this.adminNotifs.notify(
+      'driver.document_upload',
+      'Document chauffeur uploadé',
+      `${dto.type} — chauffeur ${profile.id}`,
+      { driverProfileId: profile.id, documentType: dto.type },
+    );
+
     return document;
   }
 
@@ -230,6 +249,14 @@ export class DriversService {
     });
 
     this.logger.log(`Country change request: driver ${userId} ${currentCountry} → ${requestedCountry}`);
+
+    void this.adminNotifs.notify(
+      'driver.country_change',
+      'Demande changement de pays',
+      `Chauffeur ${userId} : ${currentCountry} → ${requestedCountry.toUpperCase()}`,
+      { driverProfileId: profile.id, currentCountry, requestedCountry: requestedCountry.toUpperCase() },
+    );
+
     return request;
   }
 
@@ -266,17 +293,38 @@ export class DriversService {
     if (!req) throw new NotFoundException('Demande introuvable');
     if (req.status !== 'pending') throw new BadRequestException('Cette demande a déjà été traitée.');
 
+    // Garde wallet vide : à vérifier AVANT de marquer la demande approuvée,
+    // sinon la demande resterait "approved" sans application du changement.
+    if (status === 'approved') {
+      const wallet = await this.prisma.driverEarningsWallet.findUnique({
+        where: { driverProfileId: req.driverProfileId },
+        select: { balance: true },
+      });
+      const guard = canChangeCountry(wallet?.balance ?? 0);
+      if (!guard.ok) throw new BadRequestException(guard.reason);
+    }
+
     await (this.prisma as any).countryChangeRequest.update({
       where: { id: requestId },
       data: { status, adminNote: adminNote ?? null, reviewedBy: adminId, reviewedAt: new Date() },
     });
 
     if (status === 'approved') {
+      const newCountry = req.requestedCountry.toUpperCase();
+      const newCurrency = (await this.prisma.country.findUnique({
+        where: { code: newCountry }, select: { currency: true },
+      }))?.currency ?? null;
       await this.prisma.driverProfile.update({
         where: { id: req.driverProfileId },
-        data: { countryCode: req.requestedCountry },
+        data: { countryCode: newCountry },
       });
-      this.logger.log(`Country change approved: driverProfile ${req.driverProfileId} → ${req.requestedCountry}`);
+      if (newCurrency) {
+        await this.prisma.driverEarningsWallet.updateMany({
+          where: { driverProfileId: req.driverProfileId },
+          data: { currency: newCurrency },
+        });
+      }
+      this.logger.log(`Country change approved: driverProfile ${req.driverProfileId} → ${newCountry} (currency ${newCurrency})`);
     }
 
     return { success: true, status };
@@ -295,7 +343,7 @@ export class DriversService {
     // Required types from admin config (falls back to hardcoded defaults)
     let requiredTypes = ['cni_front', 'cni_back', 'license', 'registration', 'vehicle_photo'];
     try {
-      const raw = await this.settings.get('driver_document_config', '');
+      const raw = await this.settings.getForCountry('driver_document_config', profile.countryCode ?? null, '');
       if (raw) {
         const config: { type: string; required: boolean; enabled: boolean }[] = JSON.parse(raw);
         const fromConfig = config.filter(d => d.enabled && d.required).map(d => d.type);
@@ -318,6 +366,13 @@ export class DriversService {
         data: { status: 'pending' },
       });
     }
+
+    void this.adminNotifs.notify(
+      'driver.submit_review',
+      'Dossier chauffeur à vérifier',
+      `Chauffeur ${userId} a soumis son dossier pour vérification`,
+      { driverProfileId: profile.id, userId },
+    );
 
     return { message: 'Dossier soumis pour verification', status: 'pending' };
   }
@@ -396,7 +451,8 @@ export class DriversService {
       );
     }
 
-    if (!profile.registrationFeePaid) {
+    const regFeeEnabled = await this.settings.get('feature_registration_fee_enabled', 'false');
+    if (regFeeEnabled === 'true' && !profile.registrationFeePaid) {
       throw new ForbiddenException('Frais d\'inscription requis avant de devenir disponible');
     }
 
@@ -466,10 +522,10 @@ export class DriversService {
     if (profile.status !== 'approved') {
       throw new ForbiddenException('Seuls les chauffeurs approuves peuvent changer leur disponibilite');
     }
-    // TODO: réactiver quand le paiement des frais d'inscription sera en production
-    // if (isAvailable && !profile.registrationFeePaid) {
-    //   throw new ForbiddenException('Frais d\'inscription requis avant de devenir disponible');
-    // }
+    const regFeeEnabled = await this.settings.get('feature_registration_fee_enabled', 'false');
+    if (regFeeEnabled === 'true' && isAvailable && !profile.registrationFeePaid) {
+      throw new ForbiddenException('Frais d\'inscription requis avant de devenir disponible');
+    }
 
     const updated = await this.prisma.driverProfile.update({
       where: { userId },
@@ -666,6 +722,14 @@ export class DriversService {
         status: true,
         createdAt: true,
       },
+    }).then((w) => {
+      void this.adminNotifs.notify(
+        'driver.withdrawal_request',
+        'Demande de retrait',
+        `${amount.toLocaleString()} XAF — ${method} — ${cleanedNumber}`,
+        { withdrawalId: w.id, userId, amount, method },
+      );
+      return w;
     });
   }
 
@@ -716,6 +780,14 @@ export class DriversService {
     });
 
     this.logger.log(`Document uploaded (multipart): ${type} for driver ${profile.id}`);
+
+    void this.adminNotifs.notify(
+      'driver.document_upload',
+      'Document chauffeur uploadé',
+      `${type} — chauffeur ${profile.id}`,
+      { driverProfileId: profile.id, documentType: type },
+    );
+
     return document;
   }
 
@@ -727,6 +799,11 @@ export class DriversService {
       select: { id: true, registrationFeePaid: true, registrationFeeAmount: true },
     });
     if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const featureEnabled = await this.settings.get('feature_registration_fee_enabled', 'false');
+    if (featureEnabled !== 'true') {
+      return { required: false, paid: true, paidAmount: null, minFee: 0, maxFee: 0, pendingPayment: null };
+    }
 
     const minFee = parseFloat(await this.settings.get('registration_fee_min', '5000'));
     const maxFee = parseFloat(await this.settings.get('registration_fee_max', '10000'));
@@ -756,6 +833,12 @@ export class DriversService {
       select: { id: true, registrationFeePaid: true },
     });
     if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    const featureEnabled = await this.settings.get('feature_registration_fee_enabled', 'false');
+    if (featureEnabled !== 'true') {
+      throw new BadRequestException('Frais d\'inscription désactivés');
+    }
+
     if (profile.registrationFeePaid) {
       throw new BadRequestException('Frais d\'inscription déjà payés');
     }

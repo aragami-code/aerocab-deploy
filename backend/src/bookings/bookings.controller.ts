@@ -16,6 +16,12 @@ export class BookingsController {
     return this.bookingsService.createBooking(req.user.id, dto);
   }
 
+  // Relance d'une course sans chauffeur — réactive la MÊME réservation (prix/promo préservés).
+  @Post(':id/relaunch')
+  relaunch(@Request() req: any, @Param('id') id: string) {
+    return this.bookingsService.relaunchBooking(req.user.id, id);
+  }
+
   @Post('estimate')
   estimate(@Body() dto: Partial<CreateBookingDto>) {
     return this.bookingsService.estimatePrices(dto);

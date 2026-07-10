@@ -6,6 +6,7 @@ import { RidesGateway } from '../bookings/rides.gateway';
 import { SettingsService } from '../settings/settings.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { NotchPayService } from '../payments/notchpay.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { makeDriverProfile } from '../../test/factories';
 
 const profileId = 'dp-001';
@@ -30,6 +31,13 @@ const mockPrisma = {
     create: jest.fn(),
     update: jest.fn(),
   },
+  driverEarningsWallet: {
+    findUnique: jest.fn().mockResolvedValue({ balance: 0 }),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+  },
+  country: {
+    findUnique: jest.fn().mockResolvedValue({ currency: 'XAF' }),
+  },
 };
 
 describe('DriversService — Country Change Request', () => {
@@ -45,6 +53,7 @@ describe('DriversService — Country Change Request', () => {
         { provide: SettingsService,  useValue: { get: jest.fn().mockResolvedValue('') } },
         { provide: BookingsService,  useValue: {} },
         { provide: NotchPayService,  useValue: {} },
+        { provide: AdminNotificationService, useValue: { notify: jest.fn().mockResolvedValue(undefined) } },
       ],
     }).compile();
     service = module.get<DriversService>(DriversService);

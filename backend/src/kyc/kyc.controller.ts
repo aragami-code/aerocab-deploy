@@ -9,7 +9,7 @@ import { KycService } from './kyc.service';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser, Roles } from '../auth/decorators';
 
-const KYC_UPLOAD_DIR = '/tmp/aerogo24-uploads';
+const KYC_UPLOAD_DIR = '/data/uploads';
 
 const kycStorage = diskStorage({
   destination: KYC_UPLOAD_DIR,

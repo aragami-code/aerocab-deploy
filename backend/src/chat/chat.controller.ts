@@ -19,7 +19,7 @@ import { ChatService } from './chat.service';
 import { ChatGateway } from './chat.gateway';
 import { SkipThrottle } from '@nestjs/throttler';
 
-const UPLOAD_DIR = '/tmp/aerogo24-uploads';
+const UPLOAD_DIR = '/data/uploads';
 const MIME_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png':  '.png',

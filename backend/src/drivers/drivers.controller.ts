@@ -26,7 +26,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { CurrentUser, Roles } from '../auth/decorators';
 
-const UPLOAD_DIR = '/tmp/aerogo24-uploads';
+const UPLOAD_DIR = '/data/uploads';
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }

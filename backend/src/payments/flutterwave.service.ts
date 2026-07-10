@@ -20,8 +20,8 @@ export class FlutterwaveService {
     private settings: SettingsService,
   ) {}
 
-  private async cred(dbKey: string, envKey: string): Promise<string> {
-    const fromDb = await this.settings.get(dbKey, '');
+  private async cred(dbKey: string, envKey: string, country?: string | null): Promise<string> {
+    const fromDb = await this.settings.getForCountry(dbKey, country ?? null, '');
     return fromDb || this.config.get<string>(envKey, '');
   }
 
@@ -33,8 +33,9 @@ export class FlutterwaveService {
     customerName: string;
     customerPhone: string;
     customerEmail: string;
+    country?: string;
   }): Promise<{ paymentUrl: string }> {
-    const secretKey  = await this.cred('payment_flutterwave_secret_key', 'FLUTTERWAVE_SECRET_KEY');
+    const secretKey  = await this.cred('payment_flutterwave_secret_key', 'FLUTTERWAVE_SECRET_KEY', params.country ?? null);
     const backendUrl = await this.settings.get('backend_url', this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com'));
     const appScheme  = 'aerogo24-passenger';
 

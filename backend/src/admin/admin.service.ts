@@ -10,6 +10,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RedisService } from '../redis/redis.service';
 import { NotchPayService, WITHDRAWAL_METHOD_TO_NOTCHPAY } from '../payments/notchpay.service';
 import { FlutterwaveService, WITHDRAWAL_METHOD_TO_FLUTTERWAVE } from '../payments/flutterwave.service';
+import { PaymentIntentService } from '../payments/payment-intent.service';
 import { VerifyDriverDto, VerificationAction } from './dto';
 import { ExportService } from './export.service';
 
@@ -18,6 +19,55 @@ const DOC_LABELS: Record<string, string> = {
   license: 'Permis de conduire', registration: 'Carte grise',
   vehicle_photo: 'Photo du véhicule',
 };
+
+/** Clé de bucket temporel pour les séries de stats : 'YYYY-MM-DD' (jour) ou 'YYYY-MM' (mois). */
+function bucketKey(d: Date, gran: 'day' | 'month'): string {
+  const iso = d.toISOString();
+  return gran === 'month' ? iso.slice(0, 7) : iso.slice(0, 10);
+}
+
+/** Un graphe de la bande de stats : courbe temporelle, camembert ou barres. */
+export type AdminChart =
+  | { kind: 'timeseries'; title: string; span?: 1 | 2; data: Record<string, number | string>[]; series: { key: string; label: string; color: string }[] }
+  | { kind: 'pie'; title: string; data: { name: string; value: number }[] }
+  | { kind: 'bar'; title: string; data: { name: string; value: number }[]; color?: string; money?: boolean };
+
+/** Forme générique renvoyée par tous les domaines de stats. */
+export interface AdminStats {
+  kpis: { label: string; value: number; tone?: string; suffix?: string; money?: boolean }[];
+  charts: AdminChart[];
+}
+
+/** Agrège un tableau en { name, value } trié décroissant (top N optionnel). */
+function groupCount<T>(rows: T[], key: (r: T) => string | null | undefined, topN?: number): { name: string; value: number }[] {
+  const m = new Map<string, number>();
+  for (const r of rows) {
+    const k = key(r);
+    if (!k) continue;
+    m.set(k, (m.get(k) ?? 0) + 1);
+  }
+  const arr = [...m.entries()].sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }));
+  return topN ? arr.slice(0, topN) : arr;
+}
+
+/** Série temporelle de comptage (1 métrique par bucket). */
+function countSeries<T>(rows: T[], date: (r: T) => Date, gran: 'day' | 'month', key = 'count'): Record<string, number | string>[] {
+  const m = new Map<string, number>();
+  for (const r of rows) { const k = bucketKey(date(r), gran); m.set(k, (m.get(k) ?? 0) + 1); }
+  return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([d, v]) => ({ date: d, [key]: v }));
+}
+
+/** Distance Haversine (km) entre deux points GPS. */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 @Injectable()
 export class AdminService {
@@ -31,6 +81,7 @@ export class AdminService {
     private notchpay: NotchPayService,
     private flutterwave: FlutterwaveService,
     private exportService: ExportService,
+    private paymentIntentSvc: PaymentIntentService,
   ) {}
 
   // ── Tariffs ──────────────────────────────────────────
@@ -104,7 +155,10 @@ export class AdminService {
   }
 
   // ── Chart Data (15 derniers jours) ──────────────────
-  async getChartData() {
+  async getChartData(country?: string) {
+    const cc = country ? country.toUpperCase() : null;
+    const bookingWhere = cc ? { operatingCountry: cc } : {};
+
     const days = 15;
     const result: { day: string; courses: number; revenus: number }[] = [];
 
@@ -118,10 +172,10 @@ export class AdminService {
 
       const [courses, revenusAgg] = await Promise.all([
         this.prisma.booking.count({
-          where: { createdAt: { gte: start, lte: end } },
+          where: { ...bookingWhere, createdAt: { gte: start, lte: end } },
         }),
         this.prisma.booking.aggregate({
-          where: { status: 'completed', updatedAt: { gte: start, lte: end } },
+          where: { ...bookingWhere, status: 'completed', updatedAt: { gte: start, lte: end } },
           _sum: { estimatedPrice: true },
         }),
       ]);
@@ -324,12 +378,24 @@ export class AdminService {
 
   // ── Stats ────────────────────────────────────────────
 
-  async getStats() {
+  async getStats(country?: string) {
+    const cc = country ? country.toUpperCase() : null;
+    const bookingWhere = cc ? { operatingCountry: cc } : {};
+    const userWhere = cc ? { countryCode: cc } : {};
+    const driverWhere = cc ? { countryCode: cc } : {};
+
+    const cacheKey = cc ? `admin:stats:${cc}` : 'admin:stats';
+    const cached = await this.redis.get(cacheKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch { /* recompute */ }
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     const [
       totalUsers,
+      newUsersToday,
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
@@ -340,27 +406,47 @@ export class AdminService {
       cancelledBookings,
       completedToday,
       revenueAgg,
+      revenueTodayAgg,
+      pendingKYC,
+      pendingWithdrawals,
+      pendingWithdrawalsAmount,
+      pendingReports,
+      unreadNotifications,
     ] = await Promise.all([
-      this.prisma.user.count(),
-      this.prisma.driverProfile.count(),
-      this.prisma.driverProfile.count({ where: { status: 'pending' } }),
-      this.prisma.driverProfile.count({ where: { status: 'approved' } }),
-      this.prisma.booking.count(),
-      this.prisma.booking.count({ where: { status: 'pending' } }),
-      this.prisma.booking.count({ where: { status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
-      this.prisma.booking.count({ where: { status: 'completed' } }),
-      this.prisma.booking.count({ where: { status: 'cancelled' } }),
-      this.prisma.booking.count({ where: { status: 'completed', updatedAt: { gte: today } } }),
-      this.prisma.booking.aggregate({ where: { status: 'completed' }, _sum: { estimatedPrice: true } }),
+      this.prisma.user.count({ where: userWhere }),
+      this.prisma.user.count({ where: { ...userWhere, createdAt: { gte: today } } }),
+      this.prisma.driverProfile.count({ where: driverWhere }),
+      this.prisma.driverProfile.count({ where: { ...driverWhere, status: 'pending' } }),
+      this.prisma.driverProfile.count({ where: { ...driverWhere, status: 'approved' } }),
+      this.prisma.booking.count({ where: bookingWhere }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'pending' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: { in: ['confirmed', 'arrived_at_airport', 'in_progress'] } } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'completed' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'cancelled' } }),
+      this.prisma.booking.count({ where: { ...bookingWhere, status: 'completed', updatedAt: { gte: today } } }),
+      this.prisma.booking.aggregate({ where: { ...bookingWhere, status: 'completed' }, _sum: { estimatedPrice: true } }),
+      this.prisma.booking.aggregate({ where: { ...bookingWhere, status: 'completed', updatedAt: { gte: today } }, _sum: { estimatedPrice: true } }),
+      this.prisma.user.count({ where: { ...userWhere, kycStatus: 'submitted' } }),
+      (this.prisma as any).withdrawalRequest.count({ where: { status: 'pending' } }),
+      (this.prisma as any).withdrawalRequest.aggregate({ where: { status: 'pending' }, _sum: { amount: true } }),
+      this.prisma.report.count({ where: { status: 'open' } }),
+      (this.prisma as any).adminNotification.count({ where: { read: false } }),
     ]);
 
-    return {
+    const result = {
       totalUsers,
+      newUsersToday,
       totalDrivers,
       pendingDrivers,
       approvedDrivers,
       activeAccessPasses: 0,
       totalRevenue: revenueAgg._sum.estimatedPrice ?? 0,
+      revenueToday: revenueTodayAgg._sum.estimatedPrice ?? 0,
+      pendingKYC,
+      pendingWithdrawals,
+      pendingWithdrawalsAmount: pendingWithdrawalsAmount?._sum?.amount ?? 0,
+      pendingReports,
+      unreadNotifications,
       bookings: {
         total: totalBookings,
         pending: pendingBookings,
@@ -370,6 +456,9 @@ export class AdminService {
         completedToday,
       },
     };
+
+    await this.redis.set(cacheKey, JSON.stringify(result), 60);
+    return result;
   }
 
   async getBookings(status?: string, page = 1, limit = 20) {
@@ -426,16 +515,435 @@ export class AdminService {
     return { ratings };
   }
 
+  /**
+   * Détail consolidé d'une course pour l'admin :
+   *  - financials : ventilation financière (BookingPayout 1:1 = source fiable) + champs booking.
+   *  - track      : tracé GPS réel (DriverPosition) + distance réelle calculée (somme Haversine).
+   * Lecture seule. Les mouvements de points liés sont en best-effort (match libellé sur préfixe d'ID,
+   * car PointsTransaction n'a pas de bookingId — fiable pour remboursements/compensations).
+   */
+  async getBookingDetail(bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        id: true, passengerId: true, paymentMethod: true, paymentStatus: true,
+        estimatedPrice: true, commissionRate: true, discountAmount: true,
+        discountFromPoints: true, tipAmount: true, displayAmount: true,
+        estimatedDistanceKm: true, estimatedDurationMin: true,
+      },
+    });
+    if (!booking) throw new NotFoundException('Réservation introuvable');
+
+    const [payout, intent, positions, pointsTx] = await Promise.all([
+      this.prisma.bookingPayout.findUnique({ where: { bookingId } }),
+      this.prisma.paymentIntent.findUnique({ where: { bookingId } }),
+      this.prisma.driverPosition.findMany({
+        where: { bookingId },
+        orderBy: { recordedAt: 'asc' },
+        select: { latitude: true, longitude: true, recordedAt: true },
+      }),
+      this.prisma.pointsTransaction.findMany({
+        where: {
+          userId: booking.passengerId,
+          label: { contains: bookingId.slice(0, 8), mode: 'insensitive' },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { type: true, points: true, label: true, createdAt: true },
+      }),
+    ]);
+
+    // Distance réelle parcourue = somme des segments GPS consécutifs.
+    let realDistanceKm = 0;
+    for (let i = 1; i < positions.length; i++) {
+      realDistanceKm += haversineKm(
+        positions[i - 1].latitude, positions[i - 1].longitude,
+        positions[i].latitude, positions[i].longitude,
+      );
+    }
+    realDistanceKm = Math.round(realDistanceKm * 10) / 10;
+
+    const isCash = booking.paymentMethod === 'cash' || !booking.paymentMethod;
+
+    const financials = {
+      isCash,
+      paymentMethod: booking.paymentMethod ?? 'cash',
+      paymentStatus: booking.paymentStatus,
+      gross: payout?.grossAmount ?? booking.estimatedPrice ?? 0,
+      commissionRate: payout?.commissionRate ?? booking.commissionRate ?? null,
+      commissionAmount: payout?.commissionAmount ?? null,
+      providerFeeAmount: payout?.providerFeeAmount ?? 0,
+      net: payout?.netAmount ?? null,
+      tip: payout?.tipAmount ?? booking.tipAmount ?? 0,
+      payoutStatus: payout?.status ?? null,
+      payoutCurrency: payout?.currency ?? 'XAF',
+      // Sur une course cash, le chauffeur détient les fonds et doit la commission à AeroGo.
+      cashDebt: (payout?.isCash && payout?.commissionAmount != null) ? payout.commissionAmount : null,
+      discountAmount: booking.discountAmount ?? 0,
+      discountFromPoints: booking.discountFromPoints ?? 0,
+      displayAmount: booking.displayAmount ?? null,
+      intent: intent ? {
+        status: intent.status, provider: intent.provider,
+        amount: intent.amount, currency: intent.currency,
+        authorizedAt: intent.authorizedAt, capturedAt: intent.capturedAt,
+        refundedAt: intent.refundedAt, failedAt: intent.failedAt,
+      } : null,
+      pointsTx, // mouvements de points liés (best-effort)
+    };
+
+    const track = {
+      positions: positions.map((p) => ({ lat: p.latitude, lng: p.longitude, at: p.recordedAt })),
+      pointCount: positions.length,
+      realDistanceKm,
+      estimatedDistanceKm: booking.estimatedDistanceKm ?? null,
+    };
+
+    return { financials, track };
+  }
+
+  /**
+   * Stats par domaine (bande analytique réutilisable, style page Revenus).
+   * Renvoie une forme générique { kpis, series, timeseries, breakdowns } consommée
+   * par le composant front <PageStats>. Filtrable par période + pays actif.
+   */
+  async getPageStats(
+    domain: string,
+    fromD: Date,
+    toD: Date,
+    gran: 'day' | 'month',
+    country: string | null,
+  ): Promise<AdminStats> {
+    const cc = country && country.toUpperCase() !== 'GLOBAL' ? country.toUpperCase() : null;
+    switch (domain) {
+      case 'bookings':    return this.statsBookings(fromD, toD, gran, cc);
+      case 'drivers':     return this.statsDrivers(fromD, toD, gran, cc);
+      case 'users':       return this.statsUsers(fromD, toD, gran, cc);
+      case 'reports':     return this.statsReports(fromD, toD, gran);
+      case 'withdrawals': return this.statsWithdrawals(fromD, toD, gran);
+      case 'referrals':   return this.statsReferrals(fromD, toD, gran, cc);
+      case 'promos':      return this.statsPromos(cc);
+      default: throw new NotFoundException(`Domaine de stats inconnu : ${domain}`);
+    }
+  }
+
+  private async statsDrivers(fromD: Date, toD: Date, gran: 'day' | 'month', cc: string | null): Promise<AdminStats> {
+    const where: any = { createdAt: { gte: fromD, lte: toD } };
+    if (cc) where.countryCode = cc;
+    const rows = await this.prisma.driverProfile.findMany({
+      where,
+      select: { createdAt: true, status: true, driverType: true, countryCode: true, isOnline: true, ratingAvg: true, ratingCount: true },
+    });
+    const by = (s: string) => rows.filter((r) => r.status === s).length;
+    const rated = rows.filter((r) => r.ratingCount > 0);
+    const avgRating = rated.length ? Math.round((rated.reduce((s, r) => s + r.ratingAvg, 0) / rated.length) * 10) / 10 : 0;
+    const statusLabel: Record<string, string> = { approved: 'Approuvés', pending: 'En attente', rejected: 'Rejetés', suspended: 'Suspendus' };
+
+    const charts: AdminChart[] = [
+      { kind: 'timeseries', title: 'Inscriptions chauffeurs', span: 2, data: countSeries(rows, (r) => r.createdAt, gran, 'count'),
+        series: [{ key: 'count', label: 'Inscriptions', color: '#1a56db' }] },
+      { kind: 'pie', title: 'Par statut', data: groupCount(rows, (r) => statusLabel[r.status] ?? r.status) },
+      { kind: 'bar', title: 'Par type', data: groupCount(rows, (r) => r.driverType), color: '#059669' },
+    ];
+    if (!cc) charts.push({ kind: 'bar', title: 'Par pays', data: groupCount(rows, (r) => r.countryCode) });
+
+    return {
+      kpis: [
+        { label: 'Total', value: rows.length },
+        { label: 'Approuvés', value: by('approved'), tone: 'emerald' },
+        { label: 'En attente', value: by('pending'), tone: 'amber' },
+        { label: 'Rejetés', value: by('rejected'), tone: 'red' },
+        { label: 'Suspendus', value: by('suspended'), tone: 'red' },
+        { label: 'En ligne', value: rows.filter((r) => r.isOnline).length, tone: 'purple' },
+        { label: 'Note moy.', value: avgRating, suffix: ' ★' },
+      ],
+      charts,
+    };
+  }
+
+  private async statsUsers(fromD: Date, toD: Date, gran: 'day' | 'month', cc: string | null): Promise<AdminStats> {
+    const where: any = { createdAt: { gte: fromD, lte: toD }, role: 'passenger' };
+    if (cc) where.countryCode = cc;
+    const rows = await this.prisma.user.findMany({
+      where,
+      select: { createdAt: true, status: true, countryCode: true, loyaltyTier: true, kycStatus: true, referredBy: true },
+    });
+    const by = (s: string) => rows.filter((r) => r.status === s).length;
+    const tierLabel: Record<string, string> = { bronze: 'Bronze', silver: 'Argent', gold: 'Or', platinum: 'Platine' };
+
+    const charts: AdminChart[] = [
+      { kind: 'timeseries', title: 'Nouvelles inscriptions', span: 2, data: countSeries(rows, (r) => r.createdAt, gran, 'count'),
+        series: [{ key: 'count', label: 'Inscriptions', color: '#1a56db' }] },
+      { kind: 'pie', title: 'Par statut', data: groupCount(rows, (r) => ({ active: 'Actifs', suspended: 'Suspendus', deleted: 'Supprimés' } as Record<string, string>)[r.status] ?? r.status) },
+      { kind: 'pie', title: 'Par niveau fidélité', data: groupCount(rows, (r) => tierLabel[r.loyaltyTier] ?? r.loyaltyTier) },
+    ];
+    if (!cc) charts.push({ kind: 'bar', title: 'Par pays', data: groupCount(rows, (r) => r.countryCode) });
+
+    return {
+      kpis: [
+        { label: 'Inscrits', value: rows.length },
+        { label: 'Actifs', value: by('active'), tone: 'emerald' },
+        { label: 'Suspendus', value: by('suspended'), tone: 'red' },
+        { label: 'Parrainés', value: rows.filter((r) => r.referredBy).length, tone: 'purple' },
+        { label: 'KYC validé', value: rows.filter((r) => r.kycStatus === 'approved').length, tone: 'blue' },
+      ],
+      charts,
+    };
+  }
+
+  private async statsReports(fromD: Date, toD: Date, gran: 'day' | 'month'): Promise<AdminStats> {
+    const rows = await this.prisma.report.findMany({
+      where: { createdAt: { gte: fromD, lte: toD } },
+      select: { createdAt: true, status: true, reason: true },
+    });
+    const by = (s: string) => rows.filter((r) => r.status === s).length;
+    const statusLabel: Record<string, string> = { open: 'Ouverts', investigating: 'En cours', resolved: 'Résolus', dismissed: 'Rejetés' };
+    return {
+      kpis: [
+        { label: 'Total', value: rows.length },
+        { label: 'Ouverts', value: by('open'), tone: 'amber' },
+        { label: 'En cours', value: by('investigating'), tone: 'purple' },
+        { label: 'Résolus', value: by('resolved'), tone: 'emerald' },
+        { label: 'Rejetés', value: by('dismissed'), tone: 'red' },
+      ],
+      charts: [
+        { kind: 'timeseries', title: 'Signalements dans le temps', span: 2, data: countSeries(rows, (r) => r.createdAt, gran, 'count'),
+          series: [{ key: 'count', label: 'Signalements', color: '#ef4444' }] },
+        { kind: 'pie', title: 'Par statut', data: groupCount(rows, (r) => statusLabel[r.status] ?? r.status) },
+        { kind: 'bar', title: 'Par motif', data: groupCount(rows, (r) => r.reason, 8), color: '#f59e0b' },
+      ],
+    };
+  }
+
+  private async statsWithdrawals(fromD: Date, toD: Date, gran: 'day' | 'month'): Promise<AdminStats> {
+    const rows = await this.prisma.withdrawalRequest.findMany({
+      where: { createdAt: { gte: fromD, lte: toD } },
+      select: { createdAt: true, status: true, amount: true },
+    });
+    const by = (s: string) => rows.filter((r) => r.status === s);
+    const sum = (arr: { amount: number }[]) => Math.round(arr.reduce((s, r) => s + (r.amount ?? 0), 0));
+    const statusLabel: Record<string, string> = { pending: 'En attente', approved: 'Approuvés', rejected: 'Rejetés', paid: 'Payés' };
+
+    // Montant payé par bucket.
+    const amtMap = new Map<string, number>();
+    for (const r of rows) if (r.status === 'paid') { const k = bucketKey(r.createdAt, gran); amtMap.set(k, (amtMap.get(k) ?? 0) + (r.amount ?? 0)); }
+    const amtSeries = [...amtMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([d, v]) => ({ date: d, amount: Math.round(v) }));
+
+    return {
+      kpis: [
+        { label: 'Demandes', value: rows.length },
+        { label: 'En attente', value: by('pending').length, tone: 'amber' },
+        { label: 'Payés', value: by('paid').length, tone: 'emerald' },
+        { label: 'Rejetés', value: by('rejected').length, tone: 'red' },
+        { label: 'Montant payé', value: sum(by('paid')), money: true, tone: 'emerald' },
+        { label: 'En attente (montant)', value: sum(by('pending')), money: true, tone: 'amber' },
+      ],
+      charts: [
+        { kind: 'timeseries', title: 'Demandes de retrait', span: 2, data: countSeries(rows, (r) => r.createdAt, gran, 'count'),
+          series: [{ key: 'count', label: 'Demandes', color: '#1a56db' }] },
+        { kind: 'timeseries', title: 'Montant payé (FCFA)', span: 2, data: amtSeries,
+          series: [{ key: 'amount', label: 'Payé', color: '#059669' }] },
+        { kind: 'pie', title: 'Par statut', data: groupCount(rows, (r) => statusLabel[r.status] ?? r.status) },
+      ],
+    };
+  }
+
+  private async statsReferrals(fromD: Date, toD: Date, gran: 'day' | 'month', cc: string | null): Promise<AdminStats> {
+    const where: any = { createdAt: { gte: fromD, lte: toD }, referredBy: { not: null } };
+    if (cc) where.countryCode = cc;
+    const rows = await this.prisma.user.findMany({
+      where,
+      select: { createdAt: true, countryCode: true, role: true },
+    });
+    const charts: AdminChart[] = [
+      { kind: 'timeseries', title: 'Parrainages dans le temps', span: 2, data: countSeries(rows, (r) => r.createdAt, gran, 'count'),
+        series: [{ key: 'count', label: 'Parrainages', color: '#8b5cf6' }] },
+      { kind: 'pie', title: 'Par rôle du filleul', data: groupCount(rows, (r) => (r.role === 'driver' ? 'Chauffeurs' : 'Passagers')) },
+    ];
+    if (!cc) charts.push({ kind: 'bar', title: 'Par pays', data: groupCount(rows, (r) => r.countryCode) });
+    return {
+      kpis: [
+        { label: 'Parrainages', value: rows.length, tone: 'purple' },
+        { label: 'Passagers parrainés', value: rows.filter((r) => r.role !== 'driver').length, tone: 'blue' },
+        { label: 'Chauffeurs parrainés', value: rows.filter((r) => r.role === 'driver').length, tone: 'emerald' },
+      ],
+      charts,
+    };
+  }
+
+  private async statsPromos(cc: string | null): Promise<AdminStats> {
+    // Les codes promo sont une config (pas un flux d'événements) → on ignore la période,
+    // on agrège l'état courant. cc filtre les codes du pays (les codes globaux ont countryCode null).
+    const where: any = cc ? { countryCode: cc } : {};
+    const rows = await this.prisma.promoCode.findMany({
+      where,
+      select: { code: true, discount: true, usedCount: true, maxUses: true, isActive: true, countryCode: true },
+    });
+    const active = rows.filter((r) => r.isActive).length;
+    const totalUses = rows.reduce((s, r) => s + (r.usedCount ?? 0), 0);
+    const avgDiscount = rows.length ? Math.round(rows.reduce((s, r) => s + (r.discount ?? 0), 0) / rows.length) : 0;
+    return {
+      kpis: [
+        { label: 'Codes', value: rows.length },
+        { label: 'Actifs', value: active, tone: 'emerald' },
+        { label: 'Utilisations', value: totalUses, tone: 'purple' },
+        { label: 'Remise moy.', value: avgDiscount, suffix: '%', tone: 'amber' },
+      ],
+      charts: [
+        { kind: 'bar', title: 'Utilisations par code (top 10)', data: rows.filter((r) => r.usedCount > 0).sort((a, b) => b.usedCount - a.usedCount).slice(0, 10).map((r) => ({ name: r.code, value: r.usedCount })), color: '#8b5cf6' },
+        { kind: 'pie', title: 'Actifs / inactifs', data: [{ name: 'Actifs', value: active }, { name: 'Inactifs', value: rows.length - active }].filter((d) => d.value > 0) },
+        { kind: 'bar', title: 'Remise par code (%)', data: rows.sort((a, b) => b.discount - a.discount).slice(0, 10).map((r) => ({ name: r.code, value: r.discount })), color: '#f59e0b' },
+      ],
+    };
+  }
+
+  private async statsBookings(fromD: Date, toD: Date, gran: 'day' | 'month', cc: string | null): Promise<AdminStats> {
+    const where: any = { createdAt: { gte: fromD, lte: toD } };
+    if (cc) where.operatingCountry = cc;
+    const rows = await this.prisma.booking.findMany({
+      where,
+      select: {
+        createdAt: true, status: true, type: true, operatingCountry: true,
+        estimatedPrice: true, paymentMethod: true, vehicleType: true,
+        destination: true, estimatedDistanceKm: true,
+      },
+    });
+
+    const total = rows.length;
+    const completedRows = rows.filter((r) => r.status === 'completed');
+    const completed = completedRows.length;
+    const cancelled = rows.filter((r) => r.status === 'cancelled').length;
+    const inProgress = rows.filter((r) =>
+      ['confirmed', 'in_progress', 'passenger_confirming', 'arrived_at_airport'].includes(r.status),
+    ).length;
+    const revenue = completedRows.reduce((s, r) => s + (r.estimatedPrice ?? 0), 0);
+    const avgBasket = completed ? Math.round(revenue / completed) : 0;
+    const distRows = completedRows.filter((r) => r.estimatedDistanceKm != null);
+    const avgDist = distRows.length
+      ? Math.round((distRows.reduce((s, r) => s + (r.estimatedDistanceKm ?? 0), 0) / distRows.length) * 10) / 10
+      : 0;
+    const cancelRate = total ? Math.round((cancelled / total) * 1000) / 10 : 0;
+    const completionRate = total ? Math.round((completed / total) * 1000) / 10 : 0;
+
+    // Buckets temporels : volume (total/terminées/annulées) + revenu (terminées).
+    const buckets = new Map<string, { total: number; completed: number; cancelled: number; revenue: number }>();
+    for (const r of rows) {
+      const k = bucketKey(r.createdAt, gran);
+      const b = buckets.get(k) ?? { total: 0, completed: 0, cancelled: 0, revenue: 0 };
+      b.total++;
+      if (r.status === 'completed') { b.completed++; b.revenue += r.estimatedPrice ?? 0; }
+      if (r.status === 'cancelled') b.cancelled++;
+      buckets.set(k, b);
+    }
+    const sorted = [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const volumeSeries = sorted.map(([date, v]) => ({ date, total: v.total, completed: v.completed, cancelled: v.cancelled }));
+    const revenueSeries = sorted.map(([date, v]) => ({ date, revenue: Math.round(v.revenue) }));
+
+    // Répartition par heure de la journée (créneau, UTC).
+    const hourMap = new Map<number, number>();
+    for (const r of rows) {
+      const h = r.createdAt.getUTCHours();
+      hourMap.set(h, (hourMap.get(h) ?? 0) + 1);
+    }
+    const byHour = Array.from({ length: 24 }, (_, h) => ({ name: `${String(h).padStart(2, '0')}h`, value: hourMap.get(h) ?? 0 }));
+
+    const typeLabel: Record<string, string> = { ARRIVAL: 'Arrivée', DEPARTURE: 'Départ', INTERNATIONAL: 'International' };
+    const payLabel: Record<string, string> = {
+      cash: 'Espèces', card: 'Carte', points: 'Points', wallet: 'Wallet',
+      orange_money_cm: 'Orange Money', mtn_cm: 'MTN MoMo',
+    };
+
+    const charts: AdminChart[] = [
+      {
+        kind: 'timeseries', title: 'Évolution des courses', span: 2, data: volumeSeries,
+        series: [
+          { key: 'total', label: 'Total', color: '#1a56db' },
+          { key: 'completed', label: 'Terminées', color: '#059669' },
+          { key: 'cancelled', label: 'Annulées', color: '#ef4444' },
+        ],
+      },
+      {
+        kind: 'timeseries', title: 'Revenu (courses terminées)', span: 2, data: revenueSeries,
+        series: [{ key: 'revenue', label: 'Revenu (FCFA)', color: '#8b5cf6' }],
+      },
+      { kind: 'pie', title: 'Par type', data: groupCount(rows, (r) => typeLabel[r.type] ?? r.type) },
+      { kind: 'pie', title: 'Par mode de paiement', data: groupCount(rows, (r) => payLabel[r.paymentMethod ?? 'cash'] ?? r.paymentMethod ?? 'Espèces') },
+      { kind: 'bar', title: 'Par type de véhicule', data: groupCount(rows, (r) => r.vehicleType) },
+      { kind: 'bar', title: 'Par heure', data: byHour, color: '#0ea5e9' },
+      { kind: 'bar', title: 'Top destinations', data: groupCount(rows, (r) => r.destination, 8) },
+    ];
+    if (!cc) {
+      charts.push({ kind: 'bar', title: 'Par pays', data: groupCount(rows, (r) => r.operatingCountry) });
+    }
+
+    return {
+      kpis: [
+        { label: 'Total', value: total },
+        { label: 'Terminées', value: completed, tone: 'emerald' },
+        { label: 'En cours', value: inProgress, tone: 'purple' },
+        { label: 'Annulées', value: cancelled, tone: 'red' },
+        { label: 'Taux complétion', value: completionRate, suffix: '%', tone: 'emerald' },
+        { label: "Taux d'annulation", value: cancelRate, suffix: '%', tone: 'amber' },
+        { label: 'Revenu', value: revenue, money: true, tone: 'purple' },
+        { label: 'Panier moyen', value: avgBasket, money: true, tone: 'blue' },
+        { label: 'Distance moy.', value: avgDist, suffix: ' km' },
+      ],
+      charts,
+    };
+  }
+
   async cancelBookingAdmin(bookingId: string) {
-    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { driverProfile: { select: { id: true, userId: true } } },
+    });
     if (!booking) throw new NotFoundException('Réservation introuvable');
     if (['completed', 'cancelled'].includes(booking.status)) {
       throw new BadRequestException('Cette réservation ne peut plus être annulée');
     }
-    return this.prisma.booking.update({
-      where: { id: bookingId },
-      data: { status: 'cancelled' },
+
+    const price = Number(booking.estimatedPrice) || 0;
+
+    try {
+      await this.paymentIntentSvc.refund(bookingId, { reason: 'admin_cancel', penaltyPct: 0 });
+    } catch {}
+
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.booking.updateMany({
+        where: { id: bookingId, status: { notIn: ['completed', 'cancelled'] } },
+        data: { status: 'cancelled', cancelledAt: new Date() },
+      });
+      if (updated.count === 0) return;
+
+      if ((booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points') && price > 0) {
+        await tx.pointsTransaction.create({
+          data: {
+            userId: booking.passengerId,
+            type: 'credit',
+            points: price,
+            label: `Remboursement annulation admin — course ${bookingId.slice(0, 8)}`,
+            source: 'refund',
+          },
+        });
+        await tx.wallet.upsert({
+          where: { userId: booking.passengerId },
+          update: { balance: { increment: price } },
+          create: { userId: booking.passengerId, balance: price },
+        });
+      }
+
+      if (booking.driverProfile?.id) {
+        await tx.driverProfile.update({
+          where: { id: booking.driverProfile.id },
+          data: { isAvailable: true },
+        }).catch(() => {});
+      }
     });
+
+    this.notifications.sendToUser(booking.passengerId, 'Course annulée', `Votre course a été annulée par l'administration. Vous avez été remboursé.`).catch(() => {});
+    if (booking.driverProfile?.userId) {
+      this.notifications.sendToUser(booking.driverProfile.userId, 'Course annulée', `La course ${bookingId.slice(0, 8)} a été annulée par l'administration.`).catch(() => {});
+    }
+
+    return { success: true };
   }
 
   async refundBooking(bookingId: string, adminUserId: string, reason?: string) {
@@ -454,7 +962,6 @@ export class AdminService {
     if (amount <= 0) throw new BadRequestException('Montant de remboursement nul');
 
     await this.prisma.$transaction(async (tx) => {
-      // Créditer les points au passager
       await tx.pointsTransaction.create({
         data: {
           userId: booking.passengerId,
@@ -465,7 +972,12 @@ export class AdminService {
         },
       });
 
-      // Marquer le PaymentIntent comme remboursé si existant
+      await tx.wallet.upsert({
+        where: { userId: booking.passengerId },
+        update: { balance: { increment: amount } },
+        create: { userId: booking.passengerId, balance: amount },
+      });
+
       if (booking.paymentIntent) {
         await tx.paymentIntent.update({
           where: { bookingId },

@@ -12,6 +12,14 @@ import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../database/prisma.service';
 import { TrustScoreService } from '../users/trust-score.service';
+import { FavoritesService } from '../favorites/favorites.service';
+
+// CORS WebSocket configurable par env : si CORS_ORIGINS défini (liste séparée par virgules),
+// on restreint aux origines ; sinon '*' (défaut — les clients mobiles natifs n'envoient pas
+// d'Origin, ils ne sont donc pas impactés ; c'est surtout pour les clients navigateur).
+const WS_CORS_ORIGIN: string | string[] = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+  : '*';
 
 /**
  * Gateway principal (namespace /) pour les chauffeurs.
@@ -22,7 +30,7 @@ import { TrustScoreService } from '../users/trust-score.service';
  *   passenger:{userId}          — room personnelle du passager (pour notifs de statut)
  */
 @WebSocketGateway({
-  cors: { origin: '*' },
+  cors: { origin: WS_CORS_ORIGIN },
 })
 export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -35,6 +43,7 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private jwtService: JwtService,
     private prisma: PrismaService,
     private trustScore: TrustScoreService,
+    private favorites: FavoritesService,
   ) {}
 
   async handleConnection(client: Socket) {
@@ -52,9 +61,12 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.data.userId = payload.sub;
       client.data.role = payload.role;
 
-      // Joindre automatiquement la room passager
       if (payload.role === 'passenger') {
         client.join(`passenger:${payload.sub}`);
+      }
+
+      if (payload.role === 'admin') {
+        client.join('admin:dashboard');
       }
 
       const sockets = this.userSockets.get(payload.sub) || [];
@@ -131,9 +143,14 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
         const passengerTrustScore = await this.trustScore
           .computeScore(pending.passengerId)
           .catch(() => 5.0);
+        const isFavoritePassenger = await this.favorites
+          .isFavorite(pending.passengerId, data.driverId)
+          .catch(() => false);
         client.emit('booking:new_request', {
           id: pending.id,
           passengerId: pending.passengerId,
+          meetAndGreet: (pending as any).meetAndGreet ?? false,
+          isFavoritePassenger,
           passengerName: pending.passenger?.name ?? null,
           passengerAvatarUrl: pending.passenger?.avatarUrl ?? null,
           passengerVerified: pending.passenger?.status === 'active',
@@ -159,16 +176,23 @@ export class RidesGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * Notify a specific driver about a new booking request. 
    * Used for broad broadcast (Pre-landing) and targeted broadcast (Post-landing).
    */
-  notifyNewBooking(driverId: string, data: any) {
+  async notifyNewBooking(driverId: string, data: any) {
     const seats: Record<string, number> = {
       eco: 4, eco_plus: 4, standard: 5, confort: 5, confort_plus: 7,
     };
-    
+
+    // Lot 2 — badge « client fidèle » : ce passager a-t-il ce chauffeur en favori ?
+    const isFavoritePassenger = data.passengerId
+      ? await this.favorites.isFavorite(data.passengerId, driverId).catch(() => false)
+      : false;
+
     this.server.to(`driver:${driverId}`).emit('booking:new_request', {
       ...data,
       seats: seats[data.vehicleType] ?? 4,
+      meetAndGreet: data.meetAndGreet ?? false,
+      isFavoritePassenger,
     });
-    
+
     this.logger.log(`[Rides] Notified driver ${driverId} about booking ${data.id}`);
   }
 

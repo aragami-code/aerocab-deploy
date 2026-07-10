@@ -7,9 +7,10 @@ import { PrismaModule } from '../database/prisma.module';
 import { SettingsModule } from '../settings/settings.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
-  imports: [PrismaModule, ConfigModule, SettingsModule, NotificationsModule, forwardRef(() => BookingsModule)],
+  imports: [PrismaModule, ConfigModule, SettingsModule, NotificationsModule, PaymentsModule, forwardRef(() => BookingsModule)],
   controllers: [FlightsController],
   providers: [FlightsService, FlightsScheduler],
   exports: [FlightsService],

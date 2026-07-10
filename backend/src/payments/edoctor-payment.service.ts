@@ -25,13 +25,13 @@ export class EdoctorPaymentService {
 
   // ── Credentials ──────────────────────────────────────────────────────────────
 
-  private async getBaseUrl(): Promise<string> {
-    const raw = await this.settings.get('payment_edoctor_url', '');
+  private async getBaseUrl(country?: string | null): Promise<string> {
+    const raw = await this.settings.getForCountry('payment_edoctor_url', country ?? null, '');
     return (raw || '').replace(/\/$/, '');
   }
 
-  private async cred(key: string): Promise<string> {
-    return (await this.settings.get(key, '')).trim();
+  private async cred(key: string, country?: string | null): Promise<string> {
+    return (await this.settings.getForCountry(key, country ?? null, '')).trim();
   }
 
   async isConfigured(): Promise<boolean> {
@@ -45,14 +45,17 @@ export class EdoctorPaymentService {
 
   // ── Auth (JWT avec cache Redis) ──────────────────────────────────────────────
 
-  async getToken(): Promise<string> {
-    const cached = await this.redis.get(REDIS_TOKEN_KEY);
+  async getToken(country?: string | null): Promise<string> {
+    // Cache scopé par pays : credentials différents par pays → tokens distincts.
+    // Sans pays, on garde la clé globale historique (rétro-compatible).
+    const cacheKey = country ? `${REDIS_TOKEN_KEY}:${country.toUpperCase()}` : REDIS_TOKEN_KEY;
+    const cached = await this.redis.get(cacheKey);
     if (cached) return cached;
 
     const [baseUrl, email, password] = await Promise.all([
-      this.getBaseUrl(),
-      this.cred('payment_edoctor_email'),
-      this.cred('payment_edoctor_password'),
+      this.getBaseUrl(country),
+      this.cred('payment_edoctor_email', country),
+      this.cred('payment_edoctor_password', country),
     ]);
 
     if (!baseUrl || !email || !password) {
@@ -75,12 +78,12 @@ export class EdoctorPaymentService {
     const token = data.access ?? data.token ?? '';
     if (!token) throw new Error('EdoctorPay: token absent de la réponse');
 
-    await this.redis.set(REDIS_TOKEN_KEY, token, TOKEN_TTL_SEC);
+    await this.redis.set(cacheKey, token, TOKEN_TTL_SEC);
     return token;
   }
 
-  private async authHeaders(): Promise<Record<string, string>> {
-    const token = await this.getToken();
+  private async authHeaders(country?: string | null): Promise<Record<string, string>> {
+    const token = await this.getToken(country);
     return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   }
 
@@ -93,9 +96,10 @@ export class EdoctorPaymentService {
     currency?: string;
     description?: string;
     metadata?: Record<string, unknown>;
+    country?: string;
   }): Promise<EdoctorPayment> {
-    const baseUrl = await this.getBaseUrl();
-    const headers = await this.authHeaders();
+    const baseUrl = await this.getBaseUrl(params.country ?? null);
+    const headers = await this.authHeaders(params.country ?? null);
 
     const body = {
       module_origin:      'aerocab_ride',

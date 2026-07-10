@@ -15,6 +15,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AdminNotificationService } from './admin-notification.service';
 import { DriversService } from '../drivers/drivers.service';
 import { VerifyDriverDto } from './dto';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
@@ -24,6 +25,8 @@ import { RequirePermission } from '../rbac/require-permission.decorator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PayoutService } from '../payments/payout.service';
 import { SettingsService } from '../settings/settings.service';
+import { RevenueService } from './revenue.service';
+import { Granularity } from './revenue.types';
 
 @SkipThrottle()
 @Controller('admin')
@@ -32,23 +35,43 @@ import { SettingsService } from '../settings/settings.service';
 export class AdminController {
   constructor(
     private adminService: AdminService,
+    private adminNotifs: AdminNotificationService,
     private driversService: DriversService,
     private payout: PayoutService,
     private settings: SettingsService,
+    private revenue: RevenueService,
   ) {}
 
   // ── Stats ────────────────────────────────────────────
 
   @Get('stats')
   @RequirePermission('view_stats')
-  async getStats() {
-    return this.adminService.getStats();
+  async getStats(@Query('country') country?: string) {
+    return this.adminService.getStats(country);
+  }
+
+  // ── Revenus / Compta centrale ────────────────────────
+  @Get('revenue')
+  @RequirePermission('view_stats')
+  async getRevenue(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('granularity') granularity?: string,
+  ) {
+    const now = new Date();
+    const defFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const fromD = from ? new Date(from) : defFrom;
+    const toD = to ? new Date(to) : now;
+    if (isNaN(fromD.getTime()) || isNaN(toD.getTime())) throw new BadRequestException('Dates invalides');
+    if (fromD > toD) throw new BadRequestException('from doit être antérieur à to');
+    const g: Granularity = granularity === 'monthly' ? 'monthly' : 'range';
+    return this.revenue.getRevenue(fromD, toD, g);
   }
 
   @Get('chart-data')
   @RequirePermission('view_stats')
-  async getChartData() {
-    return this.adminService.getChartData();
+  async getChartData(@Query('country') country?: string) {
+    return this.adminService.getChartData(country);
   }
 
   // ── Active bookings (real-time) ──────────────────────
@@ -228,6 +251,31 @@ export class AdminController {
     return this.adminService.getBookingRatings(id);
   }
 
+  @Get('bookings/:id/detail')
+  @RequirePermission('view_bookings')
+  async getBookingDetail(@Param('id') id: string) {
+    return this.adminService.getBookingDetail(id);
+  }
+
+  // ── Stats par page (bande analytique réutilisable) ────────────────────────
+  @Get('stats/:domain')
+  @RequirePermission('view_stats')
+  async getPageStats(
+    @Param('domain') domain: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('granularity') granularity?: string,
+    @Query('country') country?: string,
+  ) {
+    const now = new Date();
+    const fromD = from ? new Date(from) : new Date(now.getTime() - 30 * 86400000);
+    const toD = to ? new Date(to) : now;
+    if (isNaN(fromD.getTime()) || isNaN(toD.getTime())) throw new BadRequestException('Dates invalides');
+    if (fromD > toD) throw new BadRequestException('from doit être antérieur à to');
+    const gran = granularity === 'month' ? 'month' : 'day';
+    return this.adminService.getPageStats(domain, fromD, toD, gran, country ?? null);
+  }
+
   @Patch('bookings/:id/cancel')
   @RequirePermission('cancel_booking')
   async cancelBooking(@Param('id') id: string) {
@@ -392,6 +440,38 @@ export class AdminController {
   @RequirePermission('view_withdrawals')
   async getWithdrawalStats() {
     return this.adminService.getWithdrawalStats();
+  }
+
+  // ── Notifications Admin ──────────────────────────────────────────────────────
+
+  @Get('notifications')
+  async getNotifications(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('unread') unread?: string,
+  ) {
+    return this.adminNotifs.getNotifications(
+      page ? parseInt(page) : 1,
+      limit ? parseInt(limit) : 20,
+      unread === 'true',
+    );
+  }
+
+  @Get('notifications/unread-count')
+  async getUnreadCount() {
+    return { count: await this.adminNotifs.getUnreadCount() };
+  }
+
+  @Patch('notifications/:id/read')
+  async markNotificationRead(@Param('id') id: string) {
+    return this.adminNotifs.markAsRead(id);
+  }
+
+  @Post('notifications/read-all')
+  @HttpCode(200)
+  async markAllNotificationsRead() {
+    await this.adminNotifs.markAllAsRead();
+    return { success: true };
   }
 
   // ── D5 : Fraude / solde ───────────────────────────────────────────────────

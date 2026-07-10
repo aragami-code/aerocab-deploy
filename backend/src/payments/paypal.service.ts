@@ -18,14 +18,14 @@ export class PaypalService {
     return this.config.get<string>('NODE_ENV') === 'production' ? PAYPAL_PROD : PAYPAL_SANDBOX;
   }
 
-  private async cred(dbKey: string, envKey: string): Promise<string> {
-    const fromDb = await this.settings.get(dbKey, '');
+  private async cred(dbKey: string, envKey: string, country?: string | null): Promise<string> {
+    const fromDb = await this.settings.getForCountry(dbKey, country ?? null, '');
     return fromDb || this.config.get<string>(envKey, '');
   }
 
-  private async getAccessToken(): Promise<string> {
-    const clientId     = await this.cred('payment_paypal_client_id',     'PAYPAL_CLIENT_ID');
-    const clientSecret = await this.cred('payment_paypal_client_secret', 'PAYPAL_CLIENT_SECRET');
+  private async getAccessToken(country?: string | null): Promise<string> {
+    const clientId     = await this.cred('payment_paypal_client_id',     'PAYPAL_CLIENT_ID', country ?? null);
+    const clientSecret = await this.cred('payment_paypal_client_secret', 'PAYPAL_CLIENT_SECRET', country ?? null);
     const cred = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
     const res  = await fetch(`${this.baseUrl}/v1/oauth2/token`, {
       method: 'POST',
@@ -43,10 +43,11 @@ export class PaypalService {
     currency: string;
     description: string;
     customerEmail?: string;
+    country?: string;
   }): Promise<{ paymentUrl: string; orderId: string }> {
     const appScheme  = 'aerogo24-passenger';
     const backendUrl = await this.settings.get('backend_url', this.config.get<string>('BACKEND_URL', 'https://aerocab-api.onrender.com'));
-    const token      = await this.getAccessToken();
+    const token      = await this.getAccessToken(params.country ?? null);
 
     const body = {
       intent: 'CAPTURE',

@@ -58,7 +58,7 @@ export class SosController {
   @UseInterceptors(
     FileInterceptor('audio', {
       storage: diskStorage({
-        destination: '/tmp/aerogo24-uploads',
+        destination: '/data/uploads',
         filename: (_req, file, cb) => {
           const unique = `sos-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
           cb(null, unique + extname(file.originalname));

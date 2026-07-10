@@ -6,6 +6,7 @@ import { FlightsService } from './flights.service';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RidesGateway } from '../bookings/rides.gateway';
+import { BookingsService } from '../bookings/bookings.service';
 
 @Injectable()
 export class FlightsScheduler {
@@ -18,12 +19,13 @@ export class FlightsScheduler {
     private settingsService: SettingsService,
     private notifications: NotificationsService,
     private ridesGateway: RidesGateway,
+    private bookingsService: BookingsService,
   ) {}
 
   // Toutes les 10 minutes — met à jour les vols pas encore atterris
   @Cron(CronExpression.EVERY_10_MINUTES)
   async syncFlightStatuses() {
-    const token = this.config.get<string>('FLIGHT_RADAR_TOKEN');
+    const token = this.config.get<string>('FLIGHT_RADAR_TOKEN', '');
     if (!token) return;
 
     // 0.B14 — fenêtre et batch lus depuis AppSettings
@@ -51,10 +53,20 @@ export class FlightsScheduler {
 
     this.logger.log(`[FlightsScheduler] Syncing ${flights.length} flights via FlightRadar24...`);
 
+    // Résoudre les clés API depuis app_settings (priorité) ou variables d'env
+    const [fr24TokenDb, aeroDbKey] = await Promise.all([
+      this.settingsService.get('flight_radar_token', ''),
+      this.settingsService.get('aerodatabox_api_key', ''),
+    ]);
+    const apiKeys = {
+      fr24Token:     fr24TokenDb  || token,
+      aeroDataBoxKey: aeroDbKey  || this.config.get<string>('AERODATABOX_API_KEY', ''),
+    };
+
     for (const flight of flights) {
       if (!flight.flightNumber) continue;
       try {
-        const info = await this.flightsService.searchFlight(flight.flightNumber);
+        const info = await this.flightsService.searchFlight(flight.flightNumber, apiKeys);
         if (!info) continue;
 
         if (info.status === 'landed') {
@@ -152,13 +164,19 @@ export class FlightsScheduler {
         const isPointsPayment = booking.paymentMethod === 'wallet' || booking.paymentMethod === 'points';
         const isDriverAtAirport = booking.status === 'arrived_at_airport';
 
+        if (!isPointsPayment) {
+          try {
+            await this.bookingsService.refundPaymentIntent(booking.id, { reason: 'flight_cancelled', penaltyPct: 0 });
+          } catch {}
+        }
+
         // D1 — Annulation + remboursement atomique ($transaction)
         await this.prisma.$transaction(async (tx) => {
-          // 1. Annuler le booking
-          await tx.booking.update({
-            where: { id: booking.id },
+          const updated = await tx.booking.updateMany({
+            where: { id: booking.id, status: { in: ['pending', 'confirmed', 'arrived_at_airport', 'in_progress'] } },
             data: { status: 'cancelled', cancelledAt: new Date() },
           });
+          if (updated.count === 0) return;
 
           // 2. Remboursement 100% passager (faute compagnie aérienne → pas de pénalité)
           if (isPointsPayment && price > 0) {
@@ -250,20 +268,35 @@ export class FlightsScheduler {
 
   private async notifyFlightDelayed(flightNumber: string, userId: string, delayMin: number, estimatedArrival: Date) {
     try {
+      // CRITIQUE 2 — inclure 'scheduled' : les INTERNATIONAL réservés à l'avance sont en
+      // statut 'scheduled' (pas encore dispatchés). Sans ça, leur retard n'était jamais traité.
       const booking = await this.prisma.booking.findFirst({
         where: {
           passengerId: userId,
           flightNumber,
-          status: { in: ['pending', 'confirmed'] },
+          status: { in: ['scheduled', 'pending', 'confirmed'] },
         },
         select: {
           id: true,
           passengerId: true,
           departureAirport: true,
+          status: true,
+          scheduledAt: true,
           driverProfile: { select: { id: true, userId: true } },
         },
       });
       if (!booking) return;
+
+      // CRITIQUE 2b — Recaler scheduledAt sur la nouvelle heure d'arrivée.
+      // Le cron dispatchScheduledBookings lit scheduledAt : sans ce recalage, un vol retardé
+      // de 2h ferait dispatcher le chauffeur 2h trop tôt. Toujours appliqué (indépendant du
+      // palier de notification ci-dessous), tant que le booking a un scheduledAt.
+      if (booking.scheduledAt && estimatedArrival.getTime() > Date.now()) {
+        await this.prisma.booking.update({
+          where: { id: booking.id },
+          data: { scheduledAt: estimatedArrival },
+        }).catch((e: any) => this.logger.warn(`[FlightsScheduler] scheduledAt recalage échoué ${booking.id}: ${e?.message}`));
+      }
 
       // Éviter de spammer : on notifie une seule fois par palier (30min, 60min, 120min)
       const knownDelays = [30, 60, 120];

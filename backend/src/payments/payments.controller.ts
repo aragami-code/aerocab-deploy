@@ -93,7 +93,10 @@ export class PaymentsController {
       wallet = await this.prisma.wallet.create({ data: { userId, balance: 0 } });
     }
 
-    const tariffs = await this.settings.getTariffs();
+    // Valeur du point selon le pays de l'utilisateur (null = global)
+    const walletUser = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, countryCode: true } });
+    const userCountry = walletUser?.countryCode ?? (walletUser?.phone ? extractCountryFromPhone(walletUser.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(userCountry);
     const fcfaPerPoint = tariffs.fcfaPerPoint;
 
     const transactions = await this.prisma.transaction.findMany({
@@ -136,15 +139,16 @@ export class PaymentsController {
    */
   @Get('methods')
   @UseGuards(JwtAuthGuard)
-  async getPaymentMethods(@Request() req: any) {
+  async getPaymentMethods(@Request() req: any, @Query('country') country?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: req.user.id },
       select: { phone: true },
     });
 
-    const countryCode = (user?.phone ? extractCountryFromPhone(user.phone) : null) ?? 'CM';
+    const phoneCountry = (user?.phone ? extractCountryFromPhone(user.phone) : null) ?? 'CM';
+    const countryCode = (country ?? phoneCountry).toUpperCase();
 
-    const country = await this.prisma.country.findUnique({
+    const countryRow = await this.prisma.country.findUnique({
       where: { code: countryCode },
       select: { paymentMethods: true },
     });
@@ -155,8 +159,8 @@ export class PaymentsController {
       { id: 'cash',            label: 'Espèces',       icon: 'cash' },
     ];
 
-    const methods = Array.isArray(country?.paymentMethods) && (country.paymentMethods as any[]).length
-      ? country.paymentMethods as any[]
+    const methods = Array.isArray(countryRow?.paymentMethods) && (countryRow.paymentMethods as any[]).length
+      ? countryRow.paymentMethods as any[]
       : DEFAULT_METHODS;
 
     return { methods, countryCode };
@@ -321,7 +325,10 @@ export class PaymentsController {
       label  = labelMap[points] ?? `${points} pts`;
     }
 
-    const tariffs    = await this.settings.getTariffs();
+    // Valeur du point selon le pays de l'utilisateur (null = global)
+    const rechargeUser = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, countryCode: true } });
+    const rechargeCountry = rechargeUser?.countryCode ?? (rechargeUser?.phone ? extractCountryFromPhone(rechargeUser.phone) : null);
+    const tariffs    = await this.settings.getTariffsByCountry(rechargeCountry);
     const amountFcfa = points * tariffs.fcfaPerPoint;
 
     // ── Contrôle montant maximum ─────────────────────────────────────────────
@@ -795,31 +802,39 @@ export class PaymentsController {
    * Atomique via updateMany(status=pending) — idempotent contre les webhooks dupliqués.
    */
   private async creditWalletFromTransaction(reference: string): Promise<void> {
-    const tx = await this.prisma.transaction.findUnique({ where: { reference } });
-    if (!tx) return;
+    const dbTx = await this.prisma.transaction.findUnique({ where: { reference } });
+    if (!dbTx) return;
 
-    const meta   = tx.metadata as any;
-    const tariffs = await this.settings.getTariffs();
-    const pointsToCredit: number = meta?.points ?? Math.floor(tx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
-
-    const { count } = await this.prisma.transaction.updateMany({
-      where: { id: tx.id, status: 'pending' },
-      data:  { status: 'completed' },
+    const meta   = dbTx.metadata as any;
+    // Pays de l'utilisateur du wallet → taux de recharge local (rétro-compatible : null = global)
+    const owner = await this.prisma.wallet.findUnique({
+      where: { id: dbTx.walletId },
+      select: { user: { select: { phone: true, countryCode: true } } },
     });
-    if (count === 0) {
-      this.logger.warn(`Webhook duplicate ou déjà traité : ${reference}`);
-      return;
-    }
+    const rechargeCountry = owner?.user?.countryCode
+      ?? (owner?.user?.phone ? extractCountryFromPhone(owner.user.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(rechargeCountry);
+    const pointsToCredit: number = meta?.points ?? Math.floor(dbTx.amount / (tariffs.pointRechargeRate ?? tariffs.fcfaPerPoint ?? 1));
 
-    await this.prisma.wallet.update({
-      where: { id: tx.walletId },
-      data:  { balance: { increment: pointsToCredit } },
+    await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.transaction.updateMany({
+        where: { id: dbTx.id, status: 'pending' },
+        data:  { status: 'completed' },
+      });
+      if (count === 0) {
+        this.logger.warn(`Webhook duplicate ou déjà traité : ${reference}`);
+        return;
+      }
+
+      await tx.wallet.update({
+        where: { id: dbTx.walletId },
+        data:  { balance: { increment: pointsToCredit } },
+      });
     });
-    this.logger.log(`Wallet ${tx.walletId} crédité de ${pointsToCredit} pts via ${reference}`);
+    this.logger.log(`Wallet ${dbTx.walletId} crédité de ${pointsToCredit} pts via ${reference}`);
 
-    // Créer aussi une PointsTransaction pour les sous-soldes (source: recharge)
     const walletOwner = await this.prisma.wallet.findUnique({
-      where: { id: tx.walletId },
+      where: { id: dbTx.walletId },
       select: { userId: true },
     });
     if (walletOwner) {
@@ -1001,7 +1016,7 @@ export class PaymentsController {
    * Retourne les infos d'un lien de paiement fractionné (public, sans auth).
    */
   @Get('split/:token')
-  @SkipThrottle()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async getSplitLink(@Param('token') token: string) {
     const link = await this.prisma.paymentLink.findUnique({
       where:   { token },
@@ -1024,7 +1039,7 @@ export class PaymentsController {
    * Paiement d'une part fractionnée via lien (sans nécessiter de compte).
    */
   @Post('split/:token/pay')
-  @SkipThrottle()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async payByToken(
     @Param('token') token: string,
     @Body() body: {
@@ -1087,7 +1102,7 @@ export class PaymentsController {
    * Endpoint public — utilisé par les apps mobile pour l'affichage multi-devises.
    */
   @Get('exchange-rate')
-  @SkipThrottle()
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   async getExchangeRate(
     @Query('from') from = 'XAF',
     @Query('to')   to   = 'EUR',

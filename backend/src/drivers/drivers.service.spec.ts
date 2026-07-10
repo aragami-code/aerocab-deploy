@@ -6,7 +6,10 @@ import { RidesGateway } from '../bookings/rides.gateway';
 import { SettingsService } from '../settings/settings.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { NotchPayService } from '../payments/notchpay.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { makeWallet, makeWithdrawalRequest, makeTransaction } from '../../test/factories';
+
+const mockAdminNotifs = { notify: jest.fn().mockResolvedValue(undefined) };
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -62,6 +65,7 @@ describe('DriversService', () => {
         { provide: SettingsService, useValue: mockSettings },
         { provide: BookingsService, useValue: {}           },
         { provide: NotchPayService, useValue: mockNotchpay },
+        { provide: AdminNotificationService, useValue: mockAdminNotifs },
       ],
     }).compile();
 

@@ -20,6 +20,8 @@ import { ForfaitsModule } from '../forfaits/forfaits.module';
 import { ZonesModule } from '../zones/zones.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { UsersModule } from '../users/users.module';
+import { LoyaltyModule } from '../loyalty/loyalty.module';
+import { FavoritesModule } from '../favorites/favorites.module';
 
 @Module({
   imports: [
@@ -36,6 +38,8 @@ import { UsersModule } from '../users/users.module';
     ZonesModule,
     PaymentsModule,
     UsersModule,
+    LoyaltyModule,
+    FavoritesModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

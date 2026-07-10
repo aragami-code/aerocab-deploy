@@ -11,8 +11,12 @@ import { RedisService } from '../redis/redis.service';
 import { OtpDeliveryService } from '../otp/otp-delivery.service';
 import { EmailRouterService } from '../email/email-router.service';
 import { SettingsService } from '../settings/settings.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { maskPhone } from '../common/helpers';
 import { extractCountryFromPhone } from '../common/phone-country';
+import { availableChannels, Channel } from '../otp/otp-channels';
+import { phoneLinkAllowed } from './phone-link';
+import { randomInt } from 'crypto';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_COOLDOWN_MINUTES,
@@ -22,7 +26,9 @@ import {
 const OTP_TTL = OTP_EXPIRY_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_TTL = OTP_COOLDOWN_MINUTES * 60; // seconds
 const OTP_RATE_LIMIT_MAX = OTP_MAX_ATTEMPTS;
-const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days
+// Durées configurables par env (défauts conservés : access 15 min, refresh 30 j)
+const REFRESH_TOKEN_TTL = parseInt(process.env.REFRESH_TOKEN_TTL ?? String(30 * 24 * 60 * 60), 10) || 30 * 24 * 60 * 60;
+const ACCESS_TOKEN_TTL = parseInt(process.env.ACCESS_TOKEN_TTL ?? String(15 * 60), 10) || 15 * 60;
 const SESSION_VERSION_KEY = (userId: string) => `session_version:${userId}`;
 
 @Injectable()
@@ -37,6 +43,7 @@ export class AuthService {
     private sms: OtpDeliveryService,
     private email: EmailRouterService,
     private settings: SettingsService,
+    private adminNotifs: AdminNotificationService,
   ) {}
 
   private async newSessionVersion(userId: string): Promise<number> {
@@ -48,7 +55,7 @@ export class AuthService {
     return sv ? parseInt(sv, 10) : 0;
   }
 
-  async sendOtp(phone: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
+  async sendOtp(phone: string, lang = 'fr', channel?: 'sms' | 'whatsapp' | 'email'): Promise<{ message: string; expiresIn: number }> {
     // H6 — Rate limit global : empêche le spam via milliers de numéros différents.
     // Compteur global glissant sur 60s, seuil configurable (défaut : 500 req/min).
     const globalKey = 'otp_global_rate';
@@ -82,7 +89,7 @@ export class AuthService {
 
     const code = isTestMode
       ? testOtpValue
-      : Math.floor(100000 + Math.random() * 900000).toString();
+      : randomInt(100000, 1000000).toString();
 
     const shouldLog = isTestMode || otpLogEnabled === 'true'
       || this.config.get('NODE_ENV', 'development') !== 'production';
@@ -100,15 +107,110 @@ export class AuthService {
       await this.redis.expire(rateKey, OTP_RATE_LIMIT_TTL);
     }
 
-    // Send SMS (skip in test mode — code already stored in Redis)
+    // Send OTP via le canal choisi (skip in test mode — code already stored in Redis)
     if (!isTestMode) {
-      const sent = await this.sms.sendOtp(phone, code, lang);
+      const country = extractCountryFromPhone(phone);
+      const sent = await this.sms.sendOtp(phone, code, lang, { channel, country });
       if (!sent) {
-        throw new BadRequestException("Echec d'envoi du SMS. Reessayez.");
+        throw new BadRequestException("Echec d'envoi du code. Reessayez.");
       }
     }
 
     return { message: 'OTP envoye avec succes', expiresIn: OTP_TTL };
+  }
+
+  /**
+   * Canaux OTP disponibles pour un identifiant (numéro ou email), selon les
+   * contacts du compte ∩ canaux activés du pays. Anti-énumération : si aucun
+   * compte, on retombe sur les contacts de l'identifiant lui-même.
+   */
+  async getOtpChannels(identifier: string): Promise<{ channels: string[]; default: string }> {
+    const raw = (identifier ?? '').trim();
+    const isEmail = raw.includes('@');
+    const id = isEmail ? raw.toLowerCase() : raw;
+    const country = isEmail ? null : extractCountryFromPhone(id);
+    const account = isEmail
+      ? await this.prisma.user.findFirst({ where: { email: id }, select: { phone: true, email: true } })
+      : await this.prisma.user.findUnique({ where: { phone: id }, select: { phone: true, email: true } });
+
+    const hasPhone = account ? !!account.phone : !isEmail;
+    const hasEmail = account ? !!account.email : isEmail;
+
+    const enabledRaw = await this.settings.getForCountry('otp_channels_enabled', country, 'sms,email');
+    const enabled = enabledRaw.split(',').map((s) => s.trim()).filter(Boolean) as Channel[];
+
+    const channels = availableChannels({ hasPhone, hasEmail, mode: 'login' }, enabled);
+    const defRaw = await this.settings.getForCountry('otp_default_channel', country, '');
+    const def = channels.includes(defRaw as Channel) ? defRaw : (channels[0] ?? 'sms');
+    return { channels, default: def };
+  }
+
+  /**
+   * Envoie un OTP pour lier un numéro à un compte (email/Google sans téléphone).
+   * Canal sms/whatsapp uniquement (l'OTP doit aller au numéro pour prouver la possession).
+   */
+  async sendPhoneLinkOtp(userId: string, phone: string, channel: 'sms' | 'whatsapp' = 'sms'): Promise<{ message: string; expiresIn: number }> {
+    const me = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    const guard = phoneLinkAllowed(me?.phone ?? null);
+    if (!guard.ok) throw new BadRequestException(guard.reason);
+
+    const taken = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+    if (taken && taken.id !== userId) {
+      throw new BadRequestException('Ce numéro est déjà utilisé par un autre compte.');
+    }
+
+    // Rate-limit par userId (5 envois / 10 min)
+    const rlKey = `phone_link_rate:${userId}`;
+    const n = await this.redis.incr(rlKey);
+    if (n === 1) await this.redis.expire(rlKey, 600);
+    if (n > 5) throw new BadRequestException('Trop de tentatives. Réessayez plus tard.');
+
+    const testModeEnabled = await this.settings.get('test_mode_enabled', 'false');
+    const testOtpValue    = await this.settings.get('test_otp_value', '000000');
+    const isTestMode      = testModeEnabled === 'true';
+    // OTP via RNG cryptographique (anti-prédiction)
+    const code = isTestMode ? testOtpValue : randomInt(100000, 1000000).toString();
+
+    await this.redis.set(`otp:link:${userId}`, JSON.stringify({ code, attempts: 0, phone }), OTP_TTL);
+
+    if (!isTestMode) {
+      const country = extractCountryFromPhone(phone);
+      const sent = await this.sms.sendOtp(phone, code, 'fr', { channel, country });
+      if (!sent) throw new BadRequestException("Echec d'envoi du code. Reessayez.");
+    }
+    return { message: 'Code envoyé', expiresIn: OTP_TTL };
+  }
+
+  /**
+   * Vérifie l'OTP de liaison et pose phone + countryCode sur le compte.
+   */
+  async verifyPhoneLink(userId: string, phone: string, code: string): Promise<{ id: string; phone: string; countryCode: string | null; profileComplete: boolean }> {
+    const key = `otp:link:${userId}`;
+    const raw = await this.redis.get(key);
+    if (!raw) throw new UnauthorizedException('Code expiré ou invalide.');
+    const { code: storedCode, attempts, phone: storedPhone } = JSON.parse(raw);
+
+    if (attempts >= 3) { await this.redis.del(key); throw new UnauthorizedException('Trop de tentatives. Demandez un nouveau code.'); }
+    if (storedPhone !== phone) throw new UnauthorizedException('Numéro non concordant.');
+    if (storedCode !== code) {
+      await this.redis.set(key, JSON.stringify({ code: storedCode, attempts: attempts + 1, phone: storedPhone }), await this.redis.ttl(key));
+      throw new UnauthorizedException('Code incorrect.');
+    }
+    await this.redis.del(key);
+
+    // Anti-race : re-vérifier l'unicité + l'absence de numéro
+    const me = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    if (me?.phone) throw new BadRequestException('Un numéro est déjà associé à ce compte.');
+    const taken = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+    if (taken && taken.id !== userId) throw new BadRequestException('Ce numéro est déjà utilisé par un autre compte.');
+
+    const countryCode = extractCountryFromPhone(phone);
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { phone, countryCode },
+      select: { id: true, phone: true, countryCode: true },
+    });
+    return { id: updated.id, phone: updated.phone!, countryCode: updated.countryCode, profileComplete: true };
   }
 
   async sendEmailOtp(emailAddr: string, lang = 'fr'): Promise<{ message: string; expiresIn: number }> {
@@ -134,7 +236,7 @@ export class AuthService {
 
     const code = isTestMode
       ? testOtpValue
-      : Math.floor(100000 + Math.random() * 900000).toString();
+      : randomInt(100000, 1000000).toString();
 
     this.logger.log(`[OTP-EMAIL]${isTestMode ? ' [TEST]' : ''} ${emailAddr} → ${isTestMode ? code : '******'}`);
 
@@ -199,6 +301,10 @@ export class AuthService {
     let user = await this.prisma.user.findFirst({ where: { email: emailAddr } });
     let isNewUser = false;
 
+    if (user && (user.status === 'suspended' || user.status === 'deleted')) {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
+    }
+
     if (!user) {
       const role = intendedRole ?? 'passenger';
       let newReferralCode: string | null = null;
@@ -223,6 +329,13 @@ export class AuthService {
       isNewUser = true;
       this.logger.log(`New user created via email: ${user.id} (${emailAddr}) role=${role}`);
 
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${emailAddr} s'est inscrit (${role}) via email`,
+        { userId: user.id, method: 'email', role },
+      );
+
       if (referrer) {
         const BONUS = 500;
         await Promise.all([
@@ -233,8 +346,8 @@ export class AuthService {
     }
 
     const sv = await this.newSessionVersion(user.id);
-    const accessToken  = this.jwt.sign({ sub: user.id, role: user.role, sv });
-    const refreshToken = this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: `${REFRESH_TOKEN_TTL}s` });
+    const accessToken  = this.jwt.sign({ sub: user.id, role: user.role, sv }, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ sub: user.id, role: user.role, sv, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
     await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
     return { accessToken, refreshToken, user: { id: user.id, email: user.email, name: user.name, role: user.role }, isNewUser };
@@ -248,7 +361,7 @@ export class AuthService {
   async applyReferral(userId: string, referralCode: string): Promise<{ success: boolean; message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { referredBy: true },
+      select: { referredBy: true, phone: true, countryCode: true },
     });
     if (user?.referredBy) return { success: false, message: 'Vous avez déjà un parrain.' };
     const referrer = await this.prisma.user.findUnique({
@@ -261,7 +374,9 @@ export class AuthService {
       where: { id: userId },
       data: { referredBy: referrer.id },
     });
-    const tariffs = await this.settings.getTariffs();
+    // Bonus parrainage selon le pays du filleul (marché qu'il rejoint ; null = global)
+    const referralCountry = user?.countryCode ?? (user?.phone ? extractCountryFromPhone(user.phone) : null);
+    const tariffs = await this.settings.getTariffsByCountry(referralCountry);
     const onSignup     = tariffs.referralBonus?.onSignup    ?? 500;
     const newUserBonus = tariffs.referralBonus?.newUserBonus ?? 300;
     await Promise.all([
@@ -272,7 +387,10 @@ export class AuthService {
   }
 
   async logout(userId: string): Promise<void> {
-    await this.redis.del(`refresh:${userId}`);
+    await Promise.all([
+      this.redis.del(`refresh:${userId}`),
+      this.newSessionVersion(userId),
+    ]);
   }
 
   async getReferralInfo(userId: string) {
@@ -393,6 +511,13 @@ export class AuthService {
       isNewUser = true;
       this.logger.log(`New user created: ${user.id} (${maskPhone(phone)}) role=${role}`);
 
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${maskPhone(phone)} s'est inscrit (${role}) via téléphone`,
+        { userId: user.id, method: 'phone', role },
+      );
+
       // Crédite parrain + filleul (500 pts chacun)
       if (referrer) {
         const REFERRAL_BONUS = 500;
@@ -411,15 +536,15 @@ export class AuthService {
     }
 
     // Check if user is suspended
-    if (user.status === 'suspended') {
-      throw new UnauthorizedException('Compte suspendu. Contactez le support.');
+    if (user.status === 'suspended' || user.status === 'deleted') {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
     }
 
     // Generate tokens — session unique (D3)
     const sv = await this.newSessionVersion(user.id);
     const payload = { sub: user.id, role: user.role, sv };
-    const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+    const accessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -458,8 +583,8 @@ export class AuthService {
       // Refresh conserve la session version courante (pas de nouvel login)
       const sv = await this.currentSessionVersion(user.id);
       const newPayload = { sub: user.id, role: user.role, sv };
-      const newAccessToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
-      const newRefreshToken = this.jwt.sign(newPayload, { expiresIn: '30d' });
+      const newAccessToken = this.jwt.sign(newPayload, { expiresIn: ACCESS_TOKEN_TTL });
+      const newRefreshToken = this.jwt.sign({ ...newPayload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
       await this.redis.set(
         `refresh:${user.id}`,
@@ -543,24 +668,37 @@ export class AuthService {
     }
 
     if (!user) {
-      user = await this.prisma.user.create({
-        data: { googleId, email, name, role: intendedRole },
+      let newReferralCode: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        const candidate = this.generateReferralCode();
+        const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+        if (!exists) { newReferralCode = candidate; break; }
+      }
+      user = await (this.prisma.user as any).create({
+        data: { googleId, email, name, role: intendedRole, referralCode: newReferralCode },
       });
       isNewUser = true;
       this.logger.log(`New user created via Google: ${user.id} (${email}) role=${intendedRole}`);
+
+      void this.adminNotifs.notify(
+        'user.signup',
+        'Nouvel utilisateur',
+        `${email ?? user.id} s'est inscrit (${intendedRole}) via Google`,
+        { userId: user.id, method: 'google', role: intendedRole },
+      );
     } else {
       this.logger.log(`User logged in via Google: ${user.id} (${email})`);
     }
 
-    if (user.status === 'suspended') {
-      throw new UnauthorizedException('Compte suspendu. Contactez le support.');
+    if (user.status === 'suspended' || user.status === 'deleted') {
+      throw new UnauthorizedException('Compte désactivé ou supprimé. Contactez le support.');
     }
 
     // Generate tokens — session unique (D3)
     const svGoogle = await this.newSessionVersion(user.id);
     const payload = { sub: user.id, role: user.role, sv: svGoogle };
-    const newAccessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-    const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+    const newAccessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+    const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
 
     // Store refresh token in Redis
     await this.redis.set(
@@ -628,13 +766,34 @@ export class AuthService {
       let user = await this.prisma.user.findUnique({ where: { googleId } });
       if (!user && email) user = await this.prisma.user.findFirst({ where: { email } });
       if (user && !user.googleId) user = await this.prisma.user.update({ where: { id: user.id }, data: { googleId } });
-      if (!user) { user = await this.prisma.user.create({ data: { googleId, email, name, role: roleFromDeepLink } }); isNewUser = true; }
+      if (!user) {
+        let newReferralCode: string | null = null;
+        for (let i = 0; i < 5; i++) {
+          const candidate = this.generateReferralCode();
+          const exists = await (this.prisma.user as any).findUnique({ where: { referralCode: candidate } });
+          if (!exists) { newReferralCode = candidate; break; }
+        }
+        user = await (this.prisma.user as any).create({ data: { googleId, email, name, role: roleFromDeepLink, referralCode: newReferralCode } });
+        isNewUser = true;
+
+        void this.adminNotifs.notify(
+          'user.signup',
+          'Nouvel utilisateur',
+          `${email ?? user.id} s'est inscrit (${roleFromDeepLink}) via Google`,
+          { userId: user.id, method: 'google_callback', role: roleFromDeepLink },
+        );
+      }
+
+      if (user.status === 'suspended' || user.status === 'deleted') {
+        res.redirect(`${deepLink}?error=account_suspended`);
+        return;
+      }
 
       // Generate tokens — session unique (D3)
       const svCb = await this.newSessionVersion(user.id);
       const payload = { sub: user.id, role: user.role, sv: svCb };
-      const accessToken = this.jwt.sign(payload, { expiresIn: '30d' });
-      const refreshToken = this.jwt.sign(payload, { expiresIn: '30d' });
+      const accessToken = this.jwt.sign(payload, { expiresIn: ACCESS_TOKEN_TTL });
+      const refreshToken = this.jwt.sign({ ...payload, type: 'refresh' }, { expiresIn: REFRESH_TOKEN_TTL });
       await this.redis.set(`refresh:${user.id}`, refreshToken, REFRESH_TOKEN_TTL);
 
       // C1 — Sécurité : ne jamais exposer les tokens dans l'URL (logs, proxies, historique).
@@ -690,6 +849,7 @@ export class AuthService {
         status: true,
         avatarUrl: true,
         language: true,
+        countryCode: true,
         createdAt: true,
       },
     });
@@ -698,6 +858,6 @@ export class AuthService {
       throw new UnauthorizedException('Utilisateur introuvable');
     }
 
-    return user;
+    return { ...user, profileComplete: !!user.phone };
   }
 }

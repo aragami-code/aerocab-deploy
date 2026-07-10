@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Put, Post, HttpCode, Body, UseGuards, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Patch, Put, Post, HttpCode, Body, Query, UseGuards, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { SettingsService } from './settings.service';
 import { AuditService } from '../audit/audit.service';
@@ -235,6 +235,23 @@ export class SettingsController {
     // Masquer partiellement la clé dans la réponse (sécurité)
     const masked = key ? key.slice(0, 8) + '••••••••••••••••••••' + key.slice(-4) : '';
     return { configured: !!key, maskedKey: masked };
+  }
+
+  @Get('maps-embed')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('edit_settings')
+  async getMapsEmbedUrl(
+    @Query('origin') origin: string,
+    @Query('destination') destination: string,
+  ) {
+    const key = await this.settings.get('google_maps_key', '');
+    if (!key) return { url: null, configured: false };
+    if (!origin && !destination) return { url: null, configured: true };
+    const base = 'https://www.google.com/maps/embed/v1/directions';
+    const params = new URLSearchParams({ key, mode: 'driving' });
+    if (origin)      params.set('origin', origin);
+    if (destination) params.set('destination', destination);
+    return { url: `${base}?${params.toString()}`, configured: true };
   }
 
   @Put('maps-key')
@@ -486,9 +503,11 @@ export class SettingsController {
   @RequirePermission('manage_payment_providers')
   async setPaymentProviders(
     @Body() body: { enabled?: Record<string, boolean>; credentials?: Record<string, string> },
+    @Query('country') country: string | undefined,
     @CurrentUser() admin: any,
   ) {
     const updated: string[] = [];
+    const cc = country ? country.trim().toUpperCase() : null;
 
     // Mise à jour des toggles enabled
     if (body.enabled) {
@@ -505,8 +524,9 @@ export class SettingsController {
       const allowed = new Set(SettingsController.PAYMENT_KEYS.map((k) => k.key));
       for (const [key, value] of Object.entries(body.credentials)) {
         if (!allowed.has(key) || typeof value !== 'string') continue;
-        await this.settings.set(key, value.trim());
-        updated.push(key);
+        const targetKey = cc ? `${key}:${cc}` : key;
+        await this.settings.set(targetKey, value.trim());
+        updated.push(targetKey);
       }
     }
 
@@ -529,6 +549,51 @@ export class SettingsController {
   @RequirePermission('manage_payment_providers')
   async testEdoctorConnection() {
     return this.edoctor.testConnection();
+  }
+
+  // ── Test connexion APIs Vols ─────────────────────────────────────────────────
+
+  @Post('flights/fr24/test')
+  @HttpCode(200)
+  @RequirePermission('edit_settings')
+  async testFlightRadar24() {
+    const token = await this.settings.get('flight_radar_token', '');
+    if (!token) return { ok: false, message: 'Token non configuré' };
+    try {
+      const res = await fetch(
+        'https://fr24api.flightradar24.com/api/live/flight-positions/full?flights=AF006',
+        { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json', 'Accept-Version': 'v1' } },
+      );
+      if (res.status === 401) return { ok: false, message: 'Token invalide (401 Unauthorized)' };
+      if (res.status === 403) return { ok: false, message: 'Accès refusé — vérifier le plan API (403 Forbidden)' };
+      if (!res.ok) return { ok: false, message: `Erreur HTTP ${res.status}` };
+      const data = await res.json() as { data?: any[] };
+      return { ok: true, message: `Connexion OK — ${data.data?.length ?? 0} vol(s) actif(s) trouvé(s)` };
+    } catch (err: any) {
+      return { ok: false, message: `Erreur réseau : ${err.message}` };
+    }
+  }
+
+  @Post('flights/aerodatabox/test')
+  @HttpCode(200)
+  @RequirePermission('edit_settings')
+  async testAeroDataBox() {
+    const apiKey = await this.settings.get('aerodatabox_api_key', '');
+    if (!apiKey) return { ok: false, message: 'Clé non configurée' };
+    try {
+      const res = await fetch(
+        'https://api.magicapi.dev/api/v1/aedbx/aerodatabox/flights/number/AF006',
+        { headers: { 'x-magicapi-key': apiKey } },
+      );
+      if (res.status === 401 || res.status === 403) return { ok: false, message: `Clé invalide (${res.status})` };
+      if (res.status === 429) return { ok: false, message: 'Quota dépassé (429 Too Many Requests)' };
+      if (!res.ok) return { ok: false, message: `Erreur HTTP ${res.status}` };
+      const data = await res.json();
+      const count = Array.isArray(data) ? data.length : 0;
+      return { ok: true, message: `Connexion OK — ${count} vol(s) retourné(s)` };
+    } catch (err: any) {
+      return { ok: false, message: `Erreur réseau : ${err.message}` };
+    }
   }
 
   // ── Forfaits de recharge de points ───────────────────────────────────────────

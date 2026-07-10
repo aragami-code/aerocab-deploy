@@ -7,7 +7,14 @@ import { RedisService } from '../redis/redis.service';
 import { NotchPayService } from '../payments/notchpay.service';
 import { FlutterwaveService } from '../payments/flutterwave.service';
 import { ExportService } from './export.service';
+import { PaymentIntentService } from '../payments/payment-intent.service';
 import { makeBooking, makeWallet, makeWithdrawalRequest } from '../../test/factories';
+
+const mockPaymentIntent = {
+  create: jest.fn(), refund: jest.fn(), capture: jest.fn(), void: jest.fn(),
+  findByBooking: jest.fn(), findByProviderRef: jest.fn(),
+  markAuthorizedByNotchPay: jest.fn(), markAuthorizedByStripe: jest.fn(), syncEdoctorStatus: jest.fn(),
+};
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -80,6 +87,7 @@ describe('AdminService', () => {
         { provide: NotchPayService,      useValue: mockNotchPay      },
         { provide: FlutterwaveService,   useValue: mockFlutterwave   },
         { provide: ExportService,        useValue: mockExport        },
+        { provide: PaymentIntentService, useValue: mockPaymentIntent  },
       ],
     }).compile();
 

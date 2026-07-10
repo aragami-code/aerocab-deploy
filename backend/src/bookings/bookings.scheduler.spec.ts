@@ -11,6 +11,9 @@ import { FlutterwaveService } from '../payments/flutterwave.service';
 import { DispatchService } from './dispatch.service';
 import { PayoutService } from '../payments/payout.service';
 import { ReceiptService } from '../payments/receipt.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
+import { BookingsService } from './bookings.service';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { makeTransaction } from '../../test/factories';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -42,8 +45,14 @@ const mockAudit  = { log: jest.fn().mockResolvedValue(undefined) };
 const mockRedis  = { scan: jest.fn().mockResolvedValue([]), get: jest.fn(), del: jest.fn(), set: jest.fn() };
 const mockFlutterwave = { verify: jest.fn() };
 const mockDispatch    = { findEligibleDrivers: jest.fn().mockResolvedValue([]) };
-const mockPayout      = { createPayout: jest.fn().mockResolvedValue(undefined) };
-const mockReceiptSvc  = { sendRideReceipt: jest.fn().mockResolvedValue(undefined) };
+const mockPayout         = { createPayout: jest.fn().mockResolvedValue(undefined) };
+const mockReceiptSvc     = { sendRideReceipt: jest.fn().mockResolvedValue(undefined) };
+const mockLoyalty        = { costOf: jest.fn().mockResolvedValue(200) };
+const mockBookingsService = {
+  cancelForExpiredAssignment: jest.fn().mockResolvedValue(undefined),
+  cancelForDriverNoShow: jest.fn().mockResolvedValue(undefined),
+  finalizeRide: jest.fn().mockResolvedValue(undefined),
+};
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
@@ -63,9 +72,12 @@ describe('BookingsScheduler', () => {
         { provide: AuditService,         useValue: mockAudit         },
         { provide: RedisService,         useValue: mockRedis         },
         { provide: FlutterwaveService,   useValue: mockFlutterwave   },
-        { provide: DispatchService,      useValue: mockDispatch      },
-        { provide: PayoutService,        useValue: mockPayout        },
-        { provide: ReceiptService,       useValue: mockReceiptSvc    },
+        { provide: DispatchService,        useValue: mockDispatch         },
+        { provide: PayoutService,          useValue: mockPayout           },
+        { provide: ReceiptService,         useValue: mockReceiptSvc       },
+        { provide: BookingsService,        useValue: mockBookingsService  },
+        { provide: AdminNotificationService, useValue: { notify: jest.fn().mockResolvedValue(undefined) } },
+        { provide: LoyaltyService,         useValue: mockLoyalty          },
       ],
     }).compile();
 
@@ -92,8 +104,8 @@ describe('BookingsScheduler', () => {
 
       await scheduler.expireUnassignedBookings();
 
-      // 1 $transaction par booking (pas une seule globale)
-      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(2);
+      // Le scheduler délègue l'annulation+remboursement à BookingsService, 1× par booking
+      expect(mockBookingsService.cancelForExpiredAssignment).toHaveBeenCalledTimes(2);
     });
 
     it('rembourse les points pour les paiements wallet', async () => {
@@ -104,14 +116,8 @@ describe('BookingsScheduler', () => {
 
       await scheduler.expireUnassignedBookings();
 
-      expect(mockTx.pointsTransaction.create).toHaveBeenCalledWith({
-        data: {
-          userId: 'p1',
-          type: 'credit',
-          points: 5000,
-          label: expect.stringContaining('Remboursement expiration'),
-        },
-      });
+      // Le remboursement (wallet) est désormais géré par cancelForExpiredAssignment
+      expect(mockBookingsService.cancelForExpiredAssignment).toHaveBeenCalledWith('b1');
     });
 
     it('rembourse les points pour les paiements points', async () => {
@@ -122,9 +128,8 @@ describe('BookingsScheduler', () => {
 
       await scheduler.expireUnassignedBookings();
 
-      expect(mockTx.pointsTransaction.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({ userId: 'p2', type: 'credit', points: 3500 }),
-      });
+      // Remboursement (points) délégué à cancelForExpiredAssignment
+      expect(mockBookingsService.cancelForExpiredAssignment).toHaveBeenCalledWith('b2');
     });
 
     it('ne crée pas de remboursement pour les paiements cash', async () => {
@@ -158,17 +163,16 @@ describe('BookingsScheduler', () => {
       ];
       mockPrisma.booking.findMany.mockResolvedValue(expired);
 
-      // Premier booking échoue, deuxième réussit
-      mockPrisma.$transaction
+      // Premier booking échoue, deuxième réussit (isolation par booking)
+      mockBookingsService.cancelForExpiredAssignment
         .mockRejectedValueOnce(new Error('DB error'))
-        .mockImplementationOnce((fn: (tx: typeof mockTx) => Promise<any>) => fn(mockTx));
-      mockTx.booking.update.mockResolvedValue({});
+        .mockResolvedValueOnce(undefined);
 
       // Ne doit pas lancer d'exception globale
       await expect(scheduler.expireUnassignedBookings()).resolves.not.toThrow();
 
-      // La deuxième transaction a quand même été tentée
-      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(2);
+      // Le deuxième booking a quand même été traité
+      expect(mockBookingsService.cancelForExpiredAssignment).toHaveBeenCalledTimes(2);
     });
 
     it('utilise le timeout configurable depuis SettingsService', async () => {
@@ -204,10 +208,10 @@ describe('BookingsScheduler', () => {
 
       await scheduler.autoCompletePassengerConfirming();
 
-      expect(mockPrisma.booking.update).toHaveBeenCalledWith({
-        where: { id: 'b1' },
-        data: { status: 'completed' },
-      });
+      // L'auto-complétion délègue désormais à BookingsService.finalizeRide
+      expect(mockBookingsService.finalizeRide).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'b1' }),
+      );
     });
   });
 
