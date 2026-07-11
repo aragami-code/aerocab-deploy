@@ -44,6 +44,8 @@ const PERMISSIONS: Array<{ key: string; group: string; description: string }> = 
   { key: 'manage_announcements',      group: 'announcements', description: 'Gérer les annonces et la version des apps' },
   // countries (1)
   { key: 'manage_countries',          group: 'countries', description: 'Créer, activer et configurer les pays opérés' },
+  // branding (1)
+  { key: 'manage_branding',           group: 'branding',  description: 'Personnaliser l\'apparence (couleurs, logo, nom) du tenant' },
   // reports (2)
   { key: 'view_reports',              group: 'reports',    description: 'Voir les signalements' },
   { key: 'handle_report',             group: 'reports',    description: 'Traiter / Fermer un signalement' },
@@ -103,6 +105,7 @@ const ROLE_MATRIX: Record<string, string[]> = {
     'view_promos','create_promo','edit_promo','delete_promo',
     'manage_announcements',
     'manage_countries',
+    'manage_branding',
     'view_reports','handle_report',
     'view_referrals',
     'view_audit_logs',

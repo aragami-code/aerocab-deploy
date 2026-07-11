@@ -6,6 +6,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { PrismaModule } from './database/prisma.module';
 import { TenancyModule } from './tenancy/tenancy.module';
+import { BrandingModule } from './branding/branding.module';
 import { RedisModule } from './redis/redis.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -55,6 +56,7 @@ import { FavoritesModule } from './favorites/favorites.module';
     ScheduleModule.forRoot(),
     PrismaModule,
     TenancyModule,
+    BrandingModule,
     RedisModule,
     AuthModule,
     UsersModule,
