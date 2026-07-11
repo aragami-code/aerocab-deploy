@@ -1214,6 +1214,8 @@ model Tenant {
 
   logoUrl           String?       @map("logo_url")
   primaryColor      String?       @map("primary_color")
+  accentColor       String?       @map("accent_color")
+  paletteId         String?       @map("palette_id")
   appNamePassenger  String?       @map("app_name_passenger")
   appNameDriver     String?       @map("app_name_driver")
   bundleIdPassenger String?       @map("bundle_id_passenger")
