@@ -1,9 +1,13 @@
 import { Module } from '@nestjs/common';
+import { PrismaModule } from '../database/prisma.module';
+import { RbacModule } from '../rbac/rbac.module';
 import { BrandingController } from './branding.controller';
+import { BrandingAdminController } from './branding-admin.controller';
 import { BrandingService } from './branding.service';
 
 @Module({
-  controllers: [BrandingController],
+  imports: [PrismaModule, RbacModule],
+  controllers: [BrandingController, BrandingAdminController],
   providers: [BrandingService],
   exports: [BrandingService],
 })
