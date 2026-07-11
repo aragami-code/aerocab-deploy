@@ -1,4 +1,4 @@
-import { Body, Controller, Patch, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Request, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, RolesGuard } from '../auth/guards';
 import { Roles } from '../auth/decorators';
 import { PermissionsGuard } from '../rbac/permissions.guard';
@@ -17,6 +17,12 @@ export class BrandingAdminController {
     private readonly branding: BrandingService,
     private readonly redis: RedisService,
   ) {}
+
+  @Get()
+  @RequirePermission('manage_branding')
+  async get(@Request() req: any) {
+    return this.branding.resolve(req.user.tenantId);
+  }
 
   @Patch()
   @RequirePermission('manage_branding')
