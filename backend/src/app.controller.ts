@@ -5,6 +5,7 @@ import { PrismaService } from './database/prisma.service';
 import { RedisService } from './redis/redis.service';
 import { AirportsService } from './airports/airports.service';
 import { SettingsService } from './settings/settings.service';
+import { BrandingService } from './branding/branding.service';
 import { JwtAuthGuard } from './auth/guards';
 import { extractCountryFromPhone } from './common/phone-country';
 
@@ -71,6 +72,7 @@ export class AppController {
     private readonly airports: AirportsService,
     private readonly settings: SettingsService,
     private readonly config: ConfigService,
+    private readonly branding: BrandingService,
   ) {}
 
   /**
@@ -107,10 +109,13 @@ export class AppController {
     // (UX : bloquer ARRIVAL/DEPARTURE si l'aéroport détecté n'est pas desservi).
     const operatedAirportCodes = operatedList.map((a) => a.iataCode);
 
+    const branding = await this.branding.resolve();
+
     const payload = {
       airports: airportList,
       operatedAirports: operatedAirportCodes,
       settings: publicSettings,
+      branding,
     };
 
     // Mettre en cache
